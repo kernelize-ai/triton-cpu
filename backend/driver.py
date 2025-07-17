@@ -3,6 +3,7 @@ import triton
 from triton.backends.driver import GPUDriver
 from triton.backends.compiler import GPUTarget
 
+
 def ty_to_cpp(ty):
     if ty[0] == '*':
         return "void*"
@@ -24,7 +25,9 @@ def ty_to_cpp(ty):
         "fp64": "double",
     }[ty]
 
+
 class NPULauncher(object):
+
     def __init__(self, src, metadata):
         constants = src.constants if hasattr(src, "constants") else dict()
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
@@ -32,10 +35,11 @@ class NPULauncher(object):
         signature = {idx: value for idx, value in src.signature.items()}
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
-        assert(False)         
+        assert (False)
+
 
 class NPUDriver(GPUDriver):
-    
+
     @staticmethod
     def is_active():
         try:

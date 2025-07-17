@@ -1,4 +1,3 @@
-
 from pdb import pm
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, npu
@@ -9,6 +8,7 @@ from typing import Dict
 from types import ModuleType
 import hashlib
 
+
 @dataclass(frozen=True)
 class NPUOptions:
     num_warps: int = 4
@@ -17,11 +17,12 @@ class NPUOptions:
     debug: bool = False
     backend_name: str = 'npu'
     sanitize_overflow: bool = True
-    
+
     def hash(self):
         hash_dict = dict(self.__dict__)
         key = "_".join([f"{name}-{val}" for name, val in sorted(hash_dict.items())])
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
 
 class NPUBackend(BaseBackend):
 
@@ -36,7 +37,7 @@ class NPUBackend(BaseBackend):
     def parse_options(self, options):
         args = {k: options[k] for k in NPUOptions.__dataclass_fields__.keys() if k in options if options[k] is not None}
         return NPUOptions(**args)
-    
+
     def pack_metadata(self, metadata):
         return (
             metadata.num_warps,
@@ -46,12 +47,12 @@ class NPUBackend(BaseBackend):
             metadata.cluster_dims[1],
             metadata.cluster_dims[2],
         )
-    
+
     def get_codegen_implementation(self, options):
         return dict()
 
     def get_module_map(self) -> Dict[str, ModuleType]:
-        # TODO 
+        # TODO
         return {"triton.language.extra.libdevice": None}
 
     def load_dialects(self, ctx):
@@ -74,16 +75,27 @@ class NPUBackend(BaseBackend):
         return mod
 
     @staticmethod
+    def make_ttgir(mod, metadata, options):
+        pm = ir.pass_manager(mod.context)
+        dump_enabled = pm.enable_debug()
+        passes.ttir.add_convert_to_ttgpuir(pm, "npu", 1, 1, 1)
+        pm.run(mod) 
+        return mod
+    
+    @staticmethod
     def make_llir(src, metadata, options):
         mod = src
         # Triton -> LLVM-IR (MLIR)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
-        # TODO: need triton to llvmir - can we do some simple convert triton to triton gpu? 
+        # TODO: need triton to llvmir - can we do some simple convert triton to triton gpu?
+        npu.passes.ttnpuir.add_to_llvmir(pm)
 
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
+        pm.run(mod)
+        return mod
 
     @staticmethod
     def make_asm(src, metadata, options):
@@ -93,18 +105,18 @@ class NPUBackend(BaseBackend):
 
     @staticmethod
     def make_library(src, metadata, options):
-        # TODO 
+        # TODO
         pass
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
             stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
         elif language == Language.GLUON:
             raise NotImplementedError("Gluon language support is not implemented for NPU backend")
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
-        stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
-        stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
-        
+        #stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
+        #stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
 
     @functools.lru_cache()
     def hash(self):
