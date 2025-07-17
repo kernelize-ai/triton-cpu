@@ -13,10 +13,9 @@
 namespace py = pybind11;
 
 void init_triton_npu_passes_ttgpuir(py::module &&m) {
-  m.def("add_to_llvmir",
-        [](mlir::PassManager &pm) {
-          pm.addPass(mlir::triton::createConvertTritonNPUToLLVMPass());
-        });
+  m.def("add_to_llvmir", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::createConvertTritonNPUToLLVMPass());
+  });
 }
 
 void init_triton_npu(py::module &&m) {

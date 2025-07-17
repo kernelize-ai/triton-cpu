@@ -7,17 +7,17 @@ namespace mlir::triton::NPU {
 
 class TargetInfo : public mlir::triton::TargetInfoBase {
 public:
-    TargetInfo() {}
+  TargetInfo() {}
 
-    bool supportMaximumMinimum() const override { 
-        // TODO
-        return true; 
-    }
+  bool supportMaximumMinimum() const override {
+    // TODO
+    return true;
+  }
 
-    Value getClusterCTAId(RewriterBase &rewriter, Location loc) const override;
+  Value getClusterCTAId(RewriterBase &rewriter, Location loc) const override;
 
-    Value ballot(RewriterBase &rewriter, Location loc, Type type,
-                 Value cmp) const override;
+  Value ballot(RewriterBase &rewriter, Location loc, Type type,
+               Value cmp) const override;
 
   void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     std::optional<Value> ctaId, Value val,
@@ -25,7 +25,7 @@ public:
   Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     std::optional<Value> ctaId, Type elemTy,
                     Value pred) const override;
-    
+
   bool canUseStMatrix(RankedTensorType tensorTy, ArrayRef<unsigned> repShape,
                       ArrayRef<unsigned> paddedRepShape,
                       ArrayRef<unsigned> order,
@@ -46,35 +46,32 @@ public:
   Value shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                    Value i) const override;
 
-  Value programId(RewriterBase &rewriter, Location loc,
-                          ModuleOp moduleOp, int axis) const override;
+  Value programId(RewriterBase &rewriter, Location loc, ModuleOp moduleOp,
+                  int axis) const override;
 
-  bool warpReduce(RewriterBase &rewriter, Location loc,
-                          SmallVector<Value> &acc, triton::ReduceOp op,
-                          unsigned numLaneToReduce,
-                          unsigned interleave) const override;
+  bool warpReduce(RewriterBase &rewriter, Location loc, SmallVector<Value> &acc,
+                  triton::ReduceOp op, unsigned numLaneToReduce,
+                  unsigned interleave) const override;
 
   std::string getMulhiFuncName(Type resultElementTy) const override;
 
   void printf(RewriterBase &rewriter, Value formatStrStart,
-                    int formatStrByteCount, ValueRange args,
-                    ArrayRef<bool> isSigned = {}) const override;
+              int formatStrByteCount, ValueRange args,
+              ArrayRef<bool> isSigned = {}) const override;
 
   void printf(RewriterBase &rewriter, StringRef msg, ValueRange args,
-                      ArrayRef<bool> isSigned = {}) const override;
+              ArrayRef<bool> isSigned = {}) const override;
 
-  void assertFail(RewriterBase &rewriter, Location loc,
-                          StringRef message, StringRef file, StringRef func,
-                          int line) const override;
+  void assertFail(RewriterBase &rewriter, Location loc, StringRef message,
+                  StringRef file, StringRef func, int line) const override;
 
   int getSharedAddressSpace() const override;
 
   int getAddressSpace(Attribute addressSpace) const override;
 
   bool supportVectorizedAtomics() const override;
-
 };
 
-}
+} // namespace mlir::triton::NPU
 
-#endif 
+#endif

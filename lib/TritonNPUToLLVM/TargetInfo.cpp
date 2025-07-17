@@ -100,21 +100,17 @@ void TargetInfo::printf(RewriterBase &rewriter, StringRef msg, ValueRange args,
 }
 
 void TargetInfo::assertFail(RewriterBase &rewriter, Location loc,
-                             StringRef message, StringRef file, StringRef func,
-                             int line) const {
+                            StringRef message, StringRef file, StringRef func,
+                            int line) const {
   llvm::report_fatal_error("assertFail not supported on NPU");
 }
 
-int TargetInfo::getSharedAddressSpace() const {
-    return 0;
-}
+int TargetInfo::getSharedAddressSpace() const { return 0; }
 
-int TargetInfo::getAddressSpace(Attribute addressSpace) const {
-    return 0;
-}
+int TargetInfo::getAddressSpace(Attribute addressSpace) const { return 0; }
 
 bool TargetInfo::supportVectorizedAtomics() const {
   return false; // NPU does not support vectorized atomics
 }
 
-}
+} // namespace mlir::triton::NPU

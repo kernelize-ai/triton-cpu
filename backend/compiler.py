@@ -79,9 +79,9 @@ class NPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         dump_enabled = pm.enable_debug()
         passes.ttir.add_convert_to_ttgpuir(pm, "npu", 1, 1, 1)
-        pm.run(mod) 
+        pm.run(mod)
         return mod
-    
+
     @staticmethod
     def make_llir(src, metadata, options):
         mod = src
