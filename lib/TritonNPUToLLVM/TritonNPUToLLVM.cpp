@@ -7,6 +7,8 @@
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Pass/Pass.h"
 
+#include "PatternTritonGPUOpToLLVM.h"
+
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 
@@ -85,6 +87,12 @@ struct ConvertTritonNPUToLLVM
 
     RewritePatternSet patterns(context);
     int benefit = patternBenefitPrioritizeOverLLVMConversions;
+    mlir::triton::populateConvertLayoutOpToLLVMPatterns(
+        typeConverter, targetInfo, patterns, benefit);
+    mlir::triton::populateElementwiseOpToLLVMPatterns(
+        typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
+    populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
+                                      axisInfoAnalysis, benefit);
     mlir::triton::populateReduceOpToLLVMPatterns(typeConverter, patterns,
                                                  targetInfo, benefit);
     mlir::triton::populateScanOpToLLVMPatterns(typeConverter, patterns,
@@ -109,7 +117,8 @@ struct ConvertTritonNPUToLLVM
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateMathToLLVMConversionPatterns(typeConverter, patterns);
 
-    // TODO: GPU to LLVM cpu thread id
+    mlir::triton::NPU::populateGPUtoLLVMConversionPatterns(typeConverter,
+                                                           patterns, benefit);
 
     // mlir::populateGpuToNVVMConversionPatterns(typeConverter, patterns);
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
