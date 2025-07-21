@@ -42,6 +42,7 @@ public:
     addLegalDialect<LLVM::LLVMDialect>();
     // addLegalDialect<NVVM::NVVMDialect>();
     // addLegalDialect<mlir::triton::nvgpu::NVGPUDialect>();
+    addLegalDialect<mlir::cf::ControlFlowDialect>();
     addIllegalDialect<triton::TritonDialect>();
     addIllegalDialect<triton::gpu::TritonGPUDialect>();
     // addIllegalDialect<triton::nvidia_gpu::TritonNvidiaGPUDialect>();
