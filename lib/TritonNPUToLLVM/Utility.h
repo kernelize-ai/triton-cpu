@@ -61,9 +61,8 @@ Block &createPredicatedBlock(RewriterBase &rewriter, Location loc, Value cond,
   return createPredicatedBlock(rewriter, loc, cond, {}, thenOpsFn);
 }
 
-}
-}
-}
-
+} // namespace NPU
+} // namespace triton
+} // namespace mlir
 
 #endif // TRITON_CONVERSION_TRITONNPU_TO_LLVM_UTILITY_H
