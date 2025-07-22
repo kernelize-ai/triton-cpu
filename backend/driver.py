@@ -1,7 +1,46 @@
+import functools
 import triton
+import os
+import tempfile
+from pathlib import Path
 
-from triton.backends.driver import GPUDriver
+from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
+
+dirname = os.path.dirname(os.path.realpath(__file__))
+include_dirs = [os.path.join(dirname, "include")]
+libdevice_dir = os.path.join(dirname, "lib")
+libraries = []
+
+
+@functools.lru_cache()
+def library_dirs():
+    return [libdevice_dir]
+
+
+class NpuUtils(object):
+
+    def __new__(cls):
+        if not hasattr(cls, 'instance'):
+            cls.instance = super(NpuUtils, cls).__new__(cls)
+        return cls.instance
+
+    def __init__(self):
+        pass
+
+    def load_binary(self, name, kernel, shared_mem, device):
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".so") as f:
+            f.write(kernel)
+            f.flush()
+            import ctypes
+            lib = ctypes.cdll.LoadLibrary(f.name)
+            fn_ptr = getattr(lib, name)
+            fn_ptr_as_void_p = ctypes.cast(fn_ptr, ctypes.c_void_p).value
+            # TODO: properly handle max number threads
+            return (lib, fn_ptr_as_void_p, 0, 0, 128)
+
+    def get_device_properties(self, *args):
+        return {"max_shared_mem": 0}
 
 
 def ty_to_cpp(ty):
@@ -38,7 +77,7 @@ class NPULauncher(object):
         assert (False)
 
 
-class NPUDriver(GPUDriver):
+class NPUDriver(DriverBase):
 
     @staticmethod
     def is_active():
@@ -50,9 +89,14 @@ class NPUDriver(GPUDriver):
             return False
 
     def __init__(self):
+        self.utils = NpuUtils()
         import torch
-        self.get_current_device = torch.cpu.current_device
         self.get_current_stream = lambda idx: torch.cpu.Stream()
+        self.launcher_cls = NPULauncher
+
+    def get_current_device(self):
+        import torch
+        return torch.cpu.current_device()
 
     def map_python_to_cpp_type(self, ty: str) -> str:
         return ty_to_cpp(ty)

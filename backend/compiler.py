@@ -1,12 +1,15 @@
+from importlib.metadata import metadata
 import tempfile
 import functools
 import hashlib
 import re
+import os
 from pathlib import Path
 
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, npu
 from triton import knobs
+from triton.runtime.build import _build
 
 from dataclasses import dataclass
 from typing import Dict
@@ -38,7 +41,7 @@ class NPUBackend(BaseBackend):
 
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
-        self.binary_ext = "npubin"
+        self.binary_ext = "so"
 
     def parse_options(self, options):
         args = {'arch': npu.get_processor_name()}
@@ -132,6 +135,7 @@ class NPUBackend(BaseBackend):
         names = re.findall(r"define void @([a-zA-Z_][a-zA-Z0-9_]*)", src)
         assert len(names) == 1
         metadata["name"] = names[0]
+        metadata["shared"] = 0
 
         flags = []
         return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
@@ -142,7 +146,12 @@ class NPUBackend(BaseBackend):
         with tempfile.TemporaryDirectory() as tmpdir:
             asm_path = os.path.join(tmpdir, "kernel.s")
             Path(asm_path).write_text(src)
-            # TODO rest
+            lib_dirs = []
+            libs = []
+            include_dirs = []
+            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs)
+            with open(so, "rb") as f:
+                return f.read()
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
