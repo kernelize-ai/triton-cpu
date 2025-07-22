@@ -90,8 +90,10 @@ struct ConvertTritonNPUToLLVM
     int benefit = patternBenefitPrioritizeOverLLVMConversions;
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
-    mlir::triton::populateElementwiseOpToLLVMPatterns(
+
+    mlir::triton::NPU::populateElementwiseOpToLLVMPatterns(
         typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
+
     populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
                                       axisInfoAnalysis, benefit);
     mlir::triton::populateReduceOpToLLVMPatterns(typeConverter, patterns,
@@ -121,7 +123,6 @@ struct ConvertTritonNPUToLLVM
     mlir::triton::NPU::populateGPUtoLLVMConversionPatterns(typeConverter,
                                                            patterns, benefit);
 
-    // mlir::populateGpuToNVVMConversionPatterns(typeConverter, patterns);
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
     mlir::triton::populateViewOpToLLVMPatterns(typeConverter, patterns,
                                                benefit);
