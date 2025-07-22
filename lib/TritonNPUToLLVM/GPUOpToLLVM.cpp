@@ -2,6 +2,8 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+
 #include "PatternTritonGPUOpToLLVM.h"
 
 using namespace mlir;
@@ -23,7 +25,7 @@ public:
     llvm::errs() << "threadIdOp: " << threadIdOp << "\n";
     // TODO: do this properly
     rewriter.replaceOpWithNewOp<LLVM::ConstantOp>(
-        threadIdOp, threadIdOp.getType(), rewriter.getI32IntegerAttr(0));
+        threadIdOp, i32_ty, rewriter.getI32IntegerAttr(0));
     return success();
   }
 };
