@@ -1,12 +1,14 @@
 from pdb import pm
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, npu
+from triton import knobs
 
 from dataclasses import dataclass
 import functools
 from typing import Dict
 from types import ModuleType
 import hashlib
+import re
 
 
 @dataclass(frozen=True)
@@ -15,6 +17,8 @@ class NPUOptions:
     num_ctas: int = 1
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
+    arch: str = None
+    enable_fp_fusion: bool = True
     backend_name: str = 'npu'
     sanitize_overflow: bool = True
 
@@ -35,7 +39,14 @@ class NPUBackend(BaseBackend):
         self.binary_ext = "npubin"
 
     def parse_options(self, options):
-        args = {k: options[k] for k in NPUOptions.__dataclass_fields__.keys() if k in options if options[k] is not None}
+        args = {'arch': npu.get_processor_name()}
+        if "enable_fp_fusion" not in options:
+            args["enable_fp_fusion"] = knobs.language.default_fp_fusion
+        args.update(
+            {k: options[k]
+             for k in NPUOptions.__dataclass_fields__.keys()
+             if k in options if options[k] is not None})
+
         return NPUOptions(**args)
 
     def pack_metadata(self, metadata):
@@ -94,14 +105,35 @@ class NPUBackend(BaseBackend):
 
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
+
+        passes.convert.add_cf_to_llvmir(pm)
+        passes.convert.add_arith_to_llvmir(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_symbol_dce(pm)
         pm.run(mod)
-        return mod
+
+        # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
+        llvm.init_targets()
+        context = llvm.context()
+        llvm_mod = llvm.to_module(mod, context)
+        npu.attach_target_triple(llvm_mod, npu.get_default_target_triple())
+        target_features = ''
+        llvm.attach_datalayout(llvm_mod, npu.get_default_target_triple(), options.arch, target_features)
+
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
+
+        return str(llvm_mod)
 
     @staticmethod
     def make_asm(src, metadata, options):
-        # TODO
-        pass
-        # return llvm.translate_to_host_asm(src, options.enable_fp_fusion, options.enable_fast_math)
+        names = re.findall(r"define void @([a-zA-Z_][a-zA-Z0-9_]*)", src)
+        assert len(names) == 1
+        metadata["name"] = names[0]
+
+        flags = []
+        return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
+                                     options.enable_fp_fusion, False)
 
     @staticmethod
     def make_library(src, metadata, options):
@@ -115,7 +147,7 @@ class NPUBackend(BaseBackend):
         elif language == Language.GLUON:
             raise NotImplementedError("Gluon language support is not implemented for NPU backend")
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
-        #stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
+        stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
         #stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
 
     @functools.lru_cache()
