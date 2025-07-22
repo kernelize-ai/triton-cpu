@@ -15,6 +15,45 @@ using ::mlir::triton::gpu::getTotalElemsPerThread;
 
 namespace {
 
+Value maybeAnd(RewriterBase &rewriter, Location loc, Value a, Value b) {
+  auto tb = TritonLLVMOpBuilder(loc, rewriter);
+  if (a && b) {
+    return tb.and_(a, b);
+  }
+  return a ? a : b;
+}
+
+// Return a predicate that is true only if the current thread holds unique data,
+// according to freeVarsMask. If no predicate is required, return true.
+Value emitRedundantThreadPredicate(
+    const llvm::MapVector<StringAttr, int32_t> &freeVarMasks,
+    ConversionPatternRewriter &rewriter, Location loc,
+    const NPU::TargetInfo &targetInfo) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto ctx = rewriter.getContext();
+  auto kLane = str_attr("lane");
+  auto kWarp = str_attr("warp");
+  auto kBlock = str_attr("block");
+
+  Value zero = b.i32_val(0);
+  auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+  Value blockId = freeVarMasks.lookup(kBlock) == 0
+                      ? zero
+                      : targetInfo.getClusterCTAId(rewriter, loc);
+
+  Value pred = b.true_val();
+  auto dimNames = {kLane, kWarp, kBlock};
+  auto dimIds = {laneId, warpId, blockId};
+  for (auto [dimName, dimId] : llvm::zip(dimNames, dimIds)) {
+    int32_t mask = freeVarMasks.lookup(dimName);
+    if (mask != 0) {
+      auto dimPred = b.icmp_eq(b.and_(dimId, b.i32_val(mask)), zero);
+      pred = b.and_(pred, dimPred);
+    }
+  }
+  return pred;
+}
+
 unsigned getCanonicalIndex(unsigned index, unsigned freeVarMask) {
   return index & ~freeVarMask;
 }
@@ -226,12 +265,118 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
   }
 };
 
+struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
+                           public LoadStoreConversionBase {
+  StoreOpConversion(LLVMTypeConverter &converter,
+                    const NPU::TargetInfo &targetInfo,
+                    ModuleAxisInfoAnalysis &axisAnalysisPass,
+                    PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::StoreOp>(converter, benefit),
+        LoadStoreConversionBase(targetInfo, axisAnalysisPass) {}
+
+  LogicalResult
+  matchAndRewrite(triton::StoreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ctx = getContext();
+    auto loc = op->getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto typeConverter = getTypeConverter();
+
+    // original values
+    Value ptr = op.getPtr();
+    Value value = op.getValue();
+    Value mask = op.getMask();
+    LDBG("Lower StoreOp for " << ptr);
+
+    // adaptor values
+    assert(!isTensorPointerType(ptr.getType()) &&
+           "Cannot convert store with a tensor pointer into LLVM; "
+           "this case should be transformed to normal store before lowering");
+    Value llPtr = adaptor.getPtr();
+    Value llValue = adaptor.getValue();
+    Value llMask = adaptor.getMask();
+
+    auto valueTy = value.getType();
+    Type valueElemTy =
+        typeConverter->convertType(getElementTypeOrSelf(valueTy));
+
+    // Determine the vectorization size
+    unsigned vec = getVectorSize(ptr);
+    unsigned elemsPerThread = getTotalElemsPerThread(ptr.getType());
+
+    auto ptrElems = unpackLLElements(loc, llPtr, rewriter);
+    auto valueElems = unpackLLElements(loc, llValue, rewriter);
+    assert(ptrElems.size() == valueElems.size());
+
+    unsigned vecOrig = vec;
+    SmallVector<Value> maskElems;
+    if (llMask) {
+      Value mask = op.getMask();
+      maskElems = unpackLLElements(loc, llMask, rewriter);
+      assert(valueElems.size() == maskElems.size());
+
+      unsigned maskAlign = getMaskAlignment(mask);
+      vec = std::min(vec, maskAlign);
+    }
+
+    const size_t valueElemNBits =
+        std::max<int>(8, valueElemTy.getIntOrFloatBitWidth());
+    const size_t valueElemNBytes = valueElemNBits / 8;
+    auto vecTy = LLVM::getVectorType(valueElemTy, vec);
+    llvm::errs() << "vecTy = " << vecTy << "\n";
+
+    const int numVecs = elemsPerThread / vec;
+    auto freeVarMasks = getFreeVariableMasks(valueTy);
+    Value threadPred =
+        emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
+    uint32_t regMask = freeVarMasks[str_attr("reg")];
+    llvm::errs() << "vec = " << vec << "\n";
+    llvm::errs() << "elemsPerThread = " << elemsPerThread << "\n";
+    for (size_t vecStart = 0; vecStart < elemsPerThread; vecStart += vec) {
+      if (!isCanonicalIndex(vecStart, regMask)) {
+        // Don't emit store ops for redundant elements within a thread
+        continue;
+      }
+
+      Value pred =
+          llMask ? b.and_(threadPred, maskElems[vecStart]) : threadPred;
+
+      const size_t maxWordWidth = std::max<size_t>(32, valueElemNBits);
+      const size_t totalWidth = valueElemNBits * vec;
+      const size_t width = std::min(totalWidth, maxWordWidth);
+      const size_t nWords = std::max<size_t>(1, totalWidth / width);
+      const size_t wordNElems = width / valueElemNBits;
+      assert(wordNElems * nWords * numVecs == elemsPerThread);
+
+      // predicated store
+      Value storeVal = packElementRangeIntoVector(
+          rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
+          valueElems, vecStart);
+      for (size_t ii = 0; ii < vec; ++ii) {
+        // create a predicated load block for each scalar element
+        Value vecIdx = createIndexAttrConstant(
+            rewriter, loc, getTypeConverter()->getIndexType(), ii);
+        Block &endBlock = NPU::createPredicatedBlock(
+            rewriter, loc, pred, [&]() -> ArrayRef<Value> {
+              Value loadAddr = b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1));
+              uint32_t alignment = nWords * width / 8;
+              b.store(b.extract_element(valueElemTy, storeVal, vecIdx),
+                      loadAddr, alignment);
+              return {};
+            });
+      }
+    }
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::NPU::populateLoadStoreOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
     RewritePatternSet &patterns, ModuleAxisInfoAnalysis &axisInfoAnalysis,
     PatternBenefit benefit) {
-  patterns.add<LoadOpConversion>(typeConverter, targetInfo, axisInfoAnalysis,
-                                 benefit);
+  patterns.add<LoadOpConversion, StoreOpConversion>(typeConverter, targetInfo,
+                                                    axisInfoAnalysis, benefit);
 }
