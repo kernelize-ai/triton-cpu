@@ -1,14 +1,16 @@
-from pdb import pm
+import tempfile
+import functools
+import hashlib
+import re
+from pathlib import Path
+
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, npu
 from triton import knobs
 
 from dataclasses import dataclass
-import functools
 from typing import Dict
 from types import ModuleType
-import hashlib
-import re
 
 
 @dataclass(frozen=True)
@@ -137,8 +139,10 @@ class NPUBackend(BaseBackend):
 
     @staticmethod
     def make_library(src, metadata, options):
-        # TODO
-        pass
+        with tempfile.TemporaryDirectory() as tmpdir:
+            asm_path = os.path.join(tmpdir, "kernel.s")
+            Path(asm_path).write_text(src)
+            # TODO rest
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
@@ -148,7 +152,7 @@ class NPUBackend(BaseBackend):
             raise NotImplementedError("Gluon language support is not implemented for NPU backend")
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
         stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
-        #stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
+        stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
 
     @functools.lru_cache()
     def hash(self):
