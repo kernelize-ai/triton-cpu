@@ -3,6 +3,7 @@ import triton
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from triton.runtime.build import compile_module_from_src
@@ -300,6 +301,61 @@ class NPULauncher(object):
         self.launch(gridX, gridY, gridZ, stream, function, *args)
 
 
+class CPUDeviceInterface:
+
+    class HooksTimeAccessor:
+
+        def __init__(self, di):
+            self.di = di
+            self.record_idx = 0
+
+        def elapsed_time(self, end_event) -> float:
+            total_time = 0
+            for i in range(self.record_idx, end_event.record_idx):
+                total_time += self.di.kernel_times[i]
+            return total_time * 1000
+
+        def record(self):
+            self.record_idx = len(self.di.kernel_times)
+
+    class TimerEvent:
+
+        def __init__(self):
+            self.timer = 0
+
+        def elapsed_time(self, end_event) -> float:
+            return (end_event.timer - self.timer) * 1000
+
+        def record(self):
+            self.timer = time.perf_counter()
+
+    def __init__(self):
+        self.kernel_times = []
+        self.last_start = 0
+        self.use_hooks = False
+        triton.compiler.CompiledKernel.launch_enter_hook = None
+        triton.compiler.CompiledKernel.launch_exit_hook = None
+
+    def enable_hook_timing(self):
+        self.use_hooks = True
+        triton.compiler.CompiledKernel.launch_enter_hook = lambda arg: self._enter_hook()
+        triton.compiler.CompiledKernel.launch_exit_hook = lambda arg: self._exit_hook()
+
+    def synchronize(self):
+        pass
+
+    def _enter_hook(self):
+        self.last_start = time.perf_counter()
+
+    def _exit_hook(self):
+        self.kernel_times.append(time.perf_counter() - self.last_start)
+
+    def Event(self, enable_timing=True):
+        if self.use_hooks:
+            return CPUDeviceInterface.HooksTimeAccessor(self)
+        return CPUDeviceInterface.TimerEvent()
+
+
 class NPUDriver(DriverBase):
 
     @staticmethod
@@ -316,6 +372,9 @@ class NPUDriver(DriverBase):
         import torch
         self.get_current_stream = lambda idx: torch.cpu.Stream()
         self.launcher_cls = NPULauncher
+
+    def get_device_interface(self):
+        return CPUDeviceInterface()
 
     def get_current_device(self):
         return 0
@@ -335,3 +394,15 @@ class NPUDriver(DriverBase):
     def get_benchmarker(self):
         from triton.testing import do_bench
         return do_bench
+
+    def get_empty_cache_for_benchmark(self):
+        import torch
+
+        # We maintain a buffer of 256 MB that we clear
+        # before each kernel call to make sure that the L2 cache
+        # doesn't contain any input data before the run
+        cache_size = 256 * 1024 * 1024
+        return torch.empty(int(cache_size // 4), dtype=torch.int, device='cpu')
+
+    def clear_cache(self, cache):
+        cache.zero_()
