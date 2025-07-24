@@ -1,16 +1,18 @@
 import functools
 import triton
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
+from triton.runtime.build import compile_module_from_src
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 
 dirname = os.path.dirname(os.path.realpath(__file__))
 include_dirs = [os.path.join(dirname, "include")]
 libdevice_dir = os.path.join(dirname, "lib")
-libraries = []
+libraries = ['python3.11']  # TODO: for python installed via homebrew only - remove!
 
 
 @functools.lru_cache()
@@ -57,12 +59,229 @@ def ty_to_cpp(ty):
         "u16": "uint16_t",
         "u32": "uint32_t",
         "u64": "uint64_t",
-        "fp16": "double",
-        "bf16": "double",
-        "fp32": "double",
-        "f32": "double",
+        "fp16": "float",
+        "bf16": "float",
+        "fp32": "float",
+        "f32": "float",
         "fp64": "double",
     }[ty]
+
+
+def make_launcher(constants, signature):
+
+    def _flatten_signature(sig, output):
+        # Flatten tuples
+        if isinstance(sig, tuple):
+            for x in sig:
+                _flatten_signature(x, output)
+        else:
+            output.append(sig)
+
+    def _extracted_type(ty):
+        if isinstance(ty, tuple):
+            val = ','.join(map(_extracted_type, ty))
+            return f"[{val}]"
+        if ty[0] == '*':
+            return "PyObject*"
+        if ty in ("constexpr", "nvTmaDesc"):
+            return "PyObject*"
+        return ty_to_cpp(ty)
+
+    def format_of(ty):
+        if isinstance(ty, tuple):
+            val = ''.join(map(format_of, ty))
+            return f"({val})"
+        if ty[0] == '*':
+            return "O"
+        if ty in ("constexpr"):
+            return "O"
+        if ty.startswith("tensordesc"):
+            return "O"
+        return {
+            "float": "f",
+            "double": "d",
+            "long": "l",
+            "int8_t": "b",
+            "int16_t": "h",
+            "int32_t": "i",
+            "int64_t": "L",
+            "uint8_t": "B",
+            "uint16_t": "H",
+            "uint32_t": "I",
+            "uint64_t": "K",
+        }[ty_to_cpp(ty)]
+
+    args_format = ''.join([format_of(ty) for ty in signature.values()])
+    format = "iiiOKOOOO" + args_format
+
+    flat_signature = []
+    for sig in signature.values():
+        _flatten_signature(sig, flat_signature)
+    signature = {i: s for i, s in enumerate(flat_signature)}
+    args_list = ', ' + ', '.join(f"&_arg{i}" for i, ty in signature.items()) if len(signature) > 0 else ''
+
+    arg_decls = ', '.join(f"{ty_to_cpp(ty)} arg{i}" for i, ty in signature.items() if ty != "constexpr")
+    internal_args_list = []
+    for i, ty in signature.items():
+        if ty[0] == "*":
+            internal_args_list.append(f"ptr_info{i}.dev_ptr")
+        elif ty != "constexpr":
+            internal_args_list.append(f"_arg{i}")
+    arg_types = ', '.join(f"{ty_to_cpp(ty)}" for ty in signature.values() if ty != "constexpr")
+
+    # generate glue code
+    newline = '\n  '
+    ptr_decls = [
+        f"DevicePtrInfo ptr_info{i} = getPointer(_arg{i}, {i}); if (!ptr_info{i}.valid) return NULL;"
+        for i, ty in signature.items()
+        if ty[0] == "*"
+    ]
+    # TODO: float_storage_decls?
+    params = [f"&arg{i}" for i, ty in signature.items() if ty != "constexpr"]
+
+    src = f"""
+#include <stdbool.h>
+#include <Python.h>
+
+typedef void(*kernel_ptr_t)({arg_types});
+
+static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+    size_t N = gridX * gridY * gridZ;
+    printf("Grid: %ld\\n", N);
+    //if (N == 1) {{
+
+      // TODO: take grid indices and sizes as kernel parameters
+      (*kernel_ptr)({', '.join(f"arg{i}" for i, ty in signature.items() if ty != "constexpr") if len(signature) > 0 else ''});
+      return;
+    //}}
+}}
+
+typedef struct _DevicePtrInfo {{
+    void* dev_ptr;
+    bool valid;
+}} DevicePtrInfo;
+
+static inline DevicePtrInfo getPointer(PyObject *obj, int idx) {{
+  DevicePtrInfo ptr_info;
+  ptr_info.dev_ptr = 0;
+  ptr_info.valid = true;
+  if (PyLong_Check(obj)) {{
+    ptr_info.dev_ptr = (void*)PyLong_AsUnsignedLongLong(obj);
+    return ptr_info;
+  }}
+  if (obj == Py_None) {{
+    // valid nullptr
+    return ptr_info;
+  }}
+  PyObject *ptr = PyObject_GetAttrString(obj, "data_ptr");
+  PyErr_Print();
+  if(ptr){{
+    PyObject *empty_tuple = PyTuple_New(0);
+    PyObject *ret = PyObject_Call(ptr, empty_tuple, NULL);
+    Py_DECREF(empty_tuple);
+    Py_DECREF(ptr);
+    if (!PyLong_Check(ret)) {{
+      PyErr_SetString(PyExc_TypeError, "data_ptr method of Pointer object must return 64-bit int");
+      ptr_info.valid = false;
+      return ptr_info;
+    }}
+    ptr_info.dev_ptr = (void*)PyLong_AsUnsignedLongLong(ret);
+    if(!ptr_info.dev_ptr)
+      return ptr_info;
+    // TODO: validate the ptr?
+    Py_DECREF(ret);  // Thanks ChatGPT!
+    return ptr_info;
+  }}
+
+  PyErr_Format(PyExc_TypeError, "Pointer argument (at %d) must be either uint64 or have data_ptr method", idx);
+  ptr_info.valid = false;
+  return ptr_info;
+}}
+
+static PyObject* launch(PyObject* self, PyObject* args) {{
+  int gridX, gridY, gridZ;
+  uint64_t _stream;
+  void* _function;
+  PyObject *launch_enter_hook = NULL;
+  PyObject *launch_exit_hook = NULL;
+  PyObject *kernel_metadata = NULL;
+  PyObject *launch_metadata = NULL;
+  PyObject *global_scratch_obj = NULL; // UNUSED in NPU backend
+  {newline.join([f"{_extracted_type(ty)} _arg{i};" for i, ty in signature.items()])}
+  if(!PyArg_ParseTuple(args, \"{format}\", &gridX, &gridY, &gridZ,
+                                           &_stream, &_function,
+                                           &kernel_metadata, &launch_metadata,
+                                           &launch_enter_hook, &launch_exit_hook{args_list})) {{
+    return NULL;
+  }}
+
+  printf("arg 3: %d\\n", _arg3);
+
+  kernel_ptr_t kernel_ptr = (kernel_ptr_t)(_function);
+
+   // Extract num_threads metadata.
+  int num_threads = 0;
+  if (PyObject_HasAttrString(kernel_metadata, "num_threads")) {{
+    PyObject *num_threads_attr = PyObject_GetAttrString(kernel_metadata, "num_threads");
+    assert(PyLong_Check(num_threads_attr));
+    num_threads = PyLong_AsLong(num_threads_attr);
+  }}
+
+  // extract launch metadata
+  if (launch_enter_hook != Py_None){{
+    PyObject* args = Py_BuildValue("(O)", launch_metadata);
+    PyObject* ret = PyObject_CallObject(launch_enter_hook, args);
+    Py_DECREF(args);
+    if (!ret)
+      return NULL;
+  }}
+
+  {newline.join(ptr_decls)}
+  _launch(gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  if (PyErr_Occurred()) {{
+    return NULL;
+  }}
+
+  if(launch_exit_hook != Py_None){{
+    PyObject* args = Py_BuildValue("(O)", launch_metadata);
+    PyObject* ret = PyObject_CallObject(launch_exit_hook, args);
+    Py_DECREF(args);
+    if (!ret)
+      return NULL;
+  }}
+
+  if (PyErr_Occurred()) {{
+    return NULL;
+  }}
+
+  // return None
+  Py_INCREF(Py_None);
+  return Py_None;
+}}
+
+static PyMethodDef ModuleMethods[] = {{
+  {{"launch", launch, METH_VARARGS, "Entry point for all kernels with this signature"}},
+  {{NULL, NULL, 0, NULL}} // sentinel
+}};
+
+static struct PyModuleDef ModuleDef = {{
+  PyModuleDef_HEAD_INIT,
+  \"__triton_launcher\",
+  NULL, //documentation
+  -1, //size
+  ModuleMethods
+}};
+
+PyMODINIT_FUNC PyInit___triton_launcher(void) {{
+  PyObject *m = PyModule_Create(&ModuleDef);
+  if(m == NULL) {{
+    return NULL;
+  }}
+  PyModule_AddFunctions(m, ModuleMethods);
+  return m;
+}}
+"""
+    return src
 
 
 class NPULauncher(object):
@@ -72,9 +291,13 @@ class NPULauncher(object):
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
+        src = make_launcher(constants, signature)
+        mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
+                                      include_dirs=include_dirs, libraries=libraries)
+        self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
-        assert (False)
+        self.launch(gridX, gridY, gridZ, stream, function, *args)
 
 
 class NPUDriver(DriverBase):
@@ -95,8 +318,7 @@ class NPUDriver(DriverBase):
         self.launcher_cls = NPULauncher
 
     def get_current_device(self):
-        import torch
-        return torch.cpu.current_device()
+        return 0
 
     def map_python_to_cpp_type(self, ty: str) -> str:
         return ty_to_cpp(ty)
