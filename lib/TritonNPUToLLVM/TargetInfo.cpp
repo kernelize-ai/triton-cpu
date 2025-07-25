@@ -26,7 +26,7 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               std::optional<Value> ctaId, Type elemTy,
-                              Value pred) const {
+                              Value pred, Operation *localLoadOp) const {
   llvm::report_fatal_error(
       "NPU does not support cross-CTA shared memory transfers");
 }
