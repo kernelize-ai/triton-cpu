@@ -138,23 +138,49 @@ def make_launcher(constants, signature):
         if ty[0] == "*"
     ]
     # TODO: float_storage_decls?
-    params = [f"&arg{i}" for i, ty in signature.items() if ty != "constexpr"]
+    kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
+
+    has_spmd_args = True
+    if has_spmd_args:
+        kernel_params.extend(["x", "y", "z", "gridX", "gridY", "gridZ"])
+        arg_types += ', '
+        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif // _OPENMP
 
 typedef void(*kernel_ptr_t)({arg_types});
 
 static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
+    int x = 0;
+    int y = 0;
+    int z = 0;
     printf("Grid: %ld\\n", N);
-    //if (N == 1) {{
-
+    if (N == 1) {{
       // TODO: take grid indices and sizes as kernel parameters
-      (*kernel_ptr)({', '.join(f"arg{i}" for i, ty in signature.items() if ty != "constexpr") if len(signature) > 0 else ''});
+      (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
       return;
-    //}}
+    }}
+
+    int maxThreads = 1;
+#ifdef _OPENMP
+    maxThreads = omp_get_max_threads();
+#endif // _OPENMP
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(maxThreads)
+#endif // _OPENMP
+ for (size_t i = 0; i < N; ++i) {{
+     // TODO: convert grid index to grid coordinates
+    (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+ }}
+
+
 }}
 
 typedef struct _DevicePtrInfo {{
@@ -215,8 +241,6 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
                                            &launch_enter_hook, &launch_exit_hook{args_list})) {{
     return NULL;
   }}
-
-  printf("arg 3: %d\\n", _arg3);
 
   kernel_ptr_t kernel_ptr = (kernel_ptr_t)(_function);
 

@@ -78,7 +78,8 @@ struct ConvertTritonNPUToLLVM
     // Lower functions
     TritonLLVMFunctionConversionTarget funcTarget(*context);
     RewritePatternSet funcPatterns(context);
-    mlir::triton::populateFuncOpConversionPattern(
+
+    mlir::triton::NPU::populateFuncOpConversionPattern(
         typeConverter, funcPatterns, targetInfo, patternBenefitDefault);
     if (failed(
             applyPartialConversion(mod, funcTarget, std::move(funcPatterns))))
