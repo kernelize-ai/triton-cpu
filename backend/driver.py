@@ -18,7 +18,7 @@ libraries = ['python3.11']  # TODO: for python installed via homebrew only - rem
 
 @functools.lru_cache()
 def library_dirs():
-    return [libdevice_dir]
+    return []
 
 
 class NpuUtils(object):
@@ -142,7 +142,7 @@ def make_launcher(constants, signature):
 
     has_spmd_args = True
     if has_spmd_args:
-        kernel_params.extend(["x", "y", "z", "gridX", "gridY", "gridZ"])
+        kernel_params.extend(["coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
         arg_types += ', '
         arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
@@ -155,14 +155,24 @@ def make_launcher(constants, signature):
 
 typedef void(*kernel_ptr_t)({arg_types});
 
+typedef struct _GridCoordinate {{
+    int x;
+    int y;
+    int z;
+}} GridCoordinate;
+
+static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gridZ) {{
+    GridCoordinate coord;
+    coord.z = idx / (gridX * gridY);
+    coord.y = (idx % (gridX * gridY)) / gridX;
+    coord.x = (idx % gridX);
+    return coord;
+}}
+
 static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
-    int x = 0;
-    int y = 0;
-    int z = 0;
-    printf("Grid: %ld\\n", N);
     if (N == 1) {{
-      // TODO: take grid indices and sizes as kernel parameters
+      GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
       (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
       return;
     }}
@@ -176,7 +186,7 @@ static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', 
 #pragma omp parallel for schedule(static) num_threads(maxThreads)
 #endif // _OPENMP
  for (size_t i = 0; i < N; ++i) {{
-     // TODO: convert grid index to grid coordinates
+    GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
     (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
  }}
 
