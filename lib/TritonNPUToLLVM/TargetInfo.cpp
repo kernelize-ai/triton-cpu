@@ -1,6 +1,8 @@
 #include "TargetInfo.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 
+#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+
 using namespace mlir;
 
 namespace mlir::triton::NPU {
@@ -70,9 +72,7 @@ Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
 
 Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
                             ModuleOp moduleOp, int axis) const {
-  return rewriter.create<mlir::LLVM::ConstantOp>(
-      loc, rewriter.getI32Type(),
-      rewriter.getIntegerAttr(rewriter.getI32Type(), 0));
+  return rewriter.create<mlir::triton::cpu::BlockIdOp>(loc, axis);
 }
 
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,

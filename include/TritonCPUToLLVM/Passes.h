@@ -5,7 +5,6 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-
 namespace mlir {
 namespace triton {
 namespace cpu {
@@ -18,10 +17,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createMemoryOpToLLVMPass();
 #define GEN_PASS_REGISTRATION
 #include "npu/include/TritonCPUToLLVM/Passes.h.inc"
 
-}
-}
-}
-
-
+} // namespace cpu
+} // namespace triton
+} // namespace mlir
 
 #endif

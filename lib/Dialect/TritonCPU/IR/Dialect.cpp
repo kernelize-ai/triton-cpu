@@ -1,9 +1,8 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
-#include "mlir/IR/DialectImplementation.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/DialectImplementation.h"
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
-
 
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.cpp.inc"
 
@@ -25,11 +24,11 @@ void TritonCPUDialect::printAttribute(::mlir::Attribute attr,
 }
 
 void TritonCPUDialect::initialize() {
-//   registerTypes();
+  //   registerTypes();
 
   addOperations<
 #define GET_OP_LIST
 #include "npu/include/Dialect/TritonCPU/IR/Ops.cpp.inc"
-// #include "npu/include/Dialect/TritonCPU/IR/OpsEnums.cpp.inc"
+      // #include "npu/include/Dialect/TritonCPU/IR/OpsEnums.cpp.inc"
       >();
 }

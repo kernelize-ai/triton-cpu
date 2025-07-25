@@ -3,5 +3,3 @@
 
 #define GET_OP_CLASSES
 #include "npu/include/Dialect/TritonCPU/IR/Ops.cpp.inc"
-
-

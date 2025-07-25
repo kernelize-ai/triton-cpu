@@ -1,7 +1,6 @@
 add_triton_library(TritonCPUToLLVM
-    MemoryOpToLLVM.cpp
-    TypeConverter.cpp 
-    
+    TypeConverter.cpp
+
     DEPENDS
     TritonCPUToLLVMConversionPassIncGen
 

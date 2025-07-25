@@ -2,28 +2,37 @@
 #define TRITONCPU_OPS
 
 include "TritonCPUDialect.td"
-include "mlir/Interfaces/SideEffectInterfaces.td" // NoMemoryEffect
+include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
 include "triton/Dialect/Triton/IR/TritonTypes.td"
+include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 
 class TTC_Op<string mnemonic, list<Trait> traits = []> :
     Op<TritonCPU_Dialect, mnemonic,
        !listconcat(traits, [])> {
 }
 
-def TTC_PtrToMemRefOp : TTC_Op<"ptr_to_memref", [NoMemoryEffect]> {
-  let summary = "Build a memref for a pointer.";
+def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
+  let summary = "Get the block ID.";
+
+  let arguments = (ins TT_ProgramDim:$axis);
+
+  let results = (outs Index:$blockId);
 
   let description = [{
-    Build memref with static shape, offset, strides, and specified base pointer.
+    Get the ID of the current block.
   }];
 
-  let arguments = (ins TT_Ptr:$src);
+  let builders = [
+    OpBuilder<(ins "int":$axis), [{
+      build($_builder, $_state, $_builder.getIndexType(), ProgramIDDimAttr::get($_builder.getContext(), ProgramIDDim(axis)));
+    }]>
+  ];
 
-  let results = (outs AnyStaticShapeMemRef:$result);
-
-  let hasCanonicalizer = 0;
-
-  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($result)";
+  let extraClassDeclaration = [{
+    int32_t getAxisAsInt() {
+      return static_cast<int32_t>(getAxis());
+    }
+  }];
 }
 
 #endif
