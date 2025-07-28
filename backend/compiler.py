@@ -149,7 +149,7 @@ class NPUBackend(BaseBackend):
             lib_dirs = []
             libs = []
             include_dirs = []
-            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs)
+            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, [])
             with open(so, "rb") as f:
                 return f.read()
 
