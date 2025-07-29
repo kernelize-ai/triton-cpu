@@ -26,16 +26,8 @@ public:
                     std::optional<Value> ctaId, Type elemTy, Value pred,
                     Operation *localLoadOp = nullptr) const override;
 
-  bool canUseStMatrix(RankedTensorType tensorTy, ArrayRef<unsigned> repShape,
-                      ArrayRef<unsigned> paddedRepShape,
-                      ArrayRef<unsigned> order,
-                      int swizzleByteSize) const override;
-
   bool supportLdMatrix() const override { return false; }
   bool supportStMatrix() const override { return false; }
-
-  void storeMatrixShared(RewriterBase &rewriter, Location loc, Value ptr,
-                         Value val) const override;
 
   Value shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                    int i) const override;

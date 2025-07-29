@@ -33,19 +33,6 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
       "NPU does not support cross-CTA shared memory transfers");
 }
 
-bool TargetInfo::canUseStMatrix(RankedTensorType tensorTy,
-                                ArrayRef<unsigned> repShape,
-                                ArrayRef<unsigned> paddedRepShape,
-                                ArrayRef<unsigned> order,
-                                int swizzleByteSize) const {
-  return false;
-}
-
-void TargetInfo::storeMatrixShared(RewriterBase &rewriter, Location loc,
-                                   Value ptr, Value val) const {
-  llvm::report_fatal_error("NPU does not support stmatrix");
-}
-
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
   llvm::report_fatal_error("shuffleXor not supported on NPU");
