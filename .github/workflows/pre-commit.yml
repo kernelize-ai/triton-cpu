@@ -51,7 +51,8 @@ jobs:
         working-directory: ./triton/third_party/npu
         run: |
           python3 -m pip install --upgrade pre-commit
-          python3 -m pre_commit run --all-files --verbose
+          # Skip mypy check as the NPU plugin does not have mypy files with type annotations.
+          SKIP=mypy python3 -m pre_commit run --all-files --verbose
       - name: Print diff of changes if pre-commit failed
         if: failure()
         working-directory: ./triton/third_party/npu
