@@ -46,7 +46,7 @@ jobs:
         working-directory: ./triton/third_party/npu
         run: |
           python3 -m pip install --upgrade pre-commit
-          python3 -m pre_commit run --all-files --verbose
+          python3 -m pre_commit run --config ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml --all-files --verbose
       - name: Print diff of changes if pre-commit failed
         if: failure()
         working-directory: ./triton/third_party/npu
