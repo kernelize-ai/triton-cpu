@@ -1,5 +1,3 @@
-#include "TargetInfo.h"
-#include "TritonNPUToLLVM/Passes.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
@@ -8,6 +6,8 @@
 #include "mlir/Pass/Pass.h"
 
 #include "PatternTritonGPUOpToLLVM.h"
+#include "TargetInfo.h"
+#include "npu/include/TritonNPUToLLVM/Passes.h"
 
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
@@ -17,7 +17,7 @@
 namespace mlir {
 namespace triton {
 #define GEN_PASS_DEF_CONVERTTRITONNPUTOLLVM
-#include "TritonNPUToLLVM/Passes.h.inc"
+#include "npu/include/TritonNPUToLLVM/Passes.h.inc"
 } // namespace triton
 } // namespace mlir
 
