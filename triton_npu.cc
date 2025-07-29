@@ -1,7 +1,7 @@
 // #include "TritonToTritonCPU/Passes.h"
 
-#include "TritonNPUToLLVM/Passes.h"
-#include "include/Dialect/TritonCPU/IR/Dialect.h"
+#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+#include "npu/include/TritonNPUToLLVM/Passes.h"
 
 #include "mlir/Pass/PassManager.h"
 // #include "mlir/Dialect/Vector/IR/VectorOps.h"
