@@ -24,6 +24,8 @@ jobs:
       PYTHON: "python3"
       CCACHE_COMPRESS: "true"
     steps:
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache
       - name: Checkout Triton upstream repo
         uses: actions/checkout@v4
         with:
