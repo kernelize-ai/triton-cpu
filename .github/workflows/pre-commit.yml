@@ -19,6 +19,14 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+      - name: Test dir listing
+        run: |
+          echo "Listing current directory:"
+          ls -la
+          echo "Listing Triton directory:"
+          ls -la triton
+          echo "Listing Github workspace directory:"
+          ls -la ${GITHUB_WORKSPACE}/
       - name: Compute hash of pre-commit config
         id: cache-key
         run: |
