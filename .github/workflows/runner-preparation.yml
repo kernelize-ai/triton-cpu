@@ -37,8 +37,7 @@ jobs:
         uses: tj-actions/changed-files@v46
         with:
           files: |
-            cmake/*.txt
-            cmake/*.json
+            triton.txt
       - name: Detect if enough time has passed since last post-submit run
         id: detect-time
         if: github.event_name == 'push'
