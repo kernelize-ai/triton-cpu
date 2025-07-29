@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import time
+import platform
 from pathlib import Path
 
 from triton.runtime.build import compile_module_from_src
@@ -13,7 +14,14 @@ from triton.backends.compiler import GPUTarget
 dirname = os.path.dirname(os.path.realpath(__file__))
 include_dirs = [os.path.join(dirname, "include")]
 libdevice_dir = os.path.join(dirname, "lib")
-libraries = ['python3.11']  # TODO: for python installed via homebrew only - remove!
+libraries = []
+
+
+@functools.lru_cache()
+def system_ccflags():
+    if platform.system() == "Darwin":
+        return ["-undefined", "dynamic_lookup"]
+    return []
 
 
 @functools.lru_cache()
@@ -328,7 +336,7 @@ class NPULauncher(object):
         signature = {idx: value for idx, value in src.signature.items()}
         src = make_launcher(constants, signature)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries)
+                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags)
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
