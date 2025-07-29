@@ -22,7 +22,7 @@ jobs:
       - name: Compute hash of pre-commit config
         id: cache-key
         run: |
-          echo "pre_commit_hash=$(sha256sum ${$GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache pre-commit's cache dir
         uses: actions/cache@v4
