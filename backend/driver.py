@@ -16,11 +16,13 @@ include_dirs = [os.path.join(dirname, "include")]
 libdevice_dir = os.path.join(dirname, "lib")
 libraries = []
 
+
 @functools.lru_cache()
 def system_ccflags():
     if platform.system() == "Darwin":
         return ["-undefined", "dynamic_lookup"]
     return []
+
 
 @functools.lru_cache()
 def library_dirs():
