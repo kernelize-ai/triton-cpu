@@ -37,7 +37,7 @@ jobs:
       - name: Compute cache keys
         id: cache-key
         run: |
-          triton_file="triton.txt"
+          triton_file="${GITHUB_WORKSPACE}/triton/third_party/npu/triton.txt"
 
           # Check if files exist before proceeding
           if [[ ! -f "$triton_file" ]]; then
