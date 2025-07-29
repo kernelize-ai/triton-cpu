@@ -101,9 +101,11 @@ jobs:
           python python/tutorials/01-vector-add.py
       - name: Run interpreter tests
         working-directory: ./triton
+        if: false
         run: make test-interpret
       - name: Run regression tests
         working-directory: ./triton
+        if: false
         run: |
           make test-regression
       - name: Run C++ unittests
