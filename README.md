@@ -1,10 +1,13 @@
 # triton-npu
 NPU Plugin for Triton
 
-### To install into Triton: 
+### To install into Triton:
 
+Clone the Triton NPU repository:
 ```
-cd third_party/
-git submodule add git@github.com:kernelize-ai/triton-npu.git npu
+git clone git@github.com:kernelize-ai/triton-npu.git
 ```
-then modify `setup.py` to add the plugin into local backends (`BackendInstaller.copy(["nvidia", "amd", "npu"])`), or set `TRITON_PLUGIN_DIRS='third_party/npu'`. 
+From the Triton repository, build Triton setting `TRITON_PLUGIN_DIRS='path/to/triton-npu' during the build:
+```
+TRITON_PLUGIN_DIRS=triton-npu pip install -e .
+```
