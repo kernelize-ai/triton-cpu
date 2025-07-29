@@ -37,18 +37,16 @@ jobs:
       - name: Compute cache keys
         id: cache-key
         run: |
-          llvm_file="cmake/llvm-hash.txt"
-          json_file="cmake/json-version.txt"
+          triton_file="triton.txt"
 
           # Check if files exist before proceeding
-          if [[ ! -f "$llvm_file" || ! -f "$json_file" ]]; then
+          if [[ ! -f "$triton_file" ]]; then
             echo "Error: Required dependency files are missing."
             exit 1
           fi
 
           # Process the files if they exist
-          echo "llvm=$(cat $llvm_file | cut -c 1-8)" >> $GITHUB_OUTPUT
-          echo "json=$(cat $json_file)" >> $GITHUB_OUTPUT
+          echo "triton=$(cat $triton_file | cut -c 1-8)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache build dependencies
         uses: actions/cache@v4
@@ -56,9 +54,8 @@ jobs:
           # Note that we cannot use environment variables here given there is
           # no shell to interpret them in the paths.
           path: |
-            ~/.triton/llvm
-            ~/.triton/json
-          key: ${{ runner.os }}-${{ runner.arch }}-llvm-${{ steps.cache-key.outputs.llvm }}-json-${{ steps.cache-key.outputs.json }}
+            ~/.triton/triton
+          key: ${{ runner.os }}-${{ runner.arch }}-triton-${{ steps.cache-key.outputs.triton }}
       - name: Inspect cache directories
         run: |
           mkdir -p ~/.triton
