@@ -8,13 +8,15 @@ jobs:
     name: pre-commit (code formatting)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
       - name: Checkout Triton upstream repo
         uses: actions/checkout@v4
         with:
           repository: triton-lang/triton
           path: triton
+      - name: Checkout NPU Plugin
+        uses: actions/checkout@v4
+        with:
+          path: triton/third_party/npu
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -30,7 +32,7 @@ jobs:
       - name: Compute hash of pre-commit config
         id: cache-key
         run: |
-          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton/triton/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache pre-commit's cache dir
         uses: actions/cache@v4
