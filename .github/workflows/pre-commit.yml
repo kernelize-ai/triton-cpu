@@ -8,6 +8,10 @@ jobs:
     name: pre-commit (code formatting)
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout NPU Plugin
+        uses: actions/checkout@v4
+        with:
+          path: triton/third_party/npu
       - name: Fetch Triton upstream Commit Hash
         shell: bash
         run: |
@@ -20,10 +24,6 @@ jobs:
           repository: triton-lang/triton
           path: triton
           ref: ${{ env.triton_commit_hash }}
-      - name: Checkout NPU Plugin
-        uses: actions/checkout@v4
-        with:
-          path: triton/third_party/npu
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -38,13 +38,13 @@ jobs:
           ls -la ${GITHUB_WORKSPACE}/
       - name: Copy pre-commit config from Triton to NPU submodule
         run: |
-          cp ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml ${GITHUB_WORKSPACE}/triton/third_party/npu/.pre-commit-config.yaml
-          cp ${GITHUB_WORKSPACE}/triton/.clang-format ${GITHUB_WORKSPACE}/triton/third_party/npu/.clang-format
-          cp ${GITHUB_WORKSPACE}/triton/pyproject.toml ${GITHUB_WORKSPACE}/triton/third_party/npu/pyproject.toml
+          cp ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml ${GITHUB_WORKSPACE}/triton-npu/.pre-commit-config.yaml
+          cp ${GITHUB_WORKSPACE}/triton/.clang-format ${GITHUB_WORKSPACE}/triton-npu/.clang-format
+          cp ${GITHUB_WORKSPACE}/triton/pyproject.toml ${GITHUB_WORKSPACE}/triton-npu/pyproject.toml
       - name: Compute hash of pre-commit config
         id: cache-key
         run: |
-          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton/third_party/npu/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton-npu/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache pre-commit's cache dir
         uses: actions/cache@v4
