@@ -36,13 +36,13 @@ jobs:
           ls -la ${GITHUB_WORKSPACE}/
       - name: Copy pre-commit config from Triton to NPU submodule
         run: |
-          cp ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml ${GITHUB_WORKSPACE}/triton-npu/.pre-commit-config.yaml
-          cp ${GITHUB_WORKSPACE}/triton/.clang-format ${GITHUB_WORKSPACE}/triton-npu/.clang-format
-          cp ${GITHUB_WORKSPACE}/triton/pyproject.toml ${GITHUB_WORKSPACE}/triton-npu/pyproject.toml
+          cp ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml ${GITHUB_WORKSPACE}/.pre-commit-config.yaml
+          cp ${GITHUB_WORKSPACE}/triton/.clang-format ${GITHUB_WORKSPACE}/.clang-format
+          cp ${GITHUB_WORKSPACE}/triton/pyproject.toml ${GITHUB_WORKSPACE}/pyproject.toml
       - name: Compute hash of pre-commit config
         id: cache-key
         run: |
-          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton-npu/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache pre-commit's cache dir
         uses: actions/cache@v4
