@@ -29,10 +29,15 @@ jobs:
           ls -la triton
           echo "Listing Github workspace directory:"
           ls -la ${GITHUB_WORKSPACE}/
+      - name: Copy pre-commit config from Triton to NPU submodule
+        run: |
+          cp ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml ${GITHUB_WORKSPACE}/triton/third_party/npu/.pre-commit-config.yaml
+          cp ${GITHUB_WORKSPACE}/triton/.clang-format ${GITHUB_WORKSPACE}/triton/third_party/npu/.clang-format
+          cp ${GITHUB_WORKSPACE}/triton/pyproject.toml ${GITHUB_WORKSPACE}/triton/third_party/npu/pyproject.toml
       - name: Compute hash of pre-commit config
         id: cache-key
         run: |
-          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/triton/third_party/npu/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache pre-commit's cache dir
         uses: actions/cache@v4
@@ -46,7 +51,7 @@ jobs:
         working-directory: ./triton/third_party/npu
         run: |
           python3 -m pip install --upgrade pre-commit
-          python3 -m pre_commit run --config ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml --all-files --verbose
+          python3 -m pre_commit run --all-files --verbose
       - name: Print diff of changes if pre-commit failed
         if: failure()
         working-directory: ./triton/third_party/npu
