@@ -67,7 +67,7 @@ jobs:
         run: |
           echo "$HOME/.local/bin" >> $GITHUB_PATH
       - name: Install Triton
-        working-directory: ${GITHUB_WORKSPACE}/triton
+        working-directory: ./triton
         run: |
           nproc
           echo "PATH is '$PATH'"
@@ -76,26 +76,26 @@ jobs:
       - name: CCache Stats
         run: ccache --print-stats
       - name: Run lit tests
-        working-directory: ${GITHUB_WORKSPACE}/triton
+        working-directory: ./triton
         run: make test-lit
       - name: Run python tests on CPU
-        working-directory: ${GITHUB_WORKSPACE}/triton
+        working-directory: ./triton
         if: false
         run: |
           make NUM_PROCS=24 test-unit
       - name: Run tutorial 01 on CPU
-        working-directory: ${GITHUB_WORKSPACE}/triton
+        working-directory: ./triton
         run: |
           python -m pytest -vs python/tutorials/01-vector-add.py
       - name: Run interpreter tests
-        working-directory: ${GITHUB_WORKSPACE}/triton
+        working-directory: ./triton
         run: make test-interpret
       - name: Run regression tests
-        working-directory: ${GITHUB_WORKSPACE}/triton
+        working-directory: ./triton
         run: |
           make test-regression
       - name: Run C++ unittests
-        working-directory: ${GITHUB_WORKSPACE}/triton
+        working-directory: ./triton
         run: make test-cpp
       - name: Inspect cache directories
         run: |
