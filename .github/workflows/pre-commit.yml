@@ -1,0 +1,63 @@
+name: Pre-Commit Check
+
+on:
+  workflow_call:
+
+jobs:
+  pre-commit:
+    name: pre-commit (code formatting)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout NPU Plugin
+        uses: actions/checkout@v4
+      - name: Fetch Triton upstream Commit Hash
+        shell: bash
+        run: |
+          TRITON_COMMIT_HASH="$(cat triton.txt)"
+          echo "Found Triton commit hash: ${TRITON_COMMIT_HASH}"
+          echo "triton_commit_hash=${TRITON_COMMIT_HASH}" >> ${GITHUB_ENV}
+      - name: Checkout Triton upstream repo
+        uses: actions/checkout@v4
+        with:
+          repository: triton-lang/triton
+          path: triton
+          ref: ${{ env.triton_commit_hash }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Test dir listing
+        run: |
+          echo "Listing current directory:"
+          ls -la
+          echo "Listing Triton directory:"
+          ls -la triton
+          echo "Listing Github workspace directory:"
+          ls -la ${GITHUB_WORKSPACE}/
+      - name: Copy pre-commit config from Triton to NPU submodule
+        run: |
+          cp ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml ${GITHUB_WORKSPACE}/.pre-commit-config.yaml
+          cp ${GITHUB_WORKSPACE}/triton/.clang-format ${GITHUB_WORKSPACE}/.clang-format
+          cp ${GITHUB_WORKSPACE}/triton/pyproject.toml ${GITHUB_WORKSPACE}/pyproject.toml
+      - name: Compute hash of pre-commit config
+        id: cache-key
+        run: |
+          echo "pre_commit_hash=$(sha256sum ${GITHUB_WORKSPACE}/.pre-commit-config.yaml | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+        shell: bash
+      - name: Cache pre-commit's cache dir
+        uses: actions/cache@v4
+        with:
+          # Note that we cannot use environment variables here given there is
+          # no shell to interpret them in the paths.
+          path: |
+            ~/.cache/pre-commit
+          key: ${{ runner.os }}-${{ steps.cache-key.outputs.pre_commit_hash }}
+      - name: Check pre-commit
+        run: |
+          python3 -m pip install --upgrade pre-commit
+          # Skip mypy check as the NPU plugin does not have mypy files with type annotations.
+          SKIP=mypy python3 -m pre_commit run --all-files --verbose
+      - name: Print diff of changes if pre-commit failed
+        if: failure()
+        run: |
+          git diff
