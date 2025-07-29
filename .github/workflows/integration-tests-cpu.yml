@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Install ccache
         run: sudo apt-get update && sudo apt-get install -y ccache
+      - name: Checkout NPU Plugin
+        uses: actions/checkout@v4 
       - name: Fetch Triton upstream Commit Hash
         shell: bash
         run: |
@@ -39,14 +41,10 @@ jobs:
           path: triton
           submodules: true
           ref: ${{ env.triton_commit_hash }}
-      - name: Checkout NPU Plugin
-        uses: actions/checkout@v4
-        with:
-          path: triton/third_party/npu
       - name: Compute cache keys
         id: cache-key
         run: |
-          triton_file="${GITHUB_WORKSPACE}/triton/third_party/npu/triton.txt"
+          triton_file="${GITHUB_WORKSPACE}/triton.txt"
 
           # Check if files exist before proceeding
           if [[ ! -f "$triton_file" ]]; then
@@ -85,7 +83,7 @@ jobs:
           nproc
           echo "PATH is '$PATH'"
           ccache --zero-stats
-          TRITON_PLUGIN_DIRS=third_party/npu make dev-install
+          TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
       - name: CCache Stats
         run: ccache --print-stats
       - name: Run lit tests
