@@ -1,0 +1,109 @@
+name: Integration Tests CPU
+
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        required: true
+        type: string
+
+jobs:
+  integration-tests-cpu:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        runner: ${{ fromJson(inputs.matrix) }}
+    env:
+      RUNNER_TYPE: ${{ matrix.runner[0] }}
+      TRITON_BUILD_WITH_CCACHE: "true"
+      TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
+      TRITON_USE_ASSERT_ENABLED_LLVM: "TRUE"
+      TRITON_DISABLE_LINE_INFO: 1
+      PROTON_SKIP_PC_SAMPLING_TEST: 1
+      PYTHON: "python3"
+      CCACHE_COMPRESS: "true"
+    steps:
+      - name: Checkout Triton upstream repo
+        uses: actions/checkout@v4
+        with:
+          repository: triton-lang/triton
+          path: triton
+          submodules: true
+      - name: Checkout NPU Plugin
+        uses: actions/checkout@v4
+        with:
+          path: triton/third_party/npu
+      - name: Compute cache keys
+        id: cache-key
+        run: |
+          llvm_file="cmake/llvm-hash.txt"
+          json_file="cmake/json-version.txt"
+
+          # Check if files exist before proceeding
+          if [[ ! -f "$llvm_file" || ! -f "$json_file" ]]; then
+            echo "Error: Required dependency files are missing."
+            exit 1
+          fi
+
+          # Process the files if they exist
+          echo "llvm=$(cat $llvm_file | cut -c 1-8)" >> $GITHUB_OUTPUT
+          echo "json=$(cat $json_file)" >> $GITHUB_OUTPUT
+        shell: bash
+      - name: Cache build dependencies
+        uses: actions/cache@v4
+        with:
+          # Note that we cannot use environment variables here given there is
+          # no shell to interpret them in the paths.
+          path: |
+            ~/.triton/llvm
+            ~/.triton/json
+          key: ${{ runner.os }}-${{ runner.arch }}-llvm-${{ steps.cache-key.outputs.llvm }}-json-${{ steps.cache-key.outputs.json }}
+      - name: Inspect cache directories
+        run: |
+          mkdir -p ~/.triton
+          du -h -d 1 ~/.triton
+
+          mkdir -p ~/.ccache
+          du -h -d 1 ~/.ccache
+      - name: Update PATH
+        run: |
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Install Triton
+        working-directory: ${GITHUB_WORKSPACE}/triton
+        run: |
+          nproc
+          echo "PATH is '$PATH'"
+          ccache --zero-stats
+          TRITON_PLUGIN_DIRS=third_party/npu make dev-install
+      - name: CCache Stats
+        run: ccache --print-stats
+      - name: Run lit tests
+        working-directory: ${GITHUB_WORKSPACE}/triton
+        run: make test-lit
+      - name: Run python tests on CPU
+        working-directory: ${GITHUB_WORKSPACE}/triton
+        if: false
+        run: |
+          make NUM_PROCS=24 test-unit
+      - name: Run tutorial 01 on CPU
+        working-directory: ${GITHUB_WORKSPACE}/triton
+        run: |
+          python -m pytest -vs python/tutorials/01-vector-add.py
+      - name: Run interpreter tests
+        working-directory: ${GITHUB_WORKSPACE}/triton
+        run: make test-interpret
+      - name: Run regression tests
+        working-directory: ${GITHUB_WORKSPACE}/triton
+        run: |
+          make test-regression
+      - name: Run C++ unittests
+        working-directory: ${GITHUB_WORKSPACE}/triton
+        run: make test-cpp
+      - name: Inspect cache directories
+        run: |
+          mkdir -p ~/.triton
+          du -h -d 1 ~/.triton
+
+          mkdir -p ~/.ccache
+          du -h -d 1 ~/.ccache

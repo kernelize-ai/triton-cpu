@@ -17,3 +17,10 @@ jobs:
 
   pre-commit:
     uses: ./.github/workflows/pre-commit.yml
+
+  integration-tests-cpu:
+    needs: runner-preparation
+    if: needs.runner-preparation.outputs.matrix-CPU != ''
+    uses: ./.github/workflows/integration-tests-cpu.yml
+    with:
+      matrix: ${{ needs.runner-preparation.outputs.matrix-CPU }}
