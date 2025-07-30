@@ -204,12 +204,8 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                               << " valueElemNBits = " << valueElemNBits << " "
                               << op.getType());
     SmallVector<Value> loadedVals;
-    llvm::errs() << "valueElemTy: " << valueElemTy << "\n";
     Type vecTy = LLVM::getVectorType(valueElemTy, vec);
-    llvm::errs() << "vecTy: " << vecTy << "\n";
-    llvm::errs() << "vec: " << vec << "\n";
-    llvm::errs() << "numElems: " << numElems << "\n";
-    llvm::errs() << "otherElems.size(): " << otherElems.size() << "\n";
+
     for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
       if (auto canonicalVecStart = getCanonicalIndex(vecStart, regMask);
           vecStart != canonicalVecStart) {
@@ -323,15 +319,12 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
         std::max<int>(8, valueElemTy.getIntOrFloatBitWidth());
     const size_t valueElemNBytes = valueElemNBits / 8;
     auto vecTy = LLVM::getVectorType(valueElemTy, vec);
-    llvm::errs() << "vecTy = " << vecTy << "\n";
 
     const int numVecs = elemsPerThread / vec;
     auto freeVarMasks = getFreeVariableMasks(valueTy);
     Value threadPred =
         emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
     uint32_t regMask = freeVarMasks[str_attr("reg")];
-    llvm::errs() << "vec = " << vec << "\n";
-    llvm::errs() << "elemsPerThread = " << elemsPerThread << "\n";
     for (size_t vecStart = 0; vecStart < elemsPerThread; vecStart += vec) {
       if (!isCanonicalIndex(vecStart, regMask)) {
         // Don't emit store ops for redundant elements within a thread
