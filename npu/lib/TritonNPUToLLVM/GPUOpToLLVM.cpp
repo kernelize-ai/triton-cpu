@@ -21,9 +21,6 @@ public:
   LogicalResult
   matchAndRewrite(mlir::gpu::ThreadIdOp threadIdOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // Implement the conversion logic here
-    llvm::errs() << "threadIdOp: " << threadIdOp << "\n";
-    // TODO: do this properly
     rewriter.replaceOpWithNewOp<LLVM::ConstantOp>(
         threadIdOp, i32_ty, rewriter.getI32IntegerAttr(0));
     return success();
@@ -45,7 +42,6 @@ public:
     auto args = funcOp.getArguments();
 
     auto programIdDim = blockIdOp.getAxisAsInt();
-    llvm::errs() << "programIdDim: " << programIdDim << "\n";
     assert(programIdDim >= 0 && programIdDim < 3);
 
     auto funcArgIdx = args.size() - 6 + programIdDim;
