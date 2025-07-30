@@ -11,21 +11,36 @@ from triton.runtime.build import compile_module_from_src
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 
+
+@functools.lru_cache()
+def is_macos():
+    return platform.system() == "Darwin"
+
+
+@functools.lru_cache()
+def external_openmp_path():
+    return os.environ.get("TRITON_LOCAL_LIBOMP_PATH", "/opt/homebrew/opt/libomp/")
+
+
 dirname = os.path.dirname(os.path.realpath(__file__))
-include_dirs = [os.path.join(dirname, "include")]
+include_dirs = [os.path.join(dirname, "include")
+                ] + [os.path.join(external_openmp_path(), "include") if is_macos() else []]
 libdevice_dir = os.path.join(dirname, "lib")
-libraries = []
+libraries = ["omp"]
 
 
 @functools.lru_cache()
 def system_ccflags():
-    if platform.system() == "Darwin":
-        return ["-undefined", "dynamic_lookup"]
-    return []
+    ccflags = ["-Xclang", "-fopenmp"]
+    if is_macos():
+        ccflags.extend(["-undefined", "dynamic_lookup"])
+    return ccflags
 
 
 @functools.lru_cache()
 def library_dirs():
+    if is_macos():
+        return [os.path.join(external_openmp_path(), "lib")]
     return []
 
 
