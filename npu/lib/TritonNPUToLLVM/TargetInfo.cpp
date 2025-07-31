@@ -1,9 +1,35 @@
 #include "TargetInfo.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 using namespace mlir;
+
+namespace {
+
+LLVM::LLVMFuncOp getPrintfDeclaration(RewriterBase &rewriter) {
+  auto *context = rewriter.getContext();
+  auto moduleOp = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+  StringRef funcName("printf");
+
+  Operation *funcOp = moduleOp.lookupSymbol(funcName);
+  if (funcOp)
+    return cast<LLVM::LLVMFuncOp>(*funcOp);
+
+  // Create a function declaration for printf, the signature is:
+  //   * `i32 (i8*, ...)`
+  auto funcType = LLVM::LLVMFunctionType::get(i32_ty, ptr_ty(context),
+                                              /*isVarArg=*/true);
+
+  RewriterBase::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(moduleOp.getBody());
+
+  return rewriter.create<LLVM::LLVMFuncOp>(UnknownLoc::get(context), funcName,
+                                           funcType);
+}
+
+} // namespace
 
 namespace mlir::triton::NPU {
 
@@ -78,12 +104,29 @@ std::string TargetInfo::getMulhiFuncName(Type resultElementTy) const {
 void TargetInfo::printf(RewriterBase &rewriter, Value formatStrStart,
                         int formatStrByteCount, ValueRange args,
                         ArrayRef<bool> isSigned) const {
-  llvm::report_fatal_error("printf not supported on NPU");
+  auto *ctx = rewriter.getContext();
+  Type ptr = ptr_ty(ctx);
+  auto moduleOp = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+  auto funcOp = getPrintfDeclaration(rewriter);
+  auto loc = UnknownLoc::get(ctx);
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+  SmallVector<Value, 16> newArgs;
+  newArgs.push_back(formatStrStart);
+  newArgs.append(args.begin(), args.end());
+  rewriter.create<LLVM::CallOp>(loc, funcOp, newArgs);
 }
 
 void TargetInfo::printf(RewriterBase &rewriter, StringRef msg, ValueRange args,
                         ArrayRef<bool> isSigned) const {
-  llvm::report_fatal_error("printf not supported on NPU");
+  assert(!msg.empty() && "printf with empty string not supported");
+  llvm::SmallString<64> msgNewline(msg);
+  msgNewline.push_back('\n');
+  msgNewline.push_back('\0');
+  Value msgValue =
+      LLVM::addStringToModule(UnknownLoc::get(rewriter.getContext()), rewriter,
+                              "printfFormat_", msgNewline);
+  printf(rewriter, msgValue, msgNewline.size_in_bytes(), args, isSigned);
 }
 
 void TargetInfo::assertFail(RewriterBase &rewriter, Location loc,
