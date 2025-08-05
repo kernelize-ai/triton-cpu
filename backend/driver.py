@@ -129,32 +129,39 @@ def make_launcher(constants, signature):
     for sig in signature.values():
         _flatten_signature(sig, flat_signature)
     signature = {i: s for i, s in enumerate(flat_signature)}
-    args_list = ', ' + ', '.join(f"&_arg{i}" for i, ty in signature.items()) if len(signature) > 0 else ''
+    args_list = ', ' + ', '.join(
+        f"&_arg{i}"
+        for i, ty in signature.items()) if len(signature) > 0 else ''
 
-    arg_decls = ', '.join(f"{ty_to_cpp(ty)} arg{i}" for i, ty in signature.items() if ty != "constexpr")
+    arg_decls = ', '.join(f"{ty_to_cpp(ty)} arg{i}"
+                          for i, ty in signature.items() if ty != "constexpr")
     internal_args_list = []
     for i, ty in signature.items():
         if ty[0] == "*":
             internal_args_list.append(f"ptr_info{i}.dev_ptr")
         elif ty != "constexpr":
             internal_args_list.append(f"_arg{i}")
-    arg_types = ', '.join(f"{ty_to_cpp(ty)}" for ty in signature.values() if ty != "constexpr")
+    arg_types = ', '.join(f"{ty_to_cpp(ty)}" for ty in signature.values()
+                          if ty != "constexpr")
 
     # generate glue code
     newline = '\n  '
     ptr_decls = [
         f"DevicePtrInfo ptr_info{i} = getPointer(_arg{i}, {i}); if (!ptr_info{i}.valid) return NULL;"
-        for i, ty in signature.items()
-        if ty[0] == "*"
+        for i, ty in signature.items() if ty[0] == "*"
     ]
     # TODO: float_storage_decls?
-    kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
+    kernel_params = [
+        f"arg{i}" for i, ty in signature.items() if ty != "constexpr"
+    ]
 
     has_spmd_args = True
     if has_spmd_args:
-        kernel_params.extend(["coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+        kernel_params.extend(
+            ["coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
         arg_types += ', '
-        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+        arg_types += ', '.join(
+            ["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
     src = f"""
 #include <stdbool.h>
@@ -333,12 +340,17 @@ class NPULauncher(object):
 
     def __init__(self, src, metadata):
         constants = src.constants if hasattr(src, "constants") else dict()
-        arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
+        arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(
+            x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
         src = make_launcher(constants, signature)
-        mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
+        mod = compile_module_from_src(src,
+                                      name="__triton_launcher",
+                                      library_dirs=library_dirs(),
+                                      include_dirs=include_dirs,
+                                      libraries=libraries,
+                                      ccflags=system_ccflags())
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
@@ -382,8 +394,10 @@ class CPUDeviceInterface:
 
     def enable_hook_timing(self):
         self.use_hooks = True
-        triton.compiler.CompiledKernel.launch_enter_hook = lambda arg: self._enter_hook()
-        triton.compiler.CompiledKernel.launch_exit_hook = lambda arg: self._exit_hook()
+        triton.compiler.CompiledKernel.launch_enter_hook = lambda arg: self._enter_hook(
+        )
+        triton.compiler.CompiledKernel.launch_exit_hook = lambda arg: self._exit_hook(
+        )
 
     def synchronize(self):
         pass

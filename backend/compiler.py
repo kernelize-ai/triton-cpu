@@ -29,7 +29,8 @@ class NPUOptions:
 
     def hash(self):
         hash_dict = dict(self.__dict__)
-        key = "_".join([f"{name}-{val}" for name, val in sorted(hash_dict.items())])
+        key = "_".join(
+            [f"{name}-{val}" for name, val in sorted(hash_dict.items())])
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
@@ -47,10 +48,11 @@ class NPUBackend(BaseBackend):
         args = {'arch': npu.get_processor_name()}
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
-        args.update(
-            {k: options[k]
-             for k in NPUOptions.__dataclass_fields__.keys()
-             if k in options if options[k] is not None})
+        args.update({
+            k: options[k]
+            for k in NPUOptions.__dataclass_fields__.keys() if k in options
+            if options[k] is not None
+        })
 
         return NPUOptions(**args)
 
@@ -124,9 +126,11 @@ class NPUBackend(BaseBackend):
         llvm_mod = llvm.to_module(mod, context)
         npu.attach_target_triple(llvm_mod, npu.get_default_target_triple())
         target_features = ''
-        llvm.attach_datalayout(llvm_mod, npu.get_default_target_triple(), options.arch, target_features)
+        llvm.attach_datalayout(llvm_mod, npu.get_default_target_triple(),
+                               options.arch, target_features)
 
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [],
+                             options.enable_fp_fusion)
 
         return str(llvm_mod)
 
@@ -138,7 +142,8 @@ class NPUBackend(BaseBackend):
         metadata["shared"] = 0
 
         flags = []
-        return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
+        return llvm.translate_to_asm(src, npu.get_default_target_triple(),
+                                     options.arch, '', flags,
                                      options.enable_fp_fusion, False)
 
     @staticmethod
@@ -149,19 +154,26 @@ class NPUBackend(BaseBackend):
             lib_dirs = []
             libs = []
             include_dirs = []
-            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, [])
+            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs,
+                        libs, [])
             with open(so, "rb") as f:
                 return f.read()
 
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
-            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-            stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
+            stages["ttir"] = lambda src, metadata: self.make_ttir(
+                src, metadata, options)
+            stages["ttgir"] = lambda src, metadata: self.make_ttgir(
+                src, metadata, options)
         elif language == Language.GLUON:
-            raise NotImplementedError("Gluon language support is not implemented for NPU backend")
-        stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
-        stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
-        stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
+            raise NotImplementedError(
+                "Gluon language support is not implemented for NPU backend")
+        stages["llir"] = lambda src, metadata: self.make_llir(
+            src, metadata, options)
+        stages["asm"] = lambda src, metadata: self.make_asm(
+            src, metadata, options)
+        stages["so"] = lambda src, metadata: self.make_library(
+            src, metadata, options)
 
     @functools.lru_cache()
     def hash(self):
