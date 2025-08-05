@@ -111,7 +111,7 @@ jobs:
         run: |
           source ~/.venv/bin/activate
           rm -rf ~/.cache/matplotlib
-          python python/tutorials/01-vector-add.py
+          MPLBACKEND=Agg python python/tutorials/01-vector-add.py
       - name: Run C++ unittests
         working-directory: ./triton
         run: |
