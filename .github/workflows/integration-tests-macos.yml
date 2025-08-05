@@ -1,5 +1,7 @@
 name: Integration Tests MacOS
-
+permissions:
+  contents: read
+  
 on:
   workflow_call:
     inputs:
