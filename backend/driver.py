@@ -204,7 +204,8 @@ static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', 
 
     int maxThreads = 1;
 #ifdef _OPENMP
-    maxThreads = omp_get_max_threads();
+    const int ompMaxThreads = omp_get_max_threads();
+    maxThreads = N < ompMaxThreads ? N : ompMaxThreads;
 #endif // _OPENMP
 
 #ifdef _OPENMP
