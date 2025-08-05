@@ -110,7 +110,6 @@ jobs:
         working-directory: ./triton
         run: |
           source ~/.venv/bin/activate
-          rm -rf ~/.cache/matplotlib
           MPLBACKEND=Agg python python/tutorials/01-vector-add.py
       - name: Run C++ unittests
         working-directory: ./triton
