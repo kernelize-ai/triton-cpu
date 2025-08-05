@@ -1,0 +1,62 @@
+name: Update Triton Pin
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Every day at 08:00 UTC
+  workflow_dispatch:     # Allow manual trigger
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout NPU Plugin
+        uses: actions/checkout@v4
+      - name: Fetch Triton upstream Commit Hash
+        shell: bash
+        run: |
+          TRITON_COMMIT_HASH="$(cat triton.txt)"
+          echo "Found Triton commit hash: ${TRITON_COMMIT_HASH}"
+          echo "triton_commit_hash=${TRITON_COMMIT_HASH}" >> ${GITHUB_ENV}
+      - name: Checkout Triton upstream repo
+        uses: actions/checkout@v4
+        with:
+          repository: triton-lang/triton
+          path: triton
+      - name: Get the latest Triton commit hash
+        working-directory: ./triton
+        run: |
+          git fetch origin
+          LATEST_COMMIT=$(git rev-parse HEAD)
+          echo "Latest Triton commit hash: ${LATEST_COMMIT}"
+          echo "${LATEST_COMMIT}" > ../triton.txt
+      - name: Compare hashes
+        id: compare
+        run: |
+          if [ -f triton.txt ]; then
+            old_hash=$(cat triton.txt)
+          else
+            old_hash=""
+          fi
+          new_hash=${{ env.triton_commit_hash }}
+
+          echo "Old hash: $old_hash"
+          echo "New hash: $new_hash"
+
+          if [ "$old_hash" != "$new_hash" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create pull request
+        if: steps.compare.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "Update Triton commit hash to `${{ env.triton_commit_hash }}`"
+          title: "Daily Triton Commit Hash Update for ${{ github.event.schedule || 'Manual Trigger' }} - ${{ github.run_id }}"
+          body: |
+            This PR updates `triton.txt` with the latest commit hash from Triton.
+          branch: "update-triton-hash-${{ github.run_id }}"
+          base: main
+          author: GitHub Actions <actions@github.com>
