@@ -101,28 +101,19 @@ jobs:
         run: ccache --print-stats
       - name: Run lit tests
         working-directory: ./triton
-        run: make test-lit
-      - name: Run python tests on CPU
-        working-directory: ./triton
-        if: false
-        run: |
-          make NUM_PROCS=24 test-unit
+        run: |-
+          source ~/.venv/bin/activate
+          make test-lit
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
         run: |
+          source ~/.venv/bin/activate
           python python/tutorials/01-vector-add.py
-      - name: Run interpreter tests
-        working-directory: ./triton
-        if: false
-        run: make test-interpret
-      - name: Run regression tests
-        working-directory: ./triton
-        if: false
-        run: |
-          make test-regression
       - name: Run C++ unittests
         working-directory: ./triton
-        run: make test-cpp
+        run: |
+          source ~/.venv/bin/activate
+          make test-cpp
       - name: Inspect cache directories
         run: |
           mkdir -p ~/.triton
