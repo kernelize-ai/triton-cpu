@@ -31,9 +31,11 @@ libraries = ["omp"]
 
 @functools.lru_cache()
 def system_ccflags():
-    ccflags = ["-Xclang", "-fopenmp"]
+    ccflags = []
     if is_macos():
-        ccflags.extend(["-undefined", "dynamic_lookup"])
+        ccflags.extend(["-undefined", "dynamic_lookup", "-Xclang", "-fopenmp"])
+    else:
+        ccflags.extend(["-fopenmp"])
     return ccflags
 
 
