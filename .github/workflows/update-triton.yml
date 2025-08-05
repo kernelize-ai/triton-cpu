@@ -7,6 +7,8 @@ on:
   schedule:
     - cron: '0 8 * * *'  # Every day at 08:00 UTC
   workflow_dispatch:     # Allow manual trigger
+  push:
+    branches: ["alex/update_triton_bot"]
 
 jobs:
   update:
