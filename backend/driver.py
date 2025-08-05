@@ -43,6 +43,8 @@ class NpuUtils(object):
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".so") as f:
             f.write(kernel)
             f.flush()
+            os.fsync(f.fileno())
+            os.stat(f.name)
             import ctypes
             lib = ctypes.cdll.LoadLibrary(f.name)
             fn_ptr = getattr(lib, name)
