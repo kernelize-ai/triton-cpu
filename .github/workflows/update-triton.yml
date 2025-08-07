@@ -7,8 +7,6 @@ on:
   schedule:
     - cron: '0 8 * * *'  # Every day at 08:00 UTC
   workflow_dispatch:     # Allow manual trigger
-  push:
-    branches: ["alex/update_triton_bot"]
 
 jobs:
   update:
@@ -61,9 +59,9 @@ jobs:
           add-paths: |
             triton.txt
           commit-message: "Update Triton commit hash to `${{ env.triton_commit_hash }}`"
-          title: "Triton Commit Hash Update for ${{ github.event.schedule || 'Manual Trigger' }} - `${{ env.triton_commit_hash }}`"
+          title: "[${{ github.event.schedule || 'Manual Trigger' }}] Update Triton Commit Hash to `${{ env.triton_commit_hash }}`"
           body: |
-            This PR updates `triton.txt` with the latest commit hash from Triton.
+            Update `triton.txt` with the latest commit hash from Triton.
           branch: "update-triton-hash-${{ github.run_id }}"
           base: main
           author: Kernelize Bot <actions@kernelize.ai>
