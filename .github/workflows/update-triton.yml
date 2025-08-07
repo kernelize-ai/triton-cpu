@@ -58,10 +58,12 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
+          add-paths: |
+            triton.txt
           commit-message: "Update Triton commit hash to `${{ env.triton_commit_hash }}`"
-          title: "Daily Triton Commit Hash Update for ${{ github.event.schedule || 'Manual Trigger' }} - ${{ github.run_id }}"
+          title: "Triton Commit Hash Update for ${{ github.event.schedule || 'Manual Trigger' }} - `${{ env.triton_commit_hash }}`"
           body: |
             This PR updates `triton.txt` with the latest commit hash from Triton.
           branch: "update-triton-hash-${{ github.run_id }}"
           base: main
-          author: GitHub Actions <actions@github.com>
+          author: Kernelize Bot <actions@kernelize.ai>
