@@ -66,4 +66,4 @@ jobs:
             Update `triton.txt` with the latest commit hash from Triton.
           branch: "update-triton-hash-${{ github.run_id }}"
           base: main
-          author: Alex Baden <alex@kernelize.ai>
+          delete-branch: true
