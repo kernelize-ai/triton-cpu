@@ -26,7 +26,7 @@ dirname = os.path.dirname(os.path.realpath(__file__))
 include_dirs = [os.path.join(dirname, "include")
                 ] + [os.path.join(external_openmp_path(), "include") if is_macos() else []]
 libdevice_dir = os.path.join(dirname, "lib")
-libraries = ["omp"]
+libraries = []
 
 
 @functools.lru_cache()
