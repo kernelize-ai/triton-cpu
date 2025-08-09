@@ -26,6 +26,7 @@ class NPUOptions:
     enable_fp_fusion: bool = True
     backend_name: str = 'npu'
     sanitize_overflow: bool = True
+    instrumentation_mode: str = ""
 
     def hash(self):
         hash_dict = dict(self.__dict__)
@@ -34,6 +35,7 @@ class NPUOptions:
 
 
 class NPUBackend(BaseBackend):
+    instrumentation = None  # TODO: intra-kernel instrumentation not yet supported
 
     @staticmethod
     def supports_target(target: GPUTarget):

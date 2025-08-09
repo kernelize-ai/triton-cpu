@@ -23,8 +23,8 @@ def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
   }];
 
   let builders = [
-    OpBuilder<(ins "int":$axis), [{
-      build($_builder, $_state, $_builder.getIndexType(), ProgramIDDimAttr::get($_builder.getContext(), ProgramIDDim(axis)));
+    OpBuilder<(ins "ProgramIDDim":$axis), [{
+      build($_builder, $_state, $_builder.getIndexType(), ProgramIDDimAttr::get($_builder.getContext(), axis));
     }]>
   ];
 

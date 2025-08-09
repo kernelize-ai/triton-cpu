@@ -84,7 +84,7 @@ Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
 }
 
 Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
-                            ModuleOp moduleOp, int axis) const {
+                            ModuleOp moduleOp, ProgramIDDim axis) const {
   return rewriter.create<mlir::triton::cpu::BlockIdOp>(loc, axis);
 }
 
