@@ -45,7 +45,7 @@ jobs:
 
           echo "New hash: $new_hash"
           echo "Old hash: $old_hash"
-
+          echo "new_triton_commit_hash=$new_hash" >> ${GITHUB_ENV}
           if [ "$new_hash" != "$old_hash" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           else
@@ -58,8 +58,8 @@ jobs:
         with:
           add-paths: |
             triton.txt
-          commit-message: "Update Triton commit hash to `${{ env.triton_commit_hash }}`"
-          title: "[${{ github.event.schedule && 'Scheduled' || 'Manual' }}] Update Triton Commit Hash to `${{ env.triton_commit_hash }}`"
+          commit-message: "Update Triton commit hash to `${{ env.new_triton_commit_hash }}`"
+          title: "[${{ github.event.schedule && 'Scheduled' || 'Manual' }}] Update Triton Commit Hash to `${{ env.new_triton_commit_hash }}`"
           body: |
             Update `triton.txt` with the latest commit hash from Triton.
           branch: "update-triton-hash-${{ github.run_id }}"
