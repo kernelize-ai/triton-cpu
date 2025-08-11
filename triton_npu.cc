@@ -34,12 +34,15 @@ void init_triton_npu(py::module &&m) {
   auto passes = m.def_submodule("passes");
   init_triton_npu_passes_ttgpuir(passes.def_submodule("ttnpuir"));
 
-  m.def("load_dialects", [](mlir::MLIRContext &context) {
+  m.def("load_dialects", [](mlir::MLIRContext &context, const std::string& device) {
     mlir::DialectRegistry registry;
     registry.insert<mlir::triton::cpu::TritonCPUDialect>();
-    // registry.insert<mlir::vector::VectorDialect>();
-    // mlir::triton::cpu::registerTritonOpScalarizeExternalModels(registry);
-    // mlir::registerAMXDialectTranslation(registry);
+    
+    if (device == "Tenstorrent") {
+      // register tenstorrent dialects
+      llvm::errs() << "load dialect called for Tenstorrent\n";
+    }
+    
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });

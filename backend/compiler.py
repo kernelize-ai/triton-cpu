@@ -46,6 +46,7 @@ class NPUBackend(BaseBackend):
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
         self.binary_ext = "so"
+        self.device = 'Tenstorrent'
 
     def parse_options(self, options):
         args = {'arch': npu.get_processor_name()}
@@ -76,7 +77,7 @@ class NPUBackend(BaseBackend):
         return {"triton.language.extra.libdevice": None}
 
     def load_dialects(self, ctx):
-        npu.load_dialects(ctx)
+        npu.load_dialects(ctx, self.device)
 
     @staticmethod
     def make_ttir(mod, metadata, options):
@@ -151,6 +152,11 @@ class NPUBackend(BaseBackend):
         return str(llvm_mod)
 
     @staticmethod
+    def make_tenstorrent_mlir(src, metadata, options):
+        # TODO: Implement the Tenstorrent MLIR generation
+        pass
+
+    @staticmethod
     def make_asm(src, metadata, options):
         names = re.findall(r"define void @([a-zA-Z_][a-zA-Z0-9_]*)", src)
         assert len(names) == 1
@@ -173,15 +179,25 @@ class NPUBackend(BaseBackend):
             with open(so, "rb") as f:
                 return f.read()
 
+    @staticmethod
+    def make_tenstorrent_binary(src, metadata, options):
+        # TODO: Implement the Tenstorrent binary generation
+        pass
+
     def add_stages(self, stages, options, language):
         if language == Language.TRITON:
             stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
             stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
         elif language == Language.GLUON:
             raise NotImplementedError("Gluon language support is not implemented for NPU backend")
-        stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
-        stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
-        stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
+
+        if self.device == 'CPU':
+            stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
+            stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
+            stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
+        elif self.device == 'Tenstorrent':
+            stages["ttmlir"] = lambda src, metadata: self.make_tenstorrent_mlir(src, metadata, options)
+            stages['so'] = lambda src, metadata: self.make_tenstorrent_binary(src, metadata, options)
 
     @functools.lru_cache()
     def hash(self):
