@@ -4,9 +4,10 @@
 #include "npu/include/TritonNPUToLLVM/Passes.h"
 
 #include "mlir/Pass/PassManager.h"
-// #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/Host.h"
+
+#include "ttmlir/Dialect/TTKernel/IR/TTKernel.h"
 
 #include <pybind11/pybind11.h>
 
@@ -40,7 +41,7 @@ void init_triton_npu(py::module &&m) {
     
     if (device == "Tenstorrent") {
       // register tenstorrent dialects
-      llvm::errs() << "load dialect called for Tenstorrent\n";
+      registry.insert<mlir::tt::ttkernel::TTKernelDialect>();
     }
     
     context.appendDialectRegistry(registry);

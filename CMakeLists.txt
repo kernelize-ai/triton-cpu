@@ -1,9 +1,37 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/)
+
+# Tenstorrent includes 
+set(TENSTORRENT_MLIR $ENV{TENSTORRENT_MLIR}) # TODO 
+set(TTMLIR_LIB_DIR "${TENSTORRENT_MLIR}/build/lib")
+
+set(TTMLIR_LIB_NAMES
+    MLIRTTKernelDialect
+    MLIRTTCoreDialect
+    MLIRTTMetalDialect
+)
+
+# Build full paths to each dylib
+set(TTMLIR_LIBS)
+foreach(lib ${TTMLIR_LIB_NAMES})
+    list(APPEND TTMLIR_LIBS
+        "${TTMLIR_LIB_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}${lib}.a"
+    )
+endforeach()
+
 add_subdirectory(npu)
 if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonNPU ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu.cc LINK_LIBS TritonNPUToLLVM)
-  target_link_libraries(TritonNPU PRIVATE Python3::Module pybind11::headers)
+  target_link_libraries(TritonNPU PRIVATE MLIRQuantDialect Python3::Module pybind11::headers) #TTMLIRCompiler)
+  
+  # Tenstorrent libs 
+  target_link_libraries(TritonNPU PRIVATE ${TTMLIR_LIBS})
+
+  target_include_directories(TritonNPU PRIVATE
+      "${TENSTORRENT_MLIR}/include"
+      "${TENSTORRENT_MLIR}/build/include"
+  )
+
 endif()
 if(TRITON_BUILD_UT)
   add_subdirectory(unittest)
