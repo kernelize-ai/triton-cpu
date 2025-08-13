@@ -5,19 +5,33 @@
 
 namespace mlir {
 namespace triton {
-#define GEN_PASS_DECL_CONVERTTRITONNPUTOTENSTORRENT
+#define GEN_PASS_DEF_CONVERTTRITONNPUTOTENSTORRENT
 #include "npu/include/TritonNPUToTenstorrent/Passes.h.inc"
 } // namespace triton
 } // namespace mlir
 
-namespace {}
+using namespace mlir;
+
+namespace {
+
+struct ConvertTritonNPUToTenstorrent
+    : public triton::impl::ConvertTritonNPUToTenstorrentBase<
+          ConvertTritonNPUToTenstorrent> {
+  using ConvertTritonNPUToTenstorrentBase::ConvertTritonNPUToTenstorrentBase;
+
+  ConvertTritonNPUToTenstorrent() : ConvertTritonNPUToTenstorrentBase() {}
+
+  void runOnOperation() override { assert(false); }
+};
+
+} // namespace
 
 namespace mlir {
 namespace triton {
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertTritonNPUToTenstorrentPass() {
-  return nullptr;
+  return std::make_unique<ConvertTritonNPUToTenstorrent>();
 }
 
 } // namespace triton
