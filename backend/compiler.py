@@ -152,9 +152,11 @@ class NPUBackend(BaseBackend):
         return str(llvm_mod)
 
     @staticmethod
-    def make_tenstorrent_mlir(src, metadata, options):
-        # TODO: Implement the Tenstorrent MLIR generation
-        pass
+    def make_tenstorrent_mlir(mod, metadata, options):
+        pm = ir.pass_manager(mod.context)
+        npu.passes.tenstorrent.add_to_kernel_dialect(pm)
+        pm.run(mod)
+        return mod
 
     @staticmethod
     def make_asm(src, metadata, options):
