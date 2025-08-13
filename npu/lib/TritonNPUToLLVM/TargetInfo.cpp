@@ -45,6 +45,11 @@ Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
   return Value();
 }
 
+void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
+                         bool isWarpSync) const {
+  llvm::report_fatal_error("barrier not supported on NPU");
+}
+
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               std::optional<Value> ctaId, Value val,
                               Value pred) const {
