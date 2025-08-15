@@ -103,7 +103,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-  llvm::report_fatal_error("warpReduce not supported on NPU");
+  // not supported on CPU
   return false;
 }
 
