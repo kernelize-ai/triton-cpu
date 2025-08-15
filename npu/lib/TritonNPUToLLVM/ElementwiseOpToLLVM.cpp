@@ -6,10 +6,30 @@
 
 using namespace mlir::triton::gpu;
 
+namespace {
+
+struct FDivOpConversion
+    : ElementwiseOpConversionBase<arith::DivFOp, FDivOpConversion> {
+  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+
+  SmallVector<Value> createDestOps(arith::DivFOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+
+    return {rewriter.create<LLVM::FDivOp>(loc, elemTy, operands[0][0],
+                                          operands[0][1])};
+  }
+};
+
+} // namespace
+
 void mlir::triton::NPU::populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, const NPU::TargetInfo &targetInfo,
     PatternBenefit benefit) {
+
+  patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis, benefit);
 
   mlir::triton::populateElementwiseOpToLLVMPatterns(
       typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
