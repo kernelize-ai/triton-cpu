@@ -146,14 +146,14 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     Type valueTy = op.getType();
     Type valueElemTy =
         typeConverter->convertType(getElementTypeOrSelf(valueTy));
+    LDBG("Load value LLVM Type: " << valueElemTy);
     unsigned vec = getVectorSize(ptr);
     unsigned numElems = getTotalElemsPerThread(ptr.getType());
     unsigned vecOrig = vec;
     if (llMask) {
-      LLVM_DEBUG(DBGS() << "vec = " << vec
-                        << " mask_alignment = " << getMaskAlignment(mask));
+      LDBG("vec = " << vec << " mask_alignment = " << getMaskAlignment(mask));
       vec = std::min<size_t>(vec, getMaskAlignment(mask));
-      LLVM_DEBUG(llvm::dbgs() << " vec = " << vec << '\n');
+      LDBG(" vec (post mask alignment adjustment) = " << vec);
     }
 
     if (vec == 1 && numElems > 1) {
@@ -228,7 +228,10 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       assert(wordNElems * nWords * numVecs == numElems);
 
       Value pred = mask ? maskElems[vecStart] : b.int_val(1, 1);
+      LDBG("pred = " << pred);
       Value ptr = ptrElems[vecStart];
+      LDBG("ptr = " << ptr);
+      Type ptrTy = getTypeConverter()->convertType(ptr.getType());
 
       Value falseVal = createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
       // If we need to mask the loaded value with other elements
@@ -237,22 +240,36 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
             rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
             otherElems, vecStart);
 
+      Block &predicatedLoad = NPU::createPredicatedBlock(
+          rewriter, loc, pred, falseVal, [&]() -> SmallVector<Value, 1> {
+            auto loadVecTy = LLVM::getVectorType(valueElemTy, vec);
+            Value loadVec = b.undef(loadVecTy);
+            const uint32_t alignment = nWords * width / 8;
+            for (size_t ii = 0; ii < vec; ii++) {
+              Value vecIdx = createIndexAttrConstant(
+                  rewriter, loc, getTypeConverter()->getIndexType(), ii);
+              Value loadAddr = b.gep(ptrTy, valueElemTy, ptr, vecIdx);
+              Value loadedValue = b.load(valueElemTy, loadAddr, alignment);
+              loadVec =
+                  b.insert_element(loadVecTy, loadVec, loadedValue, vecIdx);
+            }
+            return {loadVec};
+          });
+
+      Value loadVal = *predicatedLoad.args_begin();
+
+      SmallVector<Value> extractedVals;
       for (size_t ii = 0; ii < vec; ++ii) {
-        // create a predicated load block for each scalar element
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, getTypeConverter()->getIndexType(), ii);
-        auto crtFalseVal = b.extract_element(valueElemTy, falseVal, vecIdx);
-        Block &endBlock = NPU::createPredicatedBlock(
-            rewriter, loc, pred, {crtFalseVal}, [&]() -> SmallVector<Value, 1> {
-              Value loadAddr = b.bitcast(ptr, ptr_ty(ctx, 1));
-              uint32_t alignment = nWords * width / 8;
-              return {b.load(valueElemTy, loadAddr, alignment)};
-            });
-        loadedVals.push_back(*endBlock.args_begin());
+        Value loaded = b.extract_element(valueElemTy, loadVal, vecIdx);
+        loadedVals.push_back(loaded);
       }
     }
 
     Type llvmResultStructTy = getTypeConverter()->convertType(op.getType());
+    LDBG("llvmResultStructTy = " << llvmResultStructTy);
+    LDBG("loadedVals Size = " << loadedVals.size());
     Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
                                         rewriter, llvmResultStructTy);
 
@@ -349,7 +366,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
         // create a predicated load block for each scalar element
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, getTypeConverter()->getIndexType(), ii);
-        Block &endBlock = NPU::createPredicatedBlock(
+        NPU::createPredicatedBlock(
             rewriter, loc, pred, [&]() -> ArrayRef<Value> {
               Value loadAddr = b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1));
               uint32_t alignment = nWords * width / 8;
