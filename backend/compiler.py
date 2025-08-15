@@ -107,7 +107,8 @@ class NPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
-        # TODO: need triton to llvmir - can we do some simple convert triton to triton gpu?
+        passes.convert.add_triton_scf_to_cf(pm)
+
         npu.passes.ttnpuir.add_to_llvmir(pm)
 
         passes.common.add_canonicalizer(pm)
