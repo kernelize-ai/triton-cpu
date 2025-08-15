@@ -54,6 +54,37 @@ public:
   }
 };
 
+Value getNumPrograms(mlir::FunctionOpInterface funcOp, int axis) {
+  auto args = funcOp.getArguments();
+  assert(funcOp && args.size() >= 6);
+  assert(axis >= 0 && axis < 3);
+
+  // The last three of the args are gridX, gridY, gridZ (bounds) of grid.
+  auto argIdx = args.size() - 3 + axis;
+  assert(argIdx < args.size() && "out-of-bounds arg index");
+  assert(args[argIdx].getType().isInteger(32) && "unexpected arg type");
+  return args[argIdx];
+}
+
+class GetNumProgramsOpToLLVM
+    : public ConvertOpToLLVMPattern<triton::GetNumProgramsOp> {
+
+public:
+  GetNumProgramsOpToLLVM(LLVMTypeConverter &typeConverter,
+                         PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::GetNumProgramsOp>(typeConverter,
+                                                         benefit) {}
+
+  LogicalResult
+  matchAndRewrite(triton::GetNumProgramsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto funcOp = op->getParentOfType<FunctionOpInterface>();
+    assert(funcOp && "expected LLVM::FuncOp as a parent of GetNumProgramsOp");
+    rewriter.replaceOp(op, getNumPrograms(funcOp, op.getAxisAsInt()));
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::NPU::populateGPUtoLLVMConversionPatterns(
@@ -61,4 +92,5 @@ void mlir::triton::NPU::populateGPUtoLLVMConversionPatterns(
     PatternBenefit benefit) {
   patterns.add<ThreadIdOpToLLVM>(typeConverter, benefit);
   patterns.add<BlockIdOpToLLVM>(typeConverter, benefit);
+  patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
 }
