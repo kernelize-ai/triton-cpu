@@ -5,6 +5,8 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+
 #include <memory>
 
 namespace mlir {
