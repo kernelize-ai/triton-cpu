@@ -3,6 +3,8 @@
 
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 
+#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+
 namespace mlir {
 namespace triton {
 namespace NPU {
@@ -59,6 +61,25 @@ template <typename ThenOpsFn>
 Block &createPredicatedBlock(RewriterBase &rewriter, Location loc, Value cond,
                              ThenOpsFn &&thenOpsFn) {
   return createPredicatedBlock(rewriter, loc, cond, {}, thenOpsFn);
+}
+
+// Returns a Value for the format string, which you can reuse. Writes the byte
+// count for the string to |formatStrByteCount| if not null.
+Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
+               ConversionPatternRewriter &rewriter,
+               const NPU::TargetInfo &targetInfo, int *formatStrByteCount) {
+  assert(!msg.empty() && "printf with empty string not supported");
+  llvm::SmallString<64> msgNewline(msg);
+  msgNewline.push_back('\n');
+  msgNewline.push_back('\0');
+  Value msgValue =
+      LLVM::addStringToModule(UnknownLoc::get(rewriter.getContext()), rewriter,
+                              "printfFormat_", msgNewline);
+  targetInfo.printf(rewriter, msgValue, msgNewline.size_in_bytes(), args,
+                    isSigned);
+  if (formatStrByteCount)
+    *formatStrByteCount = msgNewline.size_in_bytes();
+  return msgValue;
 }
 
 } // namespace NPU
