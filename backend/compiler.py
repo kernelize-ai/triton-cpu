@@ -108,9 +108,9 @@ class NPUBackend(BaseBackend):
         pm.enable_debug()
 
         passes.convert.add_triton_scf_to_cf(pm)
+        passes.convert.add_index_to_llvmir(pm)
 
         npu.passes.ttnpuir.add_to_llvmir(pm)
-
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
 
@@ -138,7 +138,7 @@ class NPUBackend(BaseBackend):
         names = re.findall(r"define void @([a-zA-Z_][a-zA-Z0-9_]*)", src)
         assert len(names) == 1
         metadata["name"] = names[0]
-        metadata["shared"] = 0
+        metadata["shared"] = 1
 
         flags = []
         return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
