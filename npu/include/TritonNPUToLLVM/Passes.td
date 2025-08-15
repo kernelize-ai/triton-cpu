@@ -16,7 +16,7 @@ def ConvertTritonNPUToLLVM : Pass<"convert-triton-npu-to-llvm", "mlir::ModuleOp"
                              "mlir::scf::SCFDialect",
                              "mlir::LLVM::LLVMDialect",
                              "mlir::triton::TritonDialect",
-                             //"mlir::triton::gpu::TritonGPUDialect",
+                             "mlir::triton::cpu::TritonCPUDialect"
                              ];
 }
 
