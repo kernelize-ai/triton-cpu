@@ -5,12 +5,19 @@ import subprocess
 import tempfile
 import time
 import platform
+import importlib
 from pathlib import Path
 
 from triton.runtime.build import compile_module_from_src
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 
+# for locating libTritonCPURuntime
+try:
+    _triton_C_dir = importlib.resources.files(triton).joinpath("_C")
+except AttributeError:
+    # resources.files() doesn't exist for Python < 3.9
+    _triton_C_dir = importlib.resources.path(triton, "_C").__enter__()
 
 @functools.lru_cache()
 def is_macos():
@@ -41,9 +48,10 @@ def system_ccflags():
 
 @functools.lru_cache()
 def library_dirs():
+    lib_dirs = [_triton_C_dir]
     if is_macos():
-        return [os.path.join(external_openmp_path(), "lib")]
-    return []
+        return lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
+    return lib_dirs
 
 
 class NpuUtils(object):

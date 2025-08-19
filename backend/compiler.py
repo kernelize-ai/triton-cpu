@@ -10,6 +10,7 @@ from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton._C.libtriton import ir, passes, llvm, npu
 from triton import knobs
 from triton.runtime.build import _build
+import triton.backends.npu.driver as npu_driver
 
 from dataclasses import dataclass
 from typing import Dict
@@ -149,8 +150,8 @@ class NPUBackend(BaseBackend):
         with tempfile.TemporaryDirectory() as tmpdir:
             asm_path = os.path.join(tmpdir, "kernel.s")
             Path(asm_path).write_text(src)
-            lib_dirs = []
-            libs = []
+            lib_dirs = npu_driver.library_dirs()
+            libs = ["sleef"] # TODO: conditionally include?
             include_dirs = []
             so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, [])
             with open(so, "rb") as f:
