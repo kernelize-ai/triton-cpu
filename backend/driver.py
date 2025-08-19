@@ -19,6 +19,7 @@ except AttributeError:
     # resources.files() doesn't exist for Python < 3.9
     _triton_C_dir = importlib.resources.path(triton, "_C").__enter__()
 
+
 @functools.lru_cache()
 def is_macos():
     return platform.system() == "Darwin"
@@ -50,7 +51,7 @@ def system_ccflags():
 def library_dirs():
     lib_dirs = [_triton_C_dir]
     if is_macos():
-        return lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
+        lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
     return lib_dirs
 
 
