@@ -151,7 +151,7 @@ class NPUBackend(BaseBackend):
             asm_path = os.path.join(tmpdir, "kernel.s")
             Path(asm_path).write_text(src)
             lib_dirs = npu_driver.library_dirs()
-            libs = ["sleef"] # TODO: conditionally include?
+            libs = ["sleef"]  # TODO: conditionally include?
             include_dirs = []
             so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, [])
             with open(so, "rb") as f:
