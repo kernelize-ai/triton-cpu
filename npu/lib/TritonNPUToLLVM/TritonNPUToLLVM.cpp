@@ -8,9 +8,9 @@
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
 #include "npu/include/TritonNPUToLLVM/Passes.h"
+#include "npu/include/TritonNPUToLLVM/TypeConverter.h"
 
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
-#include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 
 namespace mlir {
 namespace triton {
@@ -72,7 +72,7 @@ struct ConvertTritonNPUToLLVM
     mlir::triton::npu::TargetInfo targetInfo;
     mlir::LowerToLLVMOptions option(context);
     option.overrideIndexBitwidth(32);
-    TritonGPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
+    TritonNPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
 
     // Lower functions
     TritonLLVMFunctionConversionTarget funcTarget(*context);

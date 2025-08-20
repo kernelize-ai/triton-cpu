@@ -3,8 +3,9 @@ add_triton_library(TritonNPUToLLVM
     FuncOpToLLVM.cpp
     GPUOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
-    TritonNPUToLLVM.cpp
     TargetInfo.cpp
+    TritonNPUToLLVM.cpp
+    TypeConverter.cpp
 
     DEPENDS
     TritonNPUConversionPassIncGen
