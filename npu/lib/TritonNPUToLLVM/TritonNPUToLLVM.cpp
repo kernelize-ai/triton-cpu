@@ -14,8 +14,10 @@
 
 namespace mlir {
 namespace triton {
+namespace npu {
 #define GEN_PASS_DEF_CONVERTTRITONNPUTOLLVM
 #include "npu/include/TritonNPUToLLVM/Passes.h.inc"
+} // namespace npu
 } // namespace triton
 } // namespace mlir
 
@@ -56,7 +58,8 @@ public:
 };
 
 struct ConvertTritonNPUToLLVM
-    : public triton::impl::ConvertTritonNPUToLLVMBase<ConvertTritonNPUToLLVM> {
+    : public triton::npu::impl::ConvertTritonNPUToLLVMBase<
+          ConvertTritonNPUToLLVM> {
   using ConvertTritonNPUToLLVMBase::ConvertTritonNPUToLLVMBase;
 
   ConvertTritonNPUToLLVM() : ConvertTritonNPUToLLVMBase() {}
@@ -66,9 +69,7 @@ struct ConvertTritonNPUToLLVM
     ModuleOp mod = getOperation();
 
     // Set up the type converter and patterns
-    // TODO: need a TargetInfo for NPU
-
-    mlir::triton::NPU::TargetInfo targetInfo;
+    mlir::triton::npu::TargetInfo targetInfo;
     mlir::LowerToLLVMOptions option(context);
     option.overrideIndexBitwidth(32);
     TritonGPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
@@ -77,7 +78,7 @@ struct ConvertTritonNPUToLLVM
     TritonLLVMFunctionConversionTarget funcTarget(*context);
     RewritePatternSet funcPatterns(context);
 
-    mlir::triton::NPU::populateFuncOpConversionPattern(
+    mlir::triton::npu::populateFuncOpConversionPattern(
         typeConverter, funcPatterns, targetInfo, patternBenefitDefault);
     if (failed(
             applyPartialConversion(mod, funcTarget, std::move(funcPatterns))))
@@ -90,7 +91,7 @@ struct ConvertTritonNPUToLLVM
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
 
-    mlir::triton::NPU::populateElementwiseOpToLLVMPatterns(
+    mlir::triton::npu::populateElementwiseOpToLLVMPatterns(
         typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
 
     populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
@@ -117,7 +118,7 @@ struct ConvertTritonNPUToLLVM
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateMathToLLVMConversionPatterns(typeConverter, patterns);
 
-    mlir::triton::NPU::populateGPUtoLLVMConversionPatterns(typeConverter,
+    mlir::triton::npu::populateGPUtoLLVMConversionPatterns(typeConverter,
                                                            patterns, benefit);
 
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
@@ -153,10 +154,10 @@ struct ConvertTritonNPUToLLVM
 
 namespace mlir {
 namespace triton {
-
+namespace npu {
 std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonNPUToLLVMPass() {
   return std::make_unique<ConvertTritonNPUToLLVM>();
 }
-
+} // namespace npu
 } // namespace triton
 } // namespace mlir

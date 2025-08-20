@@ -15,6 +15,7 @@ class ModuleOp;
 template <typename T> class OperationPass;
 
 namespace triton {
+namespace npu {
 
 #define GEN_PASS_DECL
 #include "npu/include/TritonNPUToLLVM/Passes.h.inc"
@@ -24,6 +25,7 @@ std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonNPUToLLVMPass();
 #define GEN_PASS_REGISTRATION
 #include "npu/include/TritonNPUToLLVM/Passes.h.inc"
 
+} // namespace npu
 } // namespace triton
 
 } // namespace mlir

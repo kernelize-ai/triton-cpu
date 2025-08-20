@@ -7,7 +7,7 @@
 
 namespace mlir {
 namespace triton {
-namespace NPU {
+namespace npu {
 
 /// Create a predicated block, using \p cond as the condition and \p ops for the
 /// values supplied by the conditional branch to the exit block. The \p
@@ -67,7 +67,7 @@ Block &createPredicatedBlock(RewriterBase &rewriter, Location loc, Value cond,
 // count for the string to |formatStrByteCount| if not null.
 Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
                ConversionPatternRewriter &rewriter,
-               const NPU::TargetInfo &targetInfo, int *formatStrByteCount) {
+               const npu::TargetInfo &targetInfo, int *formatStrByteCount) {
   assert(!msg.empty() && "printf with empty string not supported");
   llvm::SmallString<64> msgNewline(msg);
   msgNewline.push_back('\n');
@@ -82,7 +82,7 @@ Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
   return msgValue;
 }
 
-} // namespace NPU
+} // namespace npu
 } // namespace triton
 } // namespace mlir
 
