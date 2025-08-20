@@ -130,7 +130,7 @@ struct FuncOpSPMDParamConversion
 
 } // namespace
 
-void mlir::triton::NPU::populateFuncOpConversionPattern(
+void mlir::triton::npu::populateFuncOpConversionPattern(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const TargetInfoBase &targetInfo, PatternBenefit benefit) {
   patterns.add<FuncOpSPMDParamConversion>(typeConverter, benefit);

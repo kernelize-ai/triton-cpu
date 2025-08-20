@@ -87,7 +87,7 @@ public:
 
 } // namespace
 
-void mlir::triton::NPU::populateGPUtoLLVMConversionPatterns(
+void mlir::triton::npu::populateGPUtoLLVMConversionPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     PatternBenefit benefit) {
   patterns.add<ThreadIdOpToLLVM>(typeConverter, benefit);

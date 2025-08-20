@@ -68,7 +68,7 @@ struct ConvertTritonNPUToLLVM
     // Set up the type converter and patterns
     // TODO: need a TargetInfo for NPU
 
-    mlir::triton::NPU::TargetInfo targetInfo;
+    mlir::triton::npu::TargetInfo targetInfo;
     mlir::LowerToLLVMOptions option(context);
     option.overrideIndexBitwidth(32);
     TritonGPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
@@ -77,7 +77,7 @@ struct ConvertTritonNPUToLLVM
     TritonLLVMFunctionConversionTarget funcTarget(*context);
     RewritePatternSet funcPatterns(context);
 
-    mlir::triton::NPU::populateFuncOpConversionPattern(
+    mlir::triton::npu::populateFuncOpConversionPattern(
         typeConverter, funcPatterns, targetInfo, patternBenefitDefault);
     if (failed(
             applyPartialConversion(mod, funcTarget, std::move(funcPatterns))))
@@ -90,7 +90,7 @@ struct ConvertTritonNPUToLLVM
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
 
-    mlir::triton::NPU::populateElementwiseOpToLLVMPatterns(
+    mlir::triton::npu::populateElementwiseOpToLLVMPatterns(
         typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
 
     populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
@@ -117,7 +117,7 @@ struct ConvertTritonNPUToLLVM
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateMathToLLVMConversionPatterns(typeConverter, patterns);
 
-    mlir::triton::NPU::populateGPUtoLLVMConversionPatterns(typeConverter,
+    mlir::triton::npu::populateGPUtoLLVMConversionPatterns(typeConverter,
                                                            patterns, benefit);
 
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);

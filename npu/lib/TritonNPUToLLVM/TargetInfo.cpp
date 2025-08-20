@@ -31,7 +31,7 @@ LLVM::LLVMFuncOp getPrintfDeclaration(RewriterBase &rewriter) {
 
 } // namespace
 
-namespace mlir::triton::NPU {
+namespace mlir::triton::npu {
 
 Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
   return rewriter.create<mlir::LLVM::ConstantOp>(
@@ -148,4 +148,4 @@ bool TargetInfo::supportVectorizedAtomics() const {
   return false; // NPU does not support vectorized atomics
 }
 
-} // namespace mlir::triton::NPU
+} // namespace mlir::triton::npu

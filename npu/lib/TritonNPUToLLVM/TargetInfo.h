@@ -3,7 +3,7 @@
 
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
 
-namespace mlir::triton::NPU {
+namespace mlir::triton::npu {
 
 class TargetInfo : public mlir::triton::TargetInfoBase {
 public:
@@ -67,6 +67,6 @@ public:
   bool supportVectorizedAtomics() const override;
 };
 
-} // namespace mlir::triton::NPU
+} // namespace mlir::triton::npu
 
 #endif
