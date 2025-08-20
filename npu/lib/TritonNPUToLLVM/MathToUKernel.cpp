@@ -4,6 +4,10 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+// #include "triton/Conversion/TritonGPUToLLVM/Utility.h" // vec_ty
+
 namespace mlir {
 namespace triton {
 namespace npu {
@@ -47,6 +51,26 @@ private:
   std::string ulpSuffix;
 };
 
+LLVM::LLVMFuncOp getFuncDecl(PatternRewriter &rewriter,
+                             StringRef funcName, SmallVector<Type> argsType,
+                             Type resultType) {
+  auto moduleOp = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+  Operation *funcOp = moduleOp.lookupSymbol(funcName);
+  if (funcOp)
+    return cast<LLVM::LLVMFuncOp>(*funcOp);
+
+  auto *ctx = rewriter.getContext();
+
+  auto funcType =
+      LLVM::LLVMFunctionType::get(resultType, argsType, /*isVarArg*/ false);
+
+  PatternRewriter::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(moduleOp.getBody());
+
+  return rewriter.create<LLVM::LLVMFuncOp>(UnknownLoc::get(ctx), funcName,
+                                           funcType);
+}
+
 using GetVecFnNameFn = std::function<std::string(
     unsigned /*bitwidth*/, unsigned /*numel*/, ValueRange /*operands*/)>;
 
@@ -60,33 +84,40 @@ public:
 
   LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const {
     llvm::errs() << "Getting vector function name for op: " << op << "\n";
-    VectorType vecTy = dyn_cast<VectorType>(op.getType());
-    if (!vecTy || vecTy.getRank() > 1)
+    llvm::errs() << "op type: " << op.getType() << "\n";
+    RankedTensorType tensorTy = dyn_cast<RankedTensorType>(op.getType());
+    if (!tensorTy || tensorTy.getRank() > 1)
       return failure();
 
-    auto fnName = getVecFnName(op, vecTy.getElementTypeBitWidth(),
-                               vecTy.getNumElements());
+    auto vecSize = triton::gpu::getTotalElemsPerThread(tensorTy);
+
+    auto fnName = getVecFnName(op, tensorTy.getElementTypeBitWidth(),
+                               vecSize);
     if (fnName.empty())
       return failure();
 
-    auto module = SymbolTable::getNearestSymbolTable(op);
-    auto opFunc = dyn_cast_or_null<SymbolOpInterface>(
-        SymbolTable::lookupSymbolIn(module, fnName));
-    // Generate function declaration if it doesn't exists yet.
-    if (!opFunc) {
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(&module->getRegion(0).front());
-      auto fnTy = FunctionType::get(
-          rewriter.getContext(), op->getOperandTypes(), op->getResultTypes());
-      opFunc =
-          rewriter.create<func::FuncOp>(rewriter.getUnknownLoc(), fnName, fnTy);
-      opFunc.setPrivate();
-      opFunc->setAttr(LLVM::LLVMDialect::getReadnoneAttrName(),
-                      UnitAttr::get(rewriter.getContext()));
+    if (op->getNumOperands() > 1) {
+        op.emitWarning("Multiple operands for uKernel operation not yet supported.");
+        return failure();
     }
 
-    rewriter.replaceOpWithNewOp<func::CallOp>(op, fnName, op.getType(),
-                                              op->getOperands());
+    if (op->getOperand(0).getType() != tensorTy) {
+      op.emitWarning("Mismatched operand and result type for uKernel operation.");
+      return failure();
+    }
+
+    // convert from triton to LLVM-compatible vector type 
+    VectorType vecType = VectorType::get(vecSize, tensorTy.getElementType());
+    llvm::errs() << "vecType: " << vecType << "\n";
+
+    // get the decl 
+    auto funcOp = getFuncDecl(rewriter, fnName, 
+                              {vecType},
+                              vecType);
+    llvm::errs() << "funcOp: " << funcOp << "\n";
+
+    // TODO: for now let's jsut wrap this all up in the generic LLVM lowering, but later let's work on a design where we have a generic uKernel dialect or op (or set of ops) that we use to wrap candidate ttgpu ops for lowering in a ttgpu pass, then lower those in the llvm lowering pass. 
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, funcOp, op->getOperands());
     return success();
   }
 };
