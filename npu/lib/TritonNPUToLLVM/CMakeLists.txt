@@ -6,6 +6,7 @@ add_triton_library(TritonNPUToLLVM
     TargetInfo.cpp
     TritonNPUToLLVM.cpp
     TypeConverter.cpp
+    UKernelToLLVM.cpp
 
     DEPENDS
     TritonNPUConversionPassIncGen

@@ -5,6 +5,8 @@
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "triton/Analysis/AxisInfo.h"
 
+#include "npu/include/TritonNPUToLLVM/TypeConverter.h"
+
 namespace mlir {
 namespace triton {
 namespace npu {
@@ -28,6 +30,10 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        RewritePatternSet &patterns,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit);
+
+void populateUKernelToLLVMConversionPatterns(
+    TritonNPUToLLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
+    PatternBenefit benefit);
 
 } // namespace npu
 } // namespace triton
