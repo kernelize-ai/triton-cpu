@@ -14,8 +14,10 @@
 
 namespace mlir {
 namespace triton {
+namespace npu {
 #define GEN_PASS_DEF_CONVERTTRITONNPUTOLLVM
 #include "npu/include/TritonNPUToLLVM/Passes.h.inc"
+} // namespace npu
 } // namespace triton
 } // namespace mlir
 
@@ -56,7 +58,8 @@ public:
 };
 
 struct ConvertTritonNPUToLLVM
-    : public triton::impl::ConvertTritonNPUToLLVMBase<ConvertTritonNPUToLLVM> {
+    : public triton::npu::impl::ConvertTritonNPUToLLVMBase<
+          ConvertTritonNPUToLLVM> {
   using ConvertTritonNPUToLLVMBase::ConvertTritonNPUToLLVMBase;
 
   ConvertTritonNPUToLLVM() : ConvertTritonNPUToLLVMBase() {}
@@ -153,10 +156,10 @@ struct ConvertTritonNPUToLLVM
 
 namespace mlir {
 namespace triton {
-
+namespace npu {
 std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonNPUToLLVMPass() {
   return std::make_unique<ConvertTritonNPUToLLVM>();
 }
-
+} // namespace npu
 } // namespace triton
 } // namespace mlir
