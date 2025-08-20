@@ -67,7 +67,7 @@ Block &createPredicatedBlock(RewriterBase &rewriter, Location loc, Value cond,
 // count for the string to |formatStrByteCount| if not null.
 Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
                ConversionPatternRewriter &rewriter,
-               const NPU::TargetInfo &targetInfo, int *formatStrByteCount) {
+               const npu::TargetInfo &targetInfo, int *formatStrByteCount) {
   assert(!msg.empty() && "printf with empty string not supported");
   llvm::SmallString<64> msgNewline(msg);
   msgNewline.push_back('\n');

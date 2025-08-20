@@ -26,7 +26,7 @@ struct FDivOpConversion
 
 void mlir::triton::npu::populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
-    ModuleAxisInfoAnalysis &axisInfoAnalysis, const NPU::TargetInfo &targetInfo,
+    ModuleAxisInfoAnalysis &axisInfoAnalysis, const npu::TargetInfo &targetInfo,
     PatternBenefit benefit) {
 
   patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis, benefit);

@@ -69,8 +69,6 @@ struct ConvertTritonNPUToLLVM
     ModuleOp mod = getOperation();
 
     // Set up the type converter and patterns
-    // TODO: need a TargetInfo for NPU
-
     mlir::triton::npu::TargetInfo targetInfo;
     mlir::LowerToLLVMOptions option(context);
     option.overrideIndexBitwidth(32);
