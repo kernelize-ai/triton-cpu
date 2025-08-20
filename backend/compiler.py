@@ -107,7 +107,7 @@ class NPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
-        passes.convert.add_triton_scf_to_cf(pm)
+        passes.convert.add_scf_to_cf(pm)
         passes.convert.add_index_to_llvmir(pm)
 
         npu.passes.ttnpuir.add_to_llvmir(pm)
