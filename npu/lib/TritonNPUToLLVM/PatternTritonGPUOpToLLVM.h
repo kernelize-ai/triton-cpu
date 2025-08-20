@@ -7,7 +7,7 @@
 
 namespace mlir {
 namespace triton {
-namespace NPU {
+namespace npu {
 
 void populateGPUtoLLVMConversionPatterns(LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns,
@@ -29,7 +29,7 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit);
 
-} // namespace NPU
+} // namespace npu
 } // namespace triton
 } // namespace mlir
 

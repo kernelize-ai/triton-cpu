@@ -7,7 +7,7 @@
 
 namespace mlir {
 namespace triton {
-namespace NPU {
+namespace npu {
 
 /// Create a predicated block, using \p cond as the condition and \p ops for the
 /// values supplied by the conditional branch to the exit block. The \p
@@ -82,7 +82,7 @@ Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
   return msgValue;
 }
 
-} // namespace NPU
+} // namespace npu
 } // namespace triton
 } // namespace mlir
 
