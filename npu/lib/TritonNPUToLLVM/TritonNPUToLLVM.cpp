@@ -94,6 +94,9 @@ struct ConvertTritonNPUToLLVM
     mlir::triton::npu::populateElementwiseOpToLLVMPatterns(
         typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
 
+    mlir::triton::npu::populateUKernelToLLVMConversionPatterns(
+        typeConverter, patterns, benefit);
+
     populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
                                       axisInfoAnalysis, benefit);
     mlir::triton::populateReduceOpToLLVMPatterns(typeConverter, patterns,
