@@ -114,18 +114,22 @@ struct ExpOpConversion : public ConvertOpToLLVMPattern<math::ExpOp> {
     SmallVector<Value> resultVals;
     for (unsigned vecStart = 0; vecStart < elementsPerThread;
          vecStart += vecSize) {
-      auto slice =
-          ArrayRef<Value>(opElements)
-              .slice(vecStart, std::min(vecSize, elementsPerThread - vecStart));
-      if (slice.size() < vecSize)
-        assert(false);
+      unsigned crtVecSize = std::min(vecSize, elementsPerThread - vecStart);
+
+      SmallVector<Value> slice = llvm::to_vector(
+          ArrayRef<Value>(opElements).slice(vecStart, crtVecSize));
+      if (slice.size() < vecSize) {
+        // pad the slice with undefs
+        slice.insert(slice.end(), vecSize - slice.size(),
+                     b.undef(vecType.getElementType()));
+      }
 
       Value vec = packLLVector(loc, slice, rewriter);
       llvm::errs() << "vec: " << vec << "\n";
       auto callOp = LLVM::createLLVMCallOp(rewriter, loc, funcOp, {vec});
       auto results = unpackLLVector(loc, callOp.getResult(), rewriter);
-      for (auto result : results) {
-        resultVals.push_back(result);
+      for (unsigned i = 0; i < crtVecSize; i++) {
+        resultVals.push_back(results[i]);
       }
     }
 
@@ -133,23 +137,6 @@ struct ExpOpConversion : public ConvertOpToLLVMPattern<math::ExpOp> {
         packLLElements(loc, typeConverter, resultVals, rewriter, tensorTy);
     rewriter.replaceOp(op, rets);
     return success();
-#if 0
-    llvm::errs() << "callOp: " << callOp << "\n";
-    llvm::errs() << "callOp result: " << callOp.getResult() << "\n";
-#if 1
-    auto rets = unpackLLVector(loc, callOp.getResult(), rewriter);
-    llvm::errs() << "rets.size(): " << rets.size() << "\n";
-    assert(rets.size() == vecSize);
-    auto ret = packLLElements(loc, typeConverter, rets, rewriter, tensorTy);
-#else
-    auto ret = packLLElements(loc, typeConverter, callOp.getResult(), rewriter,
-                              tensorTy);
-#endif
-    llvm::errs() << "ret: " << ret << "\n";
-    rewriter.replaceOp(op, ret);
-    // rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, funcOp, {opVal});
-    return success();
-#endif
   }
 };
 
