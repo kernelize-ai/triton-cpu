@@ -85,31 +85,23 @@ struct ExpOpConversion : public ConvertOpToLLVMPattern<math::ExpOp> {
 
     unsigned vecSize = vec_size_in_bits / tensorTy.getElementTypeBitWidth();
     VectorType vecType = VectorType::get(vecSize, tensorTy.getElementType());
-    llvm::errs() << "vecType: " << vecType << "\n";
-
     unsigned elementsPerThread = triton::gpu::getTotalElemsPerThread(tensorTy);
-
-    llvm::errs() << "vecSize: " << vecSize << "\n";
-    llvm::errs() << "elementsPerThread: " << elementsPerThread << "\n";
 
     auto fnName = SleefNameGenerator("exp")(tensorTy.getElementTypeBitWidth(),
                                             vecSize, op->getOperands());
     if (fnName.empty())
       return failure();
 
-    llvm::errs() << "Processing op: " << op << "\n";
     auto operands = adaptor.getOperands();
     if (operands.size() != 1)
       return failure();
 
-    llvm::errs() << "operand: " << operands[0] << "\n";
     SmallVector<Value> opElements;
     for (int i = 0; i < elementsPerThread; i++) {
       opElements.push_back(b.extract_val(operands[0], i));
     }
 
     auto funcOp = getFuncDecl(rewriter, fnName, {vecType}, vecType);
-    llvm::errs() << "funcOp: " << funcOp << "\n";
 
     SmallVector<Value> resultVals;
     for (unsigned vecStart = 0; vecStart < elementsPerThread;
@@ -125,7 +117,6 @@ struct ExpOpConversion : public ConvertOpToLLVMPattern<math::ExpOp> {
       }
 
       Value vec = packLLVector(loc, slice, rewriter);
-      llvm::errs() << "vec: " << vec << "\n";
       auto callOp = LLVM::createLLVMCallOp(rewriter, loc, funcOp, {vec});
       auto results = unpackLLVector(loc, callOp.getResult(), rewriter);
       for (unsigned i = 0; i < crtVecSize; i++) {
