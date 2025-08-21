@@ -83,7 +83,14 @@ struct ExpOpConversion : public ConvertOpToLLVMPattern<math::ExpOp> {
     if (!tensorTy || tensorTy.getRank() > 1)
       return failure();
 
-    auto vecSize = triton::gpu::getTotalElemsPerThread(tensorTy);
+    unsigned vecSize = vec_size_in_bits / tensorTy.getElementTypeBitWidth();
+    VectorType vecType = VectorType::get(vecSize, tensorTy.getElementType());
+    llvm::errs() << "vecType: " << vecType << "\n";
+
+    unsigned elementsPerThread = triton::gpu::getTotalElemsPerThread(tensorTy);
+
+    llvm::errs() << "vecSize: " << vecSize << "\n";
+    llvm::errs() << "elementsPerThread: " << elementsPerThread << "\n";
 
     auto fnName = SleefNameGenerator("exp")(tensorTy.getElementTypeBitWidth(),
                                             vecSize, op->getOperands());
@@ -96,30 +103,37 @@ struct ExpOpConversion : public ConvertOpToLLVMPattern<math::ExpOp> {
       return failure();
 
     llvm::errs() << "operand: " << operands[0] << "\n";
-    SmallVector<Value> vecOperands;
-    for (int i = 0; i < vecSize; i++) {
-      vecOperands.push_back(b.extract_val(operands[0], i));
+    SmallVector<Value> opElements;
+    for (int i = 0; i < elementsPerThread; i++) {
+      opElements.push_back(b.extract_val(operands[0], i));
     }
 
-    // convert from triton to LLVM-compatible vector type
-    VectorType vecType = VectorType::get(vecSize, tensorTy.getElementType());
-    llvm::errs() << "vecType: " << vecType << "\n";
-
-    // get the decl
     auto funcOp = getFuncDecl(rewriter, fnName, {vecType}, vecType);
     llvm::errs() << "funcOp: " << funcOp << "\n";
 
-    // pack the operands ?
-    // Value opVec = packLLVector(loc, )
-#if 1
-    Value opVal = packLLVector(loc, vecOperands, rewriter);
-#else
-    Value opVal =
-        packLLElements(loc, typeConverter, operands[0], rewriter, vecType);
-#endif
-    llvm::errs() << "opVal: " << opVal << "\n###\n\n";
+    SmallVector<Value> resultVals;
+    for (unsigned vecStart = 0; vecStart < elementsPerThread;
+         vecStart += vecSize) {
+      auto slice =
+          ArrayRef<Value>(opElements)
+              .slice(vecStart, std::min(vecSize, elementsPerThread - vecStart));
+      if (slice.size() < vecSize)
+        assert(false);
 
-    auto callOp = LLVM::createLLVMCallOp(rewriter, loc, funcOp, {opVal});
+      Value vec = packLLVector(loc, slice, rewriter);
+      llvm::errs() << "vec: " << vec << "\n";
+      auto callOp = LLVM::createLLVMCallOp(rewriter, loc, funcOp, {vec});
+      auto results = unpackLLVector(loc, callOp.getResult(), rewriter);
+      for (auto result : results) {
+        resultVals.push_back(result);
+      }
+    }
+
+    auto rets =
+        packLLElements(loc, typeConverter, resultVals, rewriter, tensorTy);
+    rewriter.replaceOp(op, rets);
+    return success();
+#if 0
     llvm::errs() << "callOp: " << callOp << "\n";
     llvm::errs() << "callOp result: " << callOp.getResult() << "\n";
 #if 1
@@ -135,13 +149,6 @@ struct ExpOpConversion : public ConvertOpToLLVMPattern<math::ExpOp> {
     rewriter.replaceOp(op, ret);
     // rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, funcOp, {opVal});
     return success();
-#if 0
-        // Create the LLVM operation for exp
-        Value input = adaptor.getOperand();
-        Value result = b.exp(input, llvmType);
-
-        rewriter.replaceOp(op, result);
-        return success();
 #endif
   }
 };
