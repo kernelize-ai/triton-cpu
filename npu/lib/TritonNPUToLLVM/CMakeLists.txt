@@ -1,4 +1,5 @@
 add_triton_library(TritonNPUToLLVM
+    Allocation.cpp
     ElementwiseOpToLLVM.cpp
     FuncOpToLLVM.cpp
     GPUOpToLLVM.cpp

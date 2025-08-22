@@ -97,7 +97,10 @@ class NPUBackend(BaseBackend):
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         dump_enabled = pm.enable_debug()
-        passes.ttir.add_convert_to_ttgpuir(pm, "npu", 1, 1, 1)
+        num_warps = 2
+        threads_per_warp = 1
+        num_ctas = 1
+        passes.ttir.add_convert_to_ttgpuir(pm, "npu", num_warps, threads_per_warp, num_ctas)
         pm.run(mod)
         return mod
 
@@ -111,6 +114,7 @@ class NPUBackend(BaseBackend):
         passes.convert.add_scf_to_cf(pm)
         passes.convert.add_index_to_llvmir(pm)
 
+        npu.passes.ttnpuir.add_allocate_shared_memory(pm)
         npu.passes.ttnpuir.add_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)

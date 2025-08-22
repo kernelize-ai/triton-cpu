@@ -79,7 +79,7 @@ class NpuUtils(object):
             return (lib, fn_ptr_as_void_p, 1, 0, 2**12)
 
     def get_device_properties(self, *args):
-        return {"max_num_regs": 1000, "max_shared_mem": 8192, "multiprocessor_count": 1, "warpSize": 1}
+        return {"max_num_regs": 1000, "max_shared_mem": 8192, "multiprocessor_count": 1, "warpSize": 2}
 
 
 def ty_to_cpp(ty):
