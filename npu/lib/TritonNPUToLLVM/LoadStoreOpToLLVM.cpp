@@ -228,9 +228,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       assert(wordNElems * nWords * numVecs == numElems);
 
       Value pred = mask ? maskElems[vecStart] : b.int_val(1, 1);
-      LDBG("pred = " << pred);
       Value ptr = ptrElems[vecStart];
-      LDBG("ptr = " << ptr);
       Type ptrTy = getTypeConverter()->convertType(ptr.getType());
 
       Value falseVal = createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
