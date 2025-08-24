@@ -5,6 +5,7 @@ add_triton_library(TritonNPUToLLVM
     LoadStoreOpToLLVM.cpp
     TritonNPUToLLVM.cpp
     TargetInfo.cpp
+    Utility.cpp
 
     DEPENDS
     TritonNPUConversionPassIncGen

@@ -5,6 +5,8 @@
 
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
+#include "TargetInfo.h"
+
 namespace mlir {
 namespace triton {
 namespace npu {
@@ -67,20 +69,15 @@ Block &createPredicatedBlock(RewriterBase &rewriter, Location loc, Value cond,
 // count for the string to |formatStrByteCount| if not null.
 Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
                ConversionPatternRewriter &rewriter,
-               const npu::TargetInfo &targetInfo, int *formatStrByteCount) {
-  assert(!msg.empty() && "printf with empty string not supported");
-  llvm::SmallString<64> msgNewline(msg);
-  msgNewline.push_back('\n');
-  msgNewline.push_back('\0');
-  Value msgValue =
-      LLVM::addStringToModule(UnknownLoc::get(rewriter.getContext()), rewriter,
-                              "printfFormat_", msgNewline);
-  targetInfo.printf(rewriter, msgValue, msgNewline.size_in_bytes(), args,
-                    isSigned);
-  if (formatStrByteCount)
-    *formatStrByteCount = msgNewline.size_in_bytes();
-  return msgValue;
-}
+               const npu::TargetInfo &targetInfo, int *formatStrByteCount);
+
+Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
+             Value pred, Value falseVal, const LLVMTypeConverter *typeConverter,
+             unsigned vecSize, unsigned alignment);
+
+void llStore(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
+             Value storeVal, Value pred, const LLVMTypeConverter *typeConverter,
+             unsigned vecSize, unsigned alignment);
 
 } // namespace npu
 } // namespace triton
