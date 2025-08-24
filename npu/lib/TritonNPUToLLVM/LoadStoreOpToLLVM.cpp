@@ -229,32 +229,17 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
 
       Value pred = mask ? maskElems[vecStart] : b.int_val(1, 1);
       Value ptr = ptrElems[vecStart];
-      Type ptrTy = getTypeConverter()->convertType(ptr.getType());
 
       Value falseVal = createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
       // If we need to mask the loaded value with other elements
       if (otherElems.size() != 0)
-        falseVal = packElementRangeIntoVector(
-            rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
-            otherElems, vecStart);
+        falseVal = packElementRangeIntoVector(rewriter, getTypeConverter(), loc,
+                                              cast<VectorType>(vecTy),
+                                              otherElems, vecStart);
 
-      Block &predicatedLoad = npu::createPredicatedBlock(
-          rewriter, loc, pred, falseVal, [&]() -> SmallVector<Value, 1> {
-            auto loadVecTy = LLVM::getVectorType(valueElemTy, vec);
-            Value loadVec = b.undef(loadVecTy);
-            const uint32_t alignment = nWords * width / 8;
-            for (size_t ii = 0; ii < vec; ii++) {
-              Value vecIdx = createIndexAttrConstant(
-                  rewriter, loc, getTypeConverter()->getIndexType(), ii);
-              Value loadAddr = b.gep(ptrTy, valueElemTy, ptr, vecIdx);
-              Value loadedValue = b.load(valueElemTy, loadAddr, alignment);
-              loadVec =
-                  b.insert_element(loadVecTy, loadVec, loadedValue, vecIdx);
-            }
-            return {loadVec};
-          });
-
-      Value loadVal = *predicatedLoad.args_begin();
+      const uint32_t alignment = nWords * width / 8;
+      Value loadVal = npu::llLoad(rewriter, loc, ptr, valueElemTy, pred,
+                                  falseVal, getTypeConverter(), vec, alignment);
 
       SmallVector<Value> extractedVals;
       for (size_t ii = 0; ii < vec; ++ii) {
@@ -360,19 +345,10 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       Value storeVal = packElementRangeIntoVector(
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
-      for (size_t ii = 0; ii < vec; ++ii) {
-        // create a predicated load block for each scalar element
-        Value vecIdx = createIndexAttrConstant(
-            rewriter, loc, getTypeConverter()->getIndexType(), ii);
-        npu::createPredicatedBlock(
-            rewriter, loc, pred, [&]() -> ArrayRef<Value> {
-              Value loadAddr = b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1));
-              uint32_t alignment = nWords * width / 8;
-              b.store(b.extract_element(valueElemTy, storeVal, vecIdx),
-                      loadAddr, alignment);
-              return {};
-            });
-      }
+
+      uint32_t alignment = nWords * width / 8;
+      npu::llStore(rewriter, loc, ptrElems[vecStart], valueElemTy, storeVal,
+                   pred, getTypeConverter(), vec, alignment);
     }
     rewriter.eraseOp(op);
     return success();
