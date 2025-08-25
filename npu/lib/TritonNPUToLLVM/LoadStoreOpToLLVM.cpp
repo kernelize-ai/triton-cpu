@@ -237,8 +237,8 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                                               otherElems, vecStart);
 
       const uint32_t alignment = nWords * width / 8;
-      Value loadVec = npu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal,
-                                  typeConverter, vec, alignment);
+      Value loadVec =
+          npu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, alignment);
 
       for (size_t ii = 0; ii < vec; ii++) {
         Value vecIdx = createIndexAttrConstant(
