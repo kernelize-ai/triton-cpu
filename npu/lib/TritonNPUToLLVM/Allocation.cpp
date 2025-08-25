@@ -1,5 +1,6 @@
 #include "npu/include/TritonNPUToLLVM/Passes.h"
 
+#include "triton/Analysis/Allocation.h"
 #include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
 
 #include "TargetInfo.h"
@@ -21,7 +22,7 @@ namespace mlir::triton::npu {
 std::function<unsigned(Operation *)>
 getNPUAllocationAnalysisScratchSize(TargetInfoBase &targetInfo) {
   auto allocation = [&targetInfo](Operation *op) -> unsigned {
-    return 0; // TODO
+    return mlir::triton::defaultAllocationAnalysisScratchSizeFn(op);
   };
   return allocation;
 }
@@ -30,7 +31,6 @@ getNPUAllocationAnalysisScratchSize(TargetInfoBase &targetInfo) {
 
 namespace {
 
-// TODO: copy from proton
 struct AllocateSharedMemoryNPU
     : public mlir::triton::npu::impl::AllocateSharedMemoryNPUBase<
           AllocateSharedMemoryNPU> {

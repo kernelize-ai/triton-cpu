@@ -4,6 +4,8 @@
 
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
 
+#include "Utility.h"
+
 using namespace mlir;
 
 namespace {
@@ -53,19 +55,28 @@ void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               std::optional<Value> ctaId, Value val,
                               Value pred) const {
-  llvm::report_fatal_error(
-      "NPU does not support cross-CTA shared memory transfers");
+  if (ctaId.has_value())
+    llvm::report_fatal_error(
+        "NPU does not support cross-CTA shared memory transfers");
+  mlir::triton::npu::llStore(rewriter, loc, ptr, val, pred, /*alignment=*/4);
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               std::optional<Value> ctaId, Type elemTy,
                               Value pred, Operation *localLoadOp) const {
-  llvm::report_fatal_error(
-      "NPU does not support cross-CTA shared memory transfers");
+  if (ctaId.has_value())
+    llvm::report_fatal_error(
+        "NPU does not support cross-CTA shared memory transfers");
+  Value falseVal = rewriter.create<LLVM::ConstantOp>(
+      loc, elemTy, rewriter.getZeroAttr(elemTy));
+  return mlir::triton::npu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
+                                   /*alignment=*/4);
 }
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
+  llvm::errs() << "shuffle val: " << val << "\n";
+  llvm::errs() << "index: " << i << "\n";
   llvm::report_fatal_error("shuffleXor not supported on NPU");
   return Value();
 }
@@ -103,7 +114,22 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-  // not supported on CPU
+  // TODO: if we can make this work we can bail on the shufflexor below
+  llvm::errs() << "reduce op: " << op << "\n";
+  llvm::errs() << "accum size: " << acc.size() << "\n";
+  llvm::errs() << "numLaneToReduce: " << numLaneToReduce << "\n";
+  Operation *reduxOp = op.getSingleCombiner();
+  if (reduxOp)
+    llvm::errs() << "single combiner: " << *reduxOp << "\n";
+
+  if (!reduxOp)
+    return false;
+
+  // TODO: this might need a re-think
+  for (int i = 0; i < acc.size(); i++) {
+    Value buf;
+    auto valType = acc[i].getType();
+  }
   return false;
 }
 
