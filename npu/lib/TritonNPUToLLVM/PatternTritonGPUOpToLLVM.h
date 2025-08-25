@@ -12,6 +12,7 @@ namespace triton {
 namespace npu {
 
 void populateGPUtoLLVMConversionPatterns(LLVMTypeConverter &converter,
+                                         const TargetInfo &targetInfo,
                                          RewritePatternSet &patterns,
                                          PatternBenefit benefit);
 

@@ -69,7 +69,8 @@ Block &createPredicatedBlock(RewriterBase &rewriter, Location loc, Value cond,
 // count for the string to |formatStrByteCount| if not null.
 Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
                ConversionPatternRewriter &rewriter,
-               const npu::TargetInfo &targetInfo, int *formatStrByteCount);
+               const npu::TargetInfo &targetInfo,
+               int *formatStrByteCount = nullptr);
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
              Value pred, Value falseVal, unsigned alignment);

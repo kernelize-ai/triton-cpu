@@ -6,6 +6,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 #include "PatternTritonGPUOpToLLVM.h"
+#include "Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -15,16 +16,38 @@ namespace {
 class ThreadIdOpToLLVM : public ConvertOpToLLVMPattern<mlir::gpu::ThreadIdOp> {
 
 public:
-  ThreadIdOpToLLVM(LLVMTypeConverter &typeConverter, PatternBenefit benefit)
-      : ConvertOpToLLVMPattern<mlir::gpu::ThreadIdOp>(typeConverter, benefit) {}
+  ThreadIdOpToLLVM(LLVMTypeConverter &typeConverter,
+                   const npu::TargetInfo &targetInfo, PatternBenefit benefit)
+      : targetInfo(targetInfo),
+        ConvertOpToLLVMPattern<mlir::gpu::ThreadIdOp>(typeConverter, benefit) {}
 
   LogicalResult
   matchAndRewrite(mlir::gpu::ThreadIdOp threadIdOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<LLVM::ConstantOp>(
-        threadIdOp, i32_ty, rewriter.getI32IntegerAttr(0));
+    auto funcOp = threadIdOp->getParentOfType<FunctionOpInterface>();
+    assert(funcOp && "expected LLVM::FuncOp as a parent of ThreadIdOp");
+    auto args = funcOp.getArguments();
+
+    auto threadIdDim = threadIdOp.getDimension();
+    if (threadIdDim != mlir::gpu::Dimension::x) {
+      threadIdOp.emitError("unsupported thread id dimension");
+    }
+
+    assert(args.size() > 7 &&
+           "incorrect npu kernel function signature"); // could be 6, but we
+                                                       // always expect at least
+                                                       // one argument
+    auto funcArgIdx = args.size() - 7;
+    assert(args[funcArgIdx].getType().isInteger(32) &&
+           "Thread ID argument must be i32");
+    // npu::llPrintf("threadid: %d", {args[funcArgIdx]}, {true}, rewriter,
+    // targetInfo);
+    rewriter.replaceOp(threadIdOp, args[funcArgIdx]);
     return success();
   }
+
+protected:
+  const npu::TargetInfo &targetInfo;
 };
 
 class BlockIdOpToLLVM
@@ -85,12 +108,27 @@ public:
   }
 };
 
+class GpuBarrierOpToLLVM : public ConvertOpToLLVMPattern<mlir::gpu::BarrierOp> {
+public:
+  GpuBarrierOpToLLVM(LLVMTypeConverter &typeConverter, PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<mlir::gpu::BarrierOp>(typeConverter, benefit) {}
+
+  LogicalResult
+  matchAndRewrite(mlir::gpu::BarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // no-ops on CPU
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::npu::populateGPUtoLLVMConversionPatterns(
-    LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
-    PatternBenefit benefit) {
-  patterns.add<ThreadIdOpToLLVM>(typeConverter, benefit);
+    LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
+    RewritePatternSet &patterns, PatternBenefit benefit) {
+  patterns.add<ThreadIdOpToLLVM>(typeConverter, targetInfo, benefit);
   patterns.add<BlockIdOpToLLVM>(typeConverter, benefit);
   patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
+  patterns.add<GpuBarrierOpToLLVM>(typeConverter, benefit);
 }

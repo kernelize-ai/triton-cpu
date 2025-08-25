@@ -49,6 +49,7 @@ struct FuncOpSPMDParamConversion
     if (!isKernel)
       return funcOp; // do nothing?
 
+    amendedInputTy.push_back(i32_ty); // thread_id
     amendedInputTy.push_back(i32_ty); // x
     amendedInputTy.push_back(i32_ty); // y
     amendedInputTy.push_back(i32_ty); // z
@@ -78,6 +79,7 @@ struct FuncOpSPMDParamConversion
         funcOp.getLoc(), funcOp.getName(), amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
 
+    region.addArgument(i32_ty, loc); // thread_id
     region.addArgument(i32_ty, loc); // x
     region.addArgument(i32_ty, loc); // y
     region.addArgument(i32_ty, loc); // z
