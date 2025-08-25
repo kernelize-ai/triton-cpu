@@ -100,7 +100,16 @@ struct LoadStoreConversionBase {
     return axisAnalysisPass.getContiguity(ptr);
   }
 
-  unsigned getVectorSize(Value ptr) const { return 1; }
+  unsigned getVectorSize(Value ptr) const {
+    auto tensorTy = dyn_cast<RankedTensorType>(ptr.getType());
+    if (!tensorTy)
+      return 1;
+    auto contiguity = getContiguity(ptr);
+    auto pointeeBitWidth = triton::getPointeeBitWidth(tensorTy);
+    // The maximum vector size is 256 bits on the avg CPU (TODO: be more
+    // specific?)
+    return std::min<unsigned>(256 / pointeeBitWidth, contiguity);
+  }
 
   unsigned getMaskAlignment(Value mask) const {
     return axisAnalysisPass.getMaskAlignment(mask);
