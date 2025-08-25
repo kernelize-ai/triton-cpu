@@ -88,6 +88,12 @@ Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
   return Value();
 }
 
+Value TargetInfo::permute(RewriterBase &rewriter, Location loc, Value a,
+                          Value b, Value selector) const {
+  llvm::report_fatal_error("permute not supported on NPU");
+  return Value();
+}
+
 Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
                             ModuleOp moduleOp, ProgramIDDim axis) const {
   return rewriter.create<mlir::triton::cpu::BlockIdOp>(loc, axis);
