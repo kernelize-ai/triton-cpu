@@ -155,7 +155,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       vec = std::min<size_t>(vec, getMaskAlignment(mask));
       LDBG(" vec (post mask alignment adjustment) = " << vec);
     }
-
     if (vec == 1 && numElems > 1) {
       int maskValue = !llMask ? -1 : getMaskAlignment(mask);
       op->emitRemark() << "Warning: vectorization fails vec = " << vec
@@ -238,15 +237,14 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                                               otherElems, vecStart);
 
       const uint32_t alignment = nWords * width / 8;
-      Value loadVal = npu::llLoad(rewriter, loc, ptr, valueElemTy, pred,
-                                  falseVal, getTypeConverter(), vec, alignment);
+      Value loadVec = npu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal,
+                                  typeConverter, vec, alignment);
 
-      SmallVector<Value> extractedVals;
-      for (size_t ii = 0; ii < vec; ++ii) {
+      for (size_t ii = 0; ii < vec; ii++) {
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, getTypeConverter()->getIndexType(), ii);
-        Value loaded = b.extract_element(valueElemTy, loadVal, vecIdx);
-        loadedVals.push_back(loaded);
+        Value loadedVal = b.extract_element(valueElemTy, loadVec, vecIdx);
+        loadedVals.push_back(loadedVal);
       }
     }
 
@@ -347,8 +345,13 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
           valueElems, vecStart);
 
       uint32_t alignment = nWords * width / 8;
-      npu::llStore(rewriter, loc, ptrElems[vecStart], valueElemTy, storeVal,
-                   pred, getTypeConverter(), vec, alignment);
+      for (size_t ii = 0; ii < vec; ++ii) {
+        Value vecIdx =
+            mlir::LLVM::createIndexConstant(rewriter, loc, typeConverter, ii);
+        npu::llStore(rewriter, loc, ptrElems[vecStart + ii],
+                     b.extract_element(valueElemTy, storeVal, b.i32_val(ii)),
+                     pred, alignment);
+      }
     }
     rewriter.eraseOp(op);
     return success();
