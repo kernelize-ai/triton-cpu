@@ -25,47 +25,27 @@ Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
 }
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal, const LLVMTypeConverter *typeConverter,
-             unsigned vecSize, unsigned alignment) {
+             Value pred, Value falseVal, unsigned alignment) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  Type ptrTy = typeConverter->convertType(ptr.getType());
 
   Block &predicatedLoad = npu::createPredicatedBlock(
       rewriter, loc, pred, falseVal, [&]() -> SmallVector<Value, 1> {
-        auto loadVecTy = LLVM::getVectorType(elemTy, vecSize);
-        Value loadVec = b.undef(loadVecTy);
-        for (size_t ii = 0; ii < vecSize; ii++) {
-          Value vecIdx =
-              mlir::LLVM::createIndexConstant(rewriter, loc, typeConverter, ii);
-          Value loadAddr = b.gep(ptrTy, elemTy, ptr, vecIdx);
-          Value loadedValue = b.load(elemTy, loadAddr, alignment);
-          loadVec = b.insert_element(loadVecTy, loadVec, loadedValue, vecIdx);
-        }
-        return {loadVec};
+        return {b.load(elemTy, ptr, alignment)};
       });
-
   Value loadVal = *predicatedLoad.args_begin();
 
   return loadVal;
 }
 
-void llStore(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value storeVal, Value pred, const LLVMTypeConverter *typeConverter,
-             unsigned vecSize, unsigned alignment) {
+void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
+             Value pred, unsigned alignment) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   auto ctx = rewriter.getContext();
 
-  for (size_t ii = 0; ii < vecSize; ++ii) {
-    // create a predicated store block for each scalar element
-    Value vecIdx =
-        mlir::LLVM::createIndexConstant(rewriter, loc, typeConverter, ii);
-    npu::createPredicatedBlock(rewriter, loc, pred, [&]() -> ArrayRef<Value> {
-      Value storeAddr = b.bitcast(ptr, ptr_ty(ctx, 1));
-      b.store(b.extract_element(elemTy, storeVal, vecIdx), storeAddr,
-              alignment);
-      return {};
-    });
-  }
+  npu::createPredicatedBlock(rewriter, loc, pred, [&]() -> ArrayRef<Value> {
+    b.store(val, ptr, alignment);
+    return {};
+  });
 }
 
 } // namespace mlir::triton::npu

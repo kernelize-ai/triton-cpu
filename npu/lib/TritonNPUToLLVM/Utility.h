@@ -72,12 +72,10 @@ Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
                const npu::TargetInfo &targetInfo, int *formatStrByteCount);
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal, const LLVMTypeConverter *typeConverter,
-             unsigned vecSize, unsigned alignment);
+             Value pred, Value falseVal, unsigned alignment);
 
-void llStore(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value storeVal, Value pred, const LLVMTypeConverter *typeConverter,
-             unsigned vecSize, unsigned alignment);
+void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
+             Value pred, unsigned alignment);
 
 } // namespace npu
 } // namespace triton
