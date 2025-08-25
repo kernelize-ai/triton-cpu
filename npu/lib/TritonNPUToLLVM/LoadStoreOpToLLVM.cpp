@@ -227,7 +227,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       assert(wordNElems * nWords * numVecs == numElems);
 
       Value pred = mask ? maskElems[vecStart] : b.int_val(1, 1);
-      LDBG("pred = " << pred);
       Value ptr = ptrElems[vecStart];
 
       Value falseVal = createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
@@ -250,7 +249,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     }
 
     Type llvmResultStructTy = getTypeConverter()->convertType(op.getType());
-    LDBG("llvmResultStructTy = " << llvmResultStructTy);
     LDBG("loadedVals Size = " << loadedVals.size());
     Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
                                         rewriter, llvmResultStructTy);
@@ -324,6 +322,10 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
     Value threadPred =
         emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
     uint32_t regMask = freeVarMasks[str_attr("reg")];
+
+    LDBG("StoreOp numElems = " << elemsPerThread << " vec = " << vec
+                               << " valueElemNBits = " << valueElemNBits << " "
+                               << valueTy);
     for (size_t vecStart = 0; vecStart < elemsPerThread; vecStart += vec) {
       if (!isCanonicalIndex(vecStart, regMask)) {
         // Don't emit store ops for redundant elements within a thread
@@ -349,7 +351,8 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx =
             mlir::LLVM::createIndexConstant(rewriter, loc, typeConverter, ii);
-        npu::llStore(rewriter, loc, ptrElems[vecStart + ii],
+        npu::llStore(rewriter, loc,
+                     b.bitcast(ptrElems[vecStart + ii], ptr_ty(ctx, 1)),
                      b.extract_element(valueElemTy, storeVal, b.i32_val(ii)),
                      pred, alignment);
       }
