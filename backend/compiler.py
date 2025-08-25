@@ -19,7 +19,7 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class NPUOptions:
-    num_warps: int = 4
+    num_warps: int = 1
     num_ctas: int = 1
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
@@ -28,6 +28,7 @@ class NPUOptions:
     backend_name: str = 'npu'
     sanitize_overflow: bool = True
     instrumentation_mode: str = ""
+    warp_size: int = 1
 
     def hash(self):
         hash_dict = dict(self.__dict__)
@@ -61,7 +62,7 @@ class NPUBackend(BaseBackend):
         return (
             metadata.num_warps,
             metadata.num_ctas,
-            #metadata.shared,
+            metadata.shared,
             metadata.cluster_dims[0],
             metadata.cluster_dims[1],
             metadata.cluster_dims[2],
@@ -96,12 +97,15 @@ class NPUBackend(BaseBackend):
     @staticmethod
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
-        dump_enabled = pm.enable_debug()
-        num_warps = 2
+        pm.enable_debug()
         threads_per_warp = 1
+        metadata["warp_size"] = threads_per_warp
         num_ctas = 1
-        passes.ttir.add_convert_to_ttgpuir(pm, "npu", num_warps, threads_per_warp, num_ctas)
+        passes.ttir.add_convert_to_ttgpuir(pm, "npu", options.num_warps, threads_per_warp, num_ctas)
         pm.run(mod)
+
+        # TODO: other generic MLIR optimization passes? See AMD/NVIDIA make_ttgir example
+
         return mod
 
     @staticmethod
@@ -136,6 +140,7 @@ class NPUBackend(BaseBackend):
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
 
+        # TODO: match nvidia compiler cleanups?
         return str(llvm_mod)
 
     @staticmethod
