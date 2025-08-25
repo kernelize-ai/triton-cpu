@@ -104,7 +104,8 @@ def ty_to_cpp(ty):
     }[ty]
 
 
-def make_launcher(constants, signature):
+def make_launcher(constants, signature, warp_size):
+    print("Making launcher with warp size: ", warp_size)
 
     def _flatten_signature(sig, output):
         # Flatten tuples
@@ -178,9 +179,9 @@ def make_launcher(constants, signature):
 
     has_spmd_args = True
     if has_spmd_args:
-        kernel_params.extend(["coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+        kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
         arg_types += ', '
-        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
     src = f"""
 #include <stdbool.h>
@@ -207,7 +208,9 @@ static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gri
 
 static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
+    // printf("N: %d\\n", N);
     if (N == 1) {{
+      int thread_id = 0; // TODO
       GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
       (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
       return;
@@ -225,7 +228,10 @@ static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', 
 #endif // _OPENMP
  for (size_t i = 0; i < N; ++i) {{
     GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
-    (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+    for (int thread_id = 0; thread_id < {warp_size}; thread_id++) {{
+        // printf("dispatch kernel thread: %d grid:  %d %d %d\\n", thread_id, coord.x, coord.y, coord.z);
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+    }}
  }}
 
 
@@ -300,6 +306,12 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
     num_threads = PyLong_AsLong(num_threads_attr);
   }}
 
+  int num_warps, num_ctas, shared_memory, clusterDimX, clusterDimY, clusterDimZ;
+  if (!PyArg_ParseTuple(kernel_metadata, \"iiiiii\", &num_warps, &num_ctas, &shared_memory, &clusterDimX, &clusterDimY, &clusterDimZ)) {{
+    PyErr_SetString(PyExc_TypeError, "kernel_metadata must be a tuple");
+    return NULL;
+  }}
+
   // extract launch metadata
   if (launch_enter_hook != Py_None){{
     PyObject* args = Py_BuildValue("(O)", launch_metadata);
@@ -364,7 +376,7 @@ class NPULauncher(object):
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
-        src = make_launcher(constants, signature)
+        src = make_launcher(constants, signature, metadata.warp_size)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
         self.launch = mod.launch
@@ -456,7 +468,7 @@ class NPUDriver(DriverBase):
 
     def get_current_target(self):
         capability = "npu"
-        warp_size = 32
+        warp_size = 1
         return GPUTarget("npu", capability, warp_size)
 
     def get_active_torch_device(self):
