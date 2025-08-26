@@ -28,6 +28,9 @@ void init_triton_npu_passes_ttgpuir(py::module &&m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::npu::createConvertTritonNPUToLLVMPass());
   });
+  m.def("add_allocate_shared_memory", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::npu::createAllocateSharedMemoryPass());
+  });
 }
 
 void init_triton_npu(py::module &&m) {
