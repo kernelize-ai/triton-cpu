@@ -134,6 +134,7 @@ class NPUBackend(BaseBackend):
         pm.enable_debug()
 
         passes.convert.add_scf_to_cf(pm)
+        npu.passes.ttnpuir.add_allocate_shared_memory(pm)
         passes.convert.add_index_to_llvmir(pm)
 
         npu.passes.ttnpuir.add_to_llvmir(pm)
