@@ -217,10 +217,11 @@ static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', 
 #ifdef _OPENMP
     const int ompMaxThreads = omp_get_max_threads();
     maxThreads = N < ompMaxThreads ? N : ompMaxThreads;
+    const int chunkSize = N < 2*maxThreads ? 1 : N / (2*maxThreads);
 #endif // _OPENMP
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(maxThreads)
+#pragma omp parallel for schedule(dynamic, chunkSize) num_threads(maxThreads)
 #endif // _OPENMP
  for (size_t i = 0; i < N; ++i) {{
     GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
