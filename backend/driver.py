@@ -185,9 +185,7 @@ def make_launcher(constants, signature, warp_size):
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
-#ifdef _OPENMP
 #include <omp.h>
-#endif // _OPENMP
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -222,8 +220,8 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
 
 #pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads) collapse(2)
  for (size_t i = 0; i < N; ++i) {{
-    GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
     for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
+        GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
         (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
  }}
