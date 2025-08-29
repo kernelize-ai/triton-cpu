@@ -68,8 +68,8 @@ Block &createPredicatedBlock(RewriterBase &rewriter, Location loc, Value cond,
 // Returns a Value for the format string, which you can reuse. Writes the byte
 // count for the string to |formatStrByteCount| if not null.
 Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
-               ConversionPatternRewriter &rewriter,
-               const npu::TargetInfo &targetInfo, int *formatStrByteCount);
+               RewriterBase &rewriter, const npu::TargetInfo &targetInfo,
+               int *formatStrByteCount = nullptr);
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
              Value pred, Value falseVal, unsigned alignment);

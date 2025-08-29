@@ -8,8 +8,8 @@ using namespace mlir::triton;
 namespace mlir::triton::npu {
 
 Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
-               ConversionPatternRewriter &rewriter,
-               const npu::TargetInfo &targetInfo, int *formatStrByteCount) {
+               RewriterBase &rewriter, const npu::TargetInfo &targetInfo,
+               int *formatStrByteCount) {
   assert(!msg.empty() && "printf with empty string not supported");
   llvm::SmallString<64> msgNewline(msg);
   msgNewline.push_back('\n');
