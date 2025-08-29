@@ -98,6 +98,13 @@ jobs:
           nproc
           echo "PATH is '$PATH'"
           ccache --zero-stats
+          export PATH="/opt/homebrew/opt/llvm@20/bin:$PATH"
+          export CC="/opt/homebrew/opt/llvm@20/bin/clang"
+          export CXX="/opt/homebrew/opt/llvm@20/bin/clang++"
+          export CXXFLAGS="-stdlib=libc++"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@20/lib"
+          which clang++
+          clang++ --version
           TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
       - name: CCache Stats
         run: ccache --print-stats
