@@ -206,30 +206,32 @@ static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gri
     return coord;
 }}
 
-static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
-    // printf("N: %d\\n", N);
-    if (N == 1) {{
-      int thread_id = 0; // TODO
-      GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
-      (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-      return;
-    }}
 
-    int maxThreads = 1;
+    int maxThreads = num_warps;
 #ifdef _OPENMP
-    const int ompMaxThreads = omp_get_max_threads();
-    maxThreads = N < ompMaxThreads ? N : ompMaxThreads;
-    const int chunkSize = N < 2*maxThreads ? 1 : N / (2*maxThreads);
+    maxThreads = omp_get_max_threads() > num_warps ? omp_get_max_threads() : num_warps;
+    const int chunkSize = num_warps;
 #endif // _OPENMP
 
+    if (N == 1) {{
+        GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, chunkSize) num_threads(maxThreads)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads)
+#endif // _OPENMP
+        for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
+            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+        }}
+        return;
+    }}
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads)
 #endif // _OPENMP
  for (size_t i = 0; i < N; ++i) {{
     GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
-    for (int thread_id = 0; thread_id < {warp_size}; thread_id++) {{
-        // printf("dispatch kernel thread: %d grid:  %d %d %d\\n", thread_id, coord.x, coord.y, coord.z);
+    for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
         (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
  }}
@@ -322,7 +324,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   }}
 
   {newline.join(ptr_decls)}
-  _launch(gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  _launch(num_warps, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   if (PyErr_Occurred()) {{
     return NULL;
   }}
