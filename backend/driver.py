@@ -104,7 +104,7 @@ def ty_to_cpp(ty):
     }[ty]
 
 
-def make_launcher(constants, signature, warp_size):
+def make_launcher(constants, signature, warp_size, shared_mem_size):
     print("Making launcher with warp size: ", warp_size)
 
     def _flatten_signature(sig, output):
@@ -179,6 +179,7 @@ def make_launcher(constants, signature, warp_size):
 
     has_spmd_args = True
     if has_spmd_args:
+        # rename `thread_id` to ... `warp_id`?
         kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
         arg_types += ', '
         arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
@@ -189,6 +190,10 @@ def make_launcher(constants, signature, warp_size):
 #ifdef _OPENMP
 #include <omp.h>
 #endif // _OPENMP
+#include <stdalign.h>
+
+// we need this per-block, probably
+alignas(16) unsigned char global_smem[{shared_mem_size + 8}];
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -206,32 +211,68 @@ static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gri
     return coord;
 }}
 
-static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
-    size_t N = gridX * gridY * gridZ;
-    // printf("N: %d\\n", N);
-    if (N == 1) {{
-      int thread_id = 0; // TODO
-      GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
-      (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-      return;
-    }}
+static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+    setbuf(stdout, NULL);
 
-    int maxThreads = 1;
+    memset(global_smem, 0, {shared_mem_size + 8});
+    printf("Initialized shared memory!\\n");
+
+    size_t N = (gridX * gridY * gridZ);
+    printf("N: %ld\\n", N);
+    printf("num warps: %d\\n", num_warps);
+
+#if 1
+    int maxThreads = num_warps;
+#ifdef _OPENMP
+    const int ompMaxThreads = omp_get_max_threads();
+    maxThreads = num_warps < ompMaxThreads ? num_warps : ompMaxThreads;
+#endif // _OPENMP
+#else
+    int maxThreads = 1; // might have to make this warp size!
 #ifdef _OPENMP
     const int ompMaxThreads = omp_get_max_threads();
     maxThreads = N < ompMaxThreads ? N : ompMaxThreads;
     const int chunkSize = N < 2*maxThreads ? 1 : N / (2*maxThreads);
 #endif // _OPENMP
+#endif
+
+    printf("max threads = %d\\n", maxThreads);
+
+    if (N == 1) {{
+        GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
+#if 1
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static, 1) num_threads(maxThreads)
+#endif // _OPENMP
+        for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
+            printf("Dispatch kernel %d\\n", thread_id);
+            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+        }}
+#else
+        int thread_id = 0; // TODO
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+#endif
+      return;
+    }}
+
+    assert(false); // TODO
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, chunkSize) num_threads(maxThreads)
+#pragma omp parallel for schedule(dynamic, num_warps) num_threads(maxThreads)
 #endif // _OPENMP
  for (size_t i = 0; i < N; ++i) {{
+#if 1
+    GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+    for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+    }}
+#else
     GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
     for (int thread_id = 0; thread_id < {warp_size}; thread_id++) {{
         // printf("dispatch kernel thread: %d grid:  %d %d %d\\n", thread_id, coord.x, coord.y, coord.z);
         (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
+#endif
  }}
 
 
@@ -311,6 +352,8 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
     PyErr_SetString(PyExc_TypeError, "kernel_metadata must be a tuple");
     return NULL;
   }}
+  printf("num_warps: %d\\n", num_warps);
+  printf("shared memory used: %d\\n", shared_memory);
 
   // extract launch metadata
   if (launch_enter_hook != Py_None){{
@@ -322,7 +365,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   }}
 
   {newline.join(ptr_decls)}
-  _launch(gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  _launch(num_warps, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   if (PyErr_Occurred()) {{
     return NULL;
   }}
@@ -376,7 +419,7 @@ class NPULauncher(object):
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
-        src = make_launcher(constants, signature, metadata.warp_size)
+        src = make_launcher(constants, signature, metadata.warp_size, metadata.shared)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
         self.launch = mod.launch

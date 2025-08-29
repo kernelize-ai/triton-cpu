@@ -179,7 +179,6 @@ private:
     auto global = b.create<LLVM::GlobalOp>(
         loc, arrayTy, /*isConstant=*/false, LLVM::Linkage::External,
         "global_smem", /*value=*/Attribute(), /*alignment=*/16, cpuAddrSpace);
-    global->setAttr("thread_local", b.getBoolAttr(true));
   }
 };
 
