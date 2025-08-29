@@ -105,8 +105,7 @@ def ty_to_cpp(ty):
 
 
 def make_launcher(constants, signature, warp_size):
-    print("Making launcher with warp size: ", warp_size)
-
+    
     def _flatten_signature(sig, output):
         # Flatten tuples
         if isinstance(sig, tuple):
