@@ -102,9 +102,17 @@ class NPUBackend(BaseBackend):
         metadata["warp_size"] = threads_per_warp
         num_ctas = 1
         passes.ttir.add_convert_to_ttgpuir(pm, "npu", options.num_warps, threads_per_warp, num_ctas)
-        pm.run(mod)
+        passes.ttgpuir.add_coalesce(pm)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
 
-        # TODO: other generic MLIR optimization passes? See AMD/NVIDIA make_ttgir example
+        passes.ttgpuir.add_optimize_thread_locality(pm)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.common.add_symbol_dce(pm)
+        passes.common.add_sccp(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_canonicalizer(pm)
+        pm.run(mod)
 
         return mod
 
