@@ -19,7 +19,7 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class NPUOptions:
-    num_warps: int = 4
+    num_warps: int = 2
     num_ctas: int = 1
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False

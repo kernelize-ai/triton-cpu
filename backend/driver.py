@@ -209,26 +209,19 @@ static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gri
 static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
 
-    int maxThreads = num_warps;
-#ifdef _OPENMP
-    maxThreads = omp_get_max_threads() > num_warps ? omp_get_max_threads() : num_warps;
-    const int chunkSize = num_warps;
-#endif // _OPENMP
+    // maxThreads must be a multiple of num_warps for CPU barriers to work properly
+    const int maxThreads = ((omp_get_max_threads() + num_warps - 1) / num_warps) * num_warps;
 
     if (N == 1) {{
         GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
-#ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads)
-#endif // _OPENMP
         for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
         return;
     }}
 
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads)
-#endif // _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads) collapse(2)
  for (size_t i = 0; i < N; ++i) {{
     GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
     for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
