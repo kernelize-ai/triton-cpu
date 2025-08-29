@@ -208,12 +208,12 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     auto freeVarMasks = getFreeVariableMasks(ptr.getType());
     uint32_t regMask = freeVarMasks[str_attr("reg")];
 
-    LDBG("LoadOp numElems = " << numElems << " vec = " << vec
-                              << " valueElemNBits = " << valueElemNBits << " "
-                              << op.getType());
-    SmallVector<Value> loadedVals;
     Type vecTy = LLVM::getVectorType(valueElemTy, vec);
+    LDBG("LoadOp numElems = " << numElems << " vec = " << vec
+                              << " valueElemNBits = " << valueElemNBits
+                              << ", vecTy = " << vecTy);
 
+    SmallVector<Value> loadedVals;
     for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
       if (auto canonicalVecStart = getCanonicalIndex(vecStart, regMask);
           vecStart != canonicalVecStart) {
