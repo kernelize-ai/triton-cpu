@@ -19,7 +19,7 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class NPUOptions:
-    num_warps: int = 4
+    num_warps: int = 1
     num_ctas: int = 1
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
@@ -77,6 +77,17 @@ class NPUBackend(BaseBackend):
 
     def load_dialects(self, ctx):
         npu.load_dialects(ctx)
+
+    @staticmethod
+    def parse_attr(desc):
+        ret = []
+        # For non-mobile deployments PyTorch uses 64-byte ptr alignment
+        if "D" in desc:
+            ret += [["tt.divisibility", 64]]
+        # pop D from desc
+        desc = desc.replace("D", "")
+        ret += BaseBackend.parse_attr(desc)
+        return ret
 
     @staticmethod
     def make_ttir(mod, metadata, options):
