@@ -202,6 +202,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     // vectorized iteration through all the pointer/mask/other elements
     const int valueElemNBits =
         std::max(8u, valueElemTy.getIntOrFloatBitWidth());
+    const size_t valueElemNBytes = valueElemNBits / 8;
     const int numVecs = numElems / vec;
 
     // Load redundantly in all dims except reg
@@ -224,17 +225,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
         continue;
       }
 
-      // TODO: optimization when ptr is GEP with constant offset
-      size_t in_off = 0;
-
-      const size_t maxWordWidth = std::max<size_t>(32, valueElemNBits);
-      const size_t totalWidth = valueElemNBits * vec;
-      const size_t width = std::min(totalWidth, maxWordWidth);
-      const size_t nWords = std::max<size_t>(1, totalWidth / width);
-      const size_t wordNElems = width / valueElemNBits;
-      const size_t movWidth = width < 16 ? 16 : width;
-      assert(wordNElems * nWords * numVecs == numElems);
-
       Value pred = mask ? maskElems[vecStart] : b.int_val(1, 1);
       Value ptr = ptrElems[vecStart];
 
@@ -245,7 +235,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                                               cast<VectorType>(vecTy),
                                               otherElems, vecStart);
 
-      const uint32_t alignment = nWords * width / 8;
+      const uint32_t alignment = vec * valueElemNBytes;
       Value loadVec =
           npu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, alignment);
 
@@ -344,19 +334,12 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       Value pred =
           llMask ? b.and_(threadPred, maskElems[vecStart]) : threadPred;
 
-      const size_t maxWordWidth = std::max<size_t>(32, valueElemNBits);
-      const size_t totalWidth = valueElemNBits * vec;
-      const size_t width = std::min(totalWidth, maxWordWidth);
-      const size_t nWords = std::max<size_t>(1, totalWidth / width);
-      const size_t wordNElems = width / valueElemNBits;
-      assert(wordNElems * nWords * numVecs == elemsPerThread);
-
       // predicated store
       Value storeVal = packElementRangeIntoVector(
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
 
-      uint32_t alignment = nWords * width / 8;
+      const uint32_t alignment = vec * valueElemNBytes;
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx =
             mlir::LLVM::createIndexConstant(rewriter, loc, typeConverter, ii);
