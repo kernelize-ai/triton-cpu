@@ -166,6 +166,8 @@ def make_launcher(constants, signature, warp_size):
             internal_args_list.append(f"_arg{i}")
     arg_types = ', '.join(f"{ty_to_cpp(ty)}" for ty in signature.values() if ty != "constexpr")
 
+    worker_struct_decls = ';'.join(arg_decls.split(',')) + ';'
+
     # generate glue code
     newline = '\n  '
     ptr_decls = [
@@ -174,18 +176,28 @@ def make_launcher(constants, signature, warp_size):
         if ty[0] == "*"
     ]
     # TODO: float_storage_decls?
-    kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
+    kernel_params = [f"a->arg{i}" for i, ty in signature.items() if ty != "constexpr"]
+    worker_struct_params = [f".arg{i} = arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
     has_spmd_args = True
     if has_spmd_args:
-        kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+        grid_params = ["gridX", "gridY", "gridZ"]
+        worker_struct_params.extend([f".{name} = {name}" for name in grid_params])
+        spmd_kernel_params = ["thread_id", "coord.x", "coord.y", "coord.z"]
+        kernel_params.extend(spmd_kernel_params)
+        kernel_params.extend([f"a->{name}" for name in grid_params])
+        spmd_arg_types = ["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"]
         arg_types += ', '
-        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+        arg_types += ', '.join(spmd_arg_types)
+        # We only need the grid sizes for the per-worker struct
+        worker_struct_decls = worker_struct_decls + ';'.join(f"{ty} {name}"
+                                                             for ty, name in zip(spmd_arg_types[-3:], grid_params))
+        # worker_struct_params = worker_struct_params + ',' + ','.join(f".{name} = {name}" for name in spmd_kernel_params[-3:])
 
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
-#include <omp.h>
+#include <pthread.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -203,11 +215,81 @@ static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gri
     return coord;
 }}
 
+typedef struct {{
+    size_t worker_id;
+    size_t num_workers;
+    size_t num_warps;
+    size_t N;
+    kernel_ptr_t kernel;
+    {worker_struct_decls};
+}} WorkerArgs;
+
+static void *worker_func(void *arg) {{
+    WorkerArgs *a = (WorkerArgs*)arg;
+    size_t warp_id = a->worker_id % a->num_warps;
+    size_t starting_block_id = a->worker_id / a->num_warps;
+    size_t block_offset = a->num_workers / a->num_warps;
+
+    //printf("worker_id = %ld, num_workers = %ld, warp_id = %ld, N = %ld, starting_block_id = %ld, block_offset = %ld\\n",
+    //       a->worker_id, a->num_workers, warp_id, a->N, starting_block_id, block_offset);
+
+    for(size_t i = starting_block_id; i < a->N; i += block_offset) {{
+        GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
+        //printf("Worker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
+        //       a->worker_id, i, coord.x, coord.y, coord.z);
+        size_t thread_id = warp_id;
+        (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+    }}
+    pthread_exit(NULL);
+}};
+
 static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
+    if (N == 0) return;
 
+    //printf("Grid size: %ld\\n", N);
+    //printf("num_warps: %d\\n", num_warps);
+
+    size_t numCpuCores = 2 * sysconf(_SC_NPROCESSORS_ONLN);
+    //printf("numCpuCores = %ld\\n", numCpuCores);
+
+    size_t numWorkers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
+    //printf("numWorkers = %ld\\n", numWorkers);
+
+    size_t workCount = N*num_warps;
+    //rintf("workCount = %ld\\n", workCount);
+    if (workCount < numWorkers)
+        numWorkers = ((workCount + num_warps - 1) / num_warps) * num_warps;
+    //printf("adjusted numWorkers = %ld\\n", numWorkers);
+
+    assert(numWorkers % num_warps == 0);
+
+    pthread_t *ts = malloc(numWorkers * sizeof(*ts));
+    // TODO: args initialization
+    WorkerArgs *args = malloc(numWorkers * sizeof(*args));
+    assert(ts && args);
+
+    for (size_t w = 0; w < numWorkers; ++w) {{
+        args[w] = (WorkerArgs){{
+            .worker_id = w,
+            .num_workers = numWorkers,
+            .num_warps = num_warps,
+            .N = N,
+            .kernel = kernel_ptr,
+            {','.join(worker_struct_params)}
+        }};
+
+        int rc = pthread_create(&ts[w], NULL, worker_func, &args[w]);
+        assert(rc == 0 && "failed to create thread");
+    }}
+    for (size_t w = 0; w < numWorkers; ++w) pthread_join(ts[w], NULL);
+
+    free(args);
+    free(ts);
+
+#if 0
     // maxThreads must be a multiple of num_warps for CPU barriers to work properly
-    const int maxThreads = ((omp_get_max_threads() + num_warps - 1) / num_warps) * num_warps;
+    // const int maxThreads = ((omp_get_max_threads() + num_warps - 1) / num_warps) * num_warps;
 
     if (N == 1) {{
         GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
@@ -226,7 +308,7 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     }}
  }}
 
-
+#endif
 }}
 
 typedef struct _DevicePtrInfo {{
