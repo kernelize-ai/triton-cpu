@@ -229,34 +229,19 @@ static void *worker_func(void *arg) {{
     WorkerArgs *a = (WorkerArgs*)arg;
     size_t warp_id = a->worker_id % a->num_warps;
 
-#if 1
     size_t num_block_groups = ceil((float)a->N / (a->num_workers / a->num_warps));
     size_t block_start = (a->worker_id / a->num_warps) * num_block_groups;
 
-    //printf("worker_id = %ld, block_start = %ld, num_block_groups = %ld\\n", a->worker_id, block_start, num_block_groups);
+    //printf("worker_id = %ld, warp_id = %ld, block_start = %ld, num_block_groups = %ld\\n", a->worker_id, warp_id, block_start, num_block_groups);
 
     for(size_t i = block_start; i < block_start + num_block_groups; i++) {{
         GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
-        //printf("Worker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
-        //       a->worker_id, i, coord.x, coord.y, coord.z);
+        //printf("\tWorker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
+        //      a->worker_id, i, coord.x, coord.y, coord.z);
         size_t thread_id = warp_id;
         (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
-#else
-    size_t starting_block_id = a->worker_id / a->num_warps;
-    size_t block_offset = a->num_workers / a->num_warps;
 
-    //printf("worker_id = %ld, num_workers = %ld, warp_id = %ld, N = %ld, starting_block_id = %ld, block_offset = %ld\\n",
-    //       a->worker_id, a->num_workers, warp_id, a->N, starting_block_id, block_offset);
-
-    for(size_t i = starting_block_id; i < a->N; i += block_offset) {{
-        GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
-        printf("Worker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
-               a->worker_id, i, coord.x, coord.y, coord.z);
-        size_t thread_id = warp_id;
-        (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-    }}
-#endif
     pthread_exit(NULL);
 }};
 
@@ -282,7 +267,6 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     assert(numWorkers % num_warps == 0);
 
     pthread_t *ts = malloc(numWorkers * sizeof(*ts));
-    // TODO: args initialization
     WorkerArgs *args = malloc(numWorkers * sizeof(*args));
     assert(ts && args);
 
