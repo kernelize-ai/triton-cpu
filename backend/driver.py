@@ -198,6 +198,7 @@ def make_launcher(constants, signature, warp_size):
 #include <stdbool.h>
 #include <Python.h>
 #include <pthread.h>
+#include <math.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -227,6 +228,21 @@ typedef struct {{
 static void *worker_func(void *arg) {{
     WorkerArgs *a = (WorkerArgs*)arg;
     size_t warp_id = a->worker_id % a->num_warps;
+
+#if 1
+    size_t num_block_groups = ceil((float)a->N / (a->num_workers / a->num_warps));
+    size_t block_start = (a->worker_id / a->num_warps) * num_block_groups;
+
+    //printf("worker_id = %ld, block_start = %ld, num_block_groups = %ld\\n", a->worker_id, block_start, num_block_groups);
+
+    for(size_t i = block_start; i < block_start + num_block_groups; i++) {{
+        GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
+        //printf("Worker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
+        //       a->worker_id, i, coord.x, coord.y, coord.z);
+        size_t thread_id = warp_id;
+        (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+    }}
+#else
     size_t starting_block_id = a->worker_id / a->num_warps;
     size_t block_offset = a->num_workers / a->num_warps;
 
@@ -235,11 +251,12 @@ static void *worker_func(void *arg) {{
 
     for(size_t i = starting_block_id; i < a->N; i += block_offset) {{
         GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
-        //printf("Worker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
-        //       a->worker_id, i, coord.x, coord.y, coord.z);
+        printf("Worker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
+               a->worker_id, i, coord.x, coord.y, coord.z);
         size_t thread_id = warp_id;
         (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
+#endif
     pthread_exit(NULL);
 }};
 
@@ -250,14 +267,14 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     //printf("Grid size: %ld\\n", N);
     //printf("num_warps: %d\\n", num_warps);
 
-    size_t numCpuCores = 2 * sysconf(_SC_NPROCESSORS_ONLN);
+    size_t numCpuCores = sysconf(_SC_NPROCESSORS_ONLN);
     //printf("numCpuCores = %ld\\n", numCpuCores);
 
     size_t numWorkers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
     //printf("numWorkers = %ld\\n", numWorkers);
 
     size_t workCount = N*num_warps;
-    //rintf("workCount = %ld\\n", workCount);
+    //printf("workCount = %ld\\n", workCount);
     if (workCount < numWorkers)
         numWorkers = ((workCount + num_warps - 1) / num_warps) * num_warps;
     //printf("adjusted numWorkers = %ld\\n", numWorkers);
