@@ -1,12 +1,10 @@
-// #include "TritonToTritonCPU/Passes.h"
-
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
 #include "npu/include/TritonNPUToLLVM/Passes.h"
 
 #include "mlir/Pass/PassManager.h"
-// #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/SubtargetFeature.h"
 
 #include <pybind11/pybind11.h>
 
@@ -54,4 +52,14 @@ void init_triton_npu(py::module &&m) {
         [](llvm::Module *module, const std::string &triple) {
           module->setTargetTriple(llvm::Triple(triple));
         });
+
+  m.def("get_target_features", []() {
+    llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+    llvm::SubtargetFeatures STF;
+    for (auto &[feature, enabled] : hostFeatures)
+      if (enabled)
+        STF.AddFeature(feature);
+    std::string featuresStr = STF.getString();
+    return featuresStr;
+  });
 }

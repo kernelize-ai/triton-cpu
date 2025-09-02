@@ -153,13 +153,15 @@ class NPUBackend(BaseBackend):
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         npu.attach_target_triple(llvm_mod, npu.get_default_target_triple())
-        target_features = ''
+        target_features = npu.get_target_features()
         llvm.attach_datalayout(llvm_mod, npu.get_default_target_triple(), options.arch, target_features)
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
 
-        # TODO: match nvidia compiler cleanups?
-        return str(llvm_mod)
+        ret = str(llvm_mod)
+        del llvm_mod
+        del context
+        return ret
 
     @staticmethod
     def make_asm(src, metadata, options):
