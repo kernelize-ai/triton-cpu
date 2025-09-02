@@ -25,33 +25,23 @@ def is_macos():
     return platform.system() == "Darwin"
 
 
-@functools.lru_cache()
-def external_openmp_path():
-    return os.environ.get("TRITON_LOCAL_LIBOMP_PATH", "/opt/homebrew/opt/libomp/")
-
-
 dirname = os.path.dirname(os.path.realpath(__file__))
-include_dirs = [os.path.join(dirname, "include")
-                ] + [os.path.join(external_openmp_path(), "include") if is_macos() else []]
+include_dirs = [os.path.join(dirname, "include")]
 libdevice_dir = os.path.join(dirname, "lib")
 libraries = []
 
 
 @functools.lru_cache()
 def system_ccflags():
-    ccflags = []
+    ccflags = ["-pthread"]
     if is_macos():
-        ccflags.extend(["-undefined", "dynamic_lookup", "-Xclang", "-fopenmp"])
-    else:
-        ccflags.extend(["-fopenmp"])
+        ccflags.extend(["-undefined", "dynamic_lookup"])
     return ccflags
 
 
 @functools.lru_cache()
 def library_dirs():
     lib_dirs = [_triton_C_dir]
-    if is_macos():
-        lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
     return lib_dirs
 
 
@@ -232,12 +222,8 @@ static void *worker_func(void *arg) {{
     size_t num_block_groups = ceil((float)a->N / (a->num_workers / a->num_warps));
     size_t block_start = (a->worker_id / a->num_warps) * num_block_groups;
 
-    //printf("worker_id = %ld, warp_id = %ld, block_start = %ld, num_block_groups = %ld\\n", a->worker_id, warp_id, block_start, num_block_groups);
-
     for(size_t i = block_start; i < block_start + num_block_groups; i++) {{
         GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
-        //printf("\tWorker %ld launching kernel for block %ld at coord <%d, %d, %d>\\n",
-        //      a->worker_id, i, coord.x, coord.y, coord.z);
         size_t thread_id = warp_id;
         (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
@@ -249,20 +235,12 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     size_t N = gridX * gridY * gridZ;
     if (N == 0) return;
 
-    //printf("Grid size: %ld\\n", N);
-    //printf("num_warps: %d\\n", num_warps);
-
     size_t numCpuCores = sysconf(_SC_NPROCESSORS_ONLN);
-    //printf("numCpuCores = %ld\\n", numCpuCores);
-
     size_t numWorkers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
-    //printf("numWorkers = %ld\\n", numWorkers);
-
     size_t workCount = N*num_warps;
-    //printf("workCount = %ld\\n", workCount);
+
     if (workCount < numWorkers)
         numWorkers = ((workCount + num_warps - 1) / num_warps) * num_warps;
-    //printf("adjusted numWorkers = %ld\\n", numWorkers);
 
     assert(numWorkers % num_warps == 0);
 
@@ -287,29 +265,6 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
 
     free(args);
     free(ts);
-
-#if 0
-    // maxThreads must be a multiple of num_warps for CPU barriers to work properly
-    // const int maxThreads = ((omp_get_max_threads() + num_warps - 1) / num_warps) * num_warps;
-
-    if (N == 1) {{
-        GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
-#pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads)
-        for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
-            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-        }}
-        return;
-    }}
-
-#pragma omp parallel for schedule(dynamic, 1) num_threads(maxThreads) collapse(2)
- for (size_t i = 0; i < N; ++i) {{
-    for (int thread_id = 0; thread_id < num_warps; thread_id++) {{
-        GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
-        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-    }}
- }}
-
-#endif
 }}
 
 typedef struct _DevicePtrInfo {{
