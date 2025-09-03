@@ -226,7 +226,7 @@ static void *worker_func(void *arg) {{
         (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
 
-    pthread_exit(NULL);
+    return NULL;
 }};
 
 static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
