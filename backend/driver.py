@@ -198,7 +198,7 @@ typedef struct _GridCoordinate {{
     int z;
 }} GridCoordinate;
 
-static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gridZ) {{
+static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gridZ) {{
     GridCoordinate coord;
     coord.z = idx / (gridX * gridY);
     coord.y = (idx % (gridX * gridY)) / gridX;
@@ -206,7 +206,7 @@ static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gri
     return coord;
 }}
 
-typedef struct {{
+typedef struct __attribute__((aligned(128))) {{
     size_t worker_id;
     size_t num_workers;
     size_t num_warps;
@@ -245,7 +245,8 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     assert(numWorkers % num_warps == 0);
 
     pthread_t *ts = malloc(numWorkers * sizeof(*ts));
-    WorkerArgs *args = malloc(numWorkers * sizeof(*args));
+    //printf("args size: %ld\\n", sizeof(WorkerArgs));
+    WorkerArgs *args = aligned_alloc(128, numWorkers * sizeof(*args));
     assert(ts && args);
 
     for (size_t w = 0; w < numWorkers; ++w) {{
@@ -408,7 +409,8 @@ class NPULauncher(object):
         signature = {idx: value for idx, value in src.signature.items()}
         src = make_launcher(constants, signature, metadata.warp_size)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
+                                      include_dirs=include_dirs, libraries=libraries,
+                                      ccflags=system_ccflags() + ["-fno-omit-frame-pointer"])
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
