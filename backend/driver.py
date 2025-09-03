@@ -182,7 +182,6 @@ def make_launcher(constants, signature, warp_size):
         # We only need the grid sizes for the per-worker struct
         worker_struct_decls = worker_struct_decls + ';'.join(f"{ty} {name}"
                                                              for ty, name in zip(spmd_arg_types[-3:], grid_params))
-        # worker_struct_params = worker_struct_params + ',' + ','.join(f".{name} = {name}" for name in spmd_kernel_params[-3:])
 
     src = f"""
 #include <stdbool.h>
