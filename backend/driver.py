@@ -236,17 +236,15 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
 
     size_t numCpuCores = sysconf(_SC_NPROCESSORS_ONLN);
     size_t numWorkers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
-    size_t workCount = N*num_warps;
-
-    if (workCount < numWorkers)
-        numWorkers = ((workCount + num_warps - 1) / num_warps) * num_warps;
-
     size_t blocks_per_worker = ceil((float)N / (numWorkers / num_warps));
 
-    //printf("numCpuCores = %ld\\n", numCpuCores);
-    //printf("numWorkers = %ld\\n", numWorkers);
-    //printf("workCount = %ld\\n", workCount);
-    //printf("blocks_per_worker = %ld\\n", blocks_per_worker);
+    while (blocks_per_worker < 256) {{
+        if (numCpuCores == 1)
+            break;
+        numCpuCores /= 2;
+        numWorkers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
+        blocks_per_worker = ceil((float)N / (numWorkers / num_warps));
+    }}
 
     assert(numWorkers % num_warps == 0);
 
