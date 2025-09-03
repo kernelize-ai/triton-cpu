@@ -155,8 +155,7 @@ class NPUBackend(BaseBackend):
         npu.attach_target_triple(llvm_mod, npu.get_default_target_triple())
         target_features = npu.get_target_features()
         llvm.attach_datalayout(llvm_mod, npu.get_default_target_triple(), options.arch, target_features)
-
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, target_features, [], options.enable_fp_fusion)
 
         ret = str(llvm_mod)
         del llvm_mod
@@ -170,8 +169,9 @@ class NPUBackend(BaseBackend):
         metadata["name"] = names[0]
         metadata["shared"] = 1
 
+        target_features = npu.get_target_features()
         flags = []
-        return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
+        return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, target_features, flags,
                                      options.enable_fp_fusion, False)
 
     @staticmethod
