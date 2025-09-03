@@ -208,9 +208,8 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 
 typedef struct __attribute__((aligned(128))) {{
     size_t worker_id;
-    size_t num_workers;
     size_t num_warps;
-    size_t N;
+    size_t blocks_per_worker;
     kernel_ptr_t kernel;
     {worker_struct_decls};
 }} WorkerArgs;
@@ -219,10 +218,10 @@ static void *worker_func(void *arg) {{
     WorkerArgs *a = (WorkerArgs*)arg;
     size_t warp_id = a->worker_id % a->num_warps;
 
-    size_t num_block_groups = ceil((float)a->N / (a->num_workers / a->num_warps));
-    size_t block_start = (a->worker_id / a->num_warps) * num_block_groups;
+    size_t blocks_per_worker = a->blocks_per_worker;
+    size_t block_start = (a->worker_id / a->num_warps) * blocks_per_worker;
 
-    for(size_t i = block_start; i < block_start + num_block_groups; i++) {{
+    for(size_t i = block_start; i < block_start + blocks_per_worker; i++) {{
         GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
         size_t thread_id = warp_id;
         (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
@@ -242,19 +241,24 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     if (workCount < numWorkers)
         numWorkers = ((workCount + num_warps - 1) / num_warps) * num_warps;
 
+    size_t blocks_per_worker = ceil((float)N / (numWorkers / num_warps));
+
+    //printf("numCpuCores = %ld\\n", numCpuCores);
+    //printf("numWorkers = %ld\\n", numWorkers);
+    //printf("workCount = %ld\\n", workCount);
+    //printf("blocks_per_worker = %ld\\n", blocks_per_worker);
+
     assert(numWorkers % num_warps == 0);
 
     pthread_t *ts = malloc(numWorkers * sizeof(*ts));
-    //printf("args size: %ld\\n", sizeof(WorkerArgs));
     WorkerArgs *args = aligned_alloc(128, numWorkers * sizeof(*args));
     assert(ts && args);
 
     for (size_t w = 0; w < numWorkers; ++w) {{
         args[w] = (WorkerArgs){{
             .worker_id = w,
-            .num_workers = numWorkers,
             .num_warps = num_warps,
-            .N = N,
+            .blocks_per_worker = blocks_per_worker,
             .kernel = kernel_ptr,
             {','.join(worker_struct_params)}
         }};
