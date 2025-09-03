@@ -38,7 +38,7 @@ jobs:
       - name: Install brew dependencies
         run: |
           brew update
-          brew install ccache llvm@20 lld coreutils libomp
+          brew install ccache llvm@20 lld coreutils
       - name: Compute cache keys
         id: cache-key
         run: |
