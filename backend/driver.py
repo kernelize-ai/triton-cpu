@@ -24,6 +24,9 @@ except AttributeError:
 def is_macos():
     return platform.system() == "Darwin"
 
+@functools.lru_cache()
+def get_num_cpus():
+    return os.cpu_count()
 
 dirname = os.path.dirname(os.path.realpath(__file__))
 include_dirs = [os.path.join(dirname, "include")]
@@ -188,7 +191,6 @@ def make_launcher(constants, signature, warp_size):
 #include <Python.h>
 #include <pthread.h>
 #include <math.h>
-#include <sched.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -220,6 +222,7 @@ typedef struct __attribute__((aligned(128))) {{
 static void *worker_func(void *arg) {{
     WorkerArgs *a = (WorkerArgs*)arg;
     const size_t warp_id = a->worker_id % a->num_warps;
+    const size_t thread_id = warp_id;
     const size_t team_id = a->worker_id / a->num_warps; 
     const size_t num_teams = a->num_teams;
 
@@ -233,7 +236,6 @@ static void *worker_func(void *arg) {{
         const size_t run_end = (i + consecutive_blocks < total_blocks) ? (i + consecutive_blocks) : total_blocks; 
         for (size_t j = i; j < run_end; j++) {{
             GridCoordinate coord = get_grid_coordinate(j, a->gridX, a->gridY, a->gridZ);
-            size_t thread_id = warp_id;
             (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
     }}
@@ -245,21 +247,27 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     size_t N = gridX * gridY * gridZ;
     if (N == 0) return;
 
-    const size_t numCpuCores = sysconf(_SC_NPROCESSORS_ONLN);;
+    // read the number of CPUs from python when we compile this file. note that this could be a problem if the cache was ported across systems, but that's probably unsafe with the CPU backend
+    const size_t numCpuCores = {get_num_cpus()};
     size_t num_workers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
     assert(num_workers % num_warps == 0);
 
     size_t num_teams = num_workers / num_warps;
-    size_t consecutive_blocks = ceil((float)N / (num_teams));
-    while(consecutive_blocks < 256) {{
+#if 1
+    // avoid lots of teams doing little work
+    size_t blocks_per_team = ceil((float)N / (num_teams));
+    while(blocks_per_team < 64) {{
         if (num_teams == 1) break;
         num_teams /= 2;
-        consecutive_blocks = ceil((float)N / (num_teams)); 
+        blocks_per_team = ceil((float)N / (num_teams)); 
     }}
+#endif 
 
+    const size_t consecutive_blocks = ceil((float)N / (num_teams));
     const size_t block_stride = num_teams * consecutive_blocks;
     // setting consecutive blocks may have modified num_teams, so reset num_workers
     num_workers = num_teams * num_warps; 
+    printf("size = %ld, blocks = %ld, blocks_per_team = %ld, consecutive_blocks = %ld, block_stride = %ld, num_teams = %ld, num_workers = %ld\\n", N * 1024, N, N / num_teams, consecutive_blocks, block_stride, num_teams, num_workers);
 
     WorkerArgs *args = aligned_alloc(128, num_workers * sizeof(*args));
     assert(args);
@@ -343,14 +351,6 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   }}
 
   kernel_ptr_t kernel_ptr = (kernel_ptr_t)(_function);
-
-   // Extract num_threads metadata.
-  int num_threads = 0;
-  if (PyObject_HasAttrString(kernel_metadata, "num_threads")) {{
-    PyObject *num_threads_attr = PyObject_GetAttrString(kernel_metadata, "num_threads");
-    assert(PyLong_Check(num_threads_attr));
-    num_threads = PyLong_AsLong(num_threads_attr);
-  }}
 
   int num_warps, num_ctas, shared_memory, clusterDimX, clusterDimY, clusterDimZ;
   if (!PyArg_ParseTuple(kernel_metadata, \"iiiiii\", &num_warps, &num_ctas, &shared_memory, &clusterDimX, &clusterDimY, &clusterDimZ)) {{
