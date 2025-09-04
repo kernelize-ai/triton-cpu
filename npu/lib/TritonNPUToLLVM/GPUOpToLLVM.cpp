@@ -30,8 +30,7 @@ public:
       threadIdOp.emitError("unsupported thread id dimension");
     }
 
-    assert(args.size() > 7 &&
-           "incorrect npu kernel function signature"); 
+    assert(args.size() > 7 && "incorrect npu kernel function signature");
     auto funcArgIdx = args.size() - 7;
     assert(args[funcArgIdx].getType().isInteger(32) &&
            "Thread ID argument must be i32");
