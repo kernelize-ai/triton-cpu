@@ -169,7 +169,7 @@ def make_launcher(constants, signature, warp_size):
         if ty[0] == "*"
     ]
     # TODO: float_storage_decls?
-    kernel_params = [f"a->arg{i}" for i, ty in signature.items() if ty != "constexpr"]
+    kernel_params = [f"job.arg{i}" for i, ty in signature.items() if ty != "constexpr"]
     worker_struct_params = [f".arg{i} = arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
     has_spmd_args = True
@@ -178,7 +178,7 @@ def make_launcher(constants, signature, warp_size):
         worker_struct_params.extend([f".{name} = {name}" for name in grid_params])
         spmd_kernel_params = ["thread_id", "coord.x", "coord.y", "coord.z"]
         kernel_params.extend(spmd_kernel_params)
-        kernel_params.extend([f"a->{name}" for name in grid_params])
+        kernel_params.extend([f"job.{name}" for name in grid_params])
         spmd_arg_types = ["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"]
         arg_types += ', '
         arg_types += ', '.join(spmd_arg_types)
@@ -219,6 +219,7 @@ typedef struct __attribute__((aligned(128))) {{
     {worker_struct_decls};
 }} WorkerArgs;
 
+#if 0
 static void *worker_func(void *arg) {{
     WorkerArgs *a = (WorkerArgs*)arg;
     const size_t warp_id = a->worker_id % a->num_warps;
@@ -242,21 +243,149 @@ static void *worker_func(void *arg) {{
 
     return NULL;
 }};
+#endif 
+
+typedef struct {{
+    size_t active_workers;
+    size_t num_warps; // threads per team
+    size_t num_teams; // each team cooperatively processes one block
+    size_t consecutive_blocks;
+    size_t block_stride;
+    kernel_ptr_t kernel;
+    {worker_struct_decls};
+}} Job;
+
+typedef struct {{
+    pthread_mutex_t mutex;
+    pthread_cond_t cv_start, cv_done;
+    pthread_barrier_t start_barrier; 
+    pthread_t *th;
+    size_t num_workers;
+
+    Job job;
+    size_t remaining;
+    int has_job, stop;
+}} Pool;
+
+static Pool g = {{0}};
+
+static void* worker(void* arg) {{
+    const size_t worker_id = (size_t)(uintptr_t)arg;
+    //fprintf(stderr, "worker %ld starting\\n", worker_id);
+
+    for(;;) {{
+        pthread_mutex_lock(&g.mutex);
+        while (!g.has_job && !g.stop) pthread_cond_wait(&g.cv_start, &g.mutex);
+        //fprintf(stderr, "worker %ld woke up\\n", worker_id);
+        if (g.stop) {{
+            //fprintf(stderr, "worker %ld stopping\\n", worker_id);
+            pthread_mutex_unlock(&g.mutex);
+            break;
+        }}
+
+        // make a local copy
+        const Job job = g.job;
+        pthread_mutex_unlock(&g.mutex);
+
+        //pthread_barrier_wait(&g.start_barrier);
+
+        if (worker_id < job.active_workers) {{
+            const size_t warp_id = worker_id % job.num_warps;
+            const size_t thread_id = warp_id;
+            const size_t team_id = worker_id / job.num_warps;
+            const size_t num_teams = job.num_teams;
+            //fprintf(stderr, "worker %ld running job with warp_id = %ld, team_id = %ld, num_teams = %ld\\n", worker_id, warp_id, team_id, num_teams);
+            const size_t total_blocks = job.gridX * job.gridY * job.gridZ;
+            const size_t consecutive_blocks = job.consecutive_blocks;
+            const size_t block_stride = job.block_stride;
+
+            const size_t block_start = consecutive_blocks * team_id;
+
+            for(size_t i = block_start; i < total_blocks; i+=block_stride) {{
+                const size_t run_end = (i + consecutive_blocks < total_blocks) ? (i + consecutive_blocks) : total_blocks; 
+                for (size_t j = i; j < run_end; j++) {{
+                    GridCoordinate coord = get_grid_coordinate(j, job.gridX, job.gridY, job.gridZ);
+                    (*job.kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+                }}
+            }}
+            
+            pthread_mutex_lock(&g.mutex);
+            if (--g.remaining == 0) {{
+                g.has_job = 0; 
+                //fprintf(stderr, "worker %ld signaling exit\\n", worker_id);
+                pthread_cond_signal(&g.cv_done); 
+            }}
+            pthread_mutex_unlock(&g.mutex);
+        }}
+
+        pthread_barrier_wait(&g.start_barrier);
+
+        // fprintf(stderr, "worker %ld finished\\n", worker_id);
+    }}
+    //fprintf(stderr, "worker %ld returning\\n", worker_id);
+    return NULL;
+}}
+
+static void _pool_init(size_t num_workers) {{
+    if (g.th) return; 
+
+    // make sure thread pool parameters are initialized to 0
+    g.remaining = 0;
+    g.has_job = 0;
+    g.stop = 0;
+    g.num_workers = num_workers;
+    pthread_mutex_init(&g.mutex, NULL);
+    pthread_cond_init(&g.cv_start, NULL);
+    pthread_cond_init(&g.cv_done, NULL);
+    pthread_barrier_init(&g.start_barrier, NULL, (unsigned)g.num_workers);
+    g.th = (pthread_t*)calloc(num_workers, sizeof(*g.th));
+    for (size_t i = 0; i < g.num_workers; i++) {{
+        pthread_create(&g.th[i], NULL, worker, (void*)(uintptr_t)i);
+    }}
+}}
+
+static void _pool_shutdown() {{
+    if (!g.th) return;
+    pthread_mutex_lock(&g.mutex);
+    //while (g.has_job) pthread_cond_wait(&g.cv_done, &g.mutex);
+    
+    g.stop = 1;
+    pthread_cond_broadcast(&g.cv_start);
+    pthread_mutex_unlock(&g.mutex);
+
+    for(size_t i=0;i<g.num_workers;i++) 
+        pthread_join(g.th[i], NULL);
+    free(g.th);
+}}
+
+int _dispatch_job_to_pool(Job j) {{
+    pthread_mutex_lock(&g.mutex);
+    g.job = j;
+    g.remaining = j.active_workers;
+    g.has_job = 1;
+    pthread_cond_broadcast(&g.cv_start);
+    pthread_mutex_unlock(&g.mutex);
+
+    pthread_mutex_lock(&g.mutex);
+    while (g.has_job) pthread_cond_wait(&g.cv_done, &g.mutex);
+    pthread_mutex_unlock(&g.mutex);
+    return 0;
+}}
 
 static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
     if (N == 0) return;
 
-    // read the number of CPUs from python when we compile this file. note that this could be a problem if the cache was ported across systems, but that's probably unsafe with the CPU backend
-    const size_t numCpuCores = {get_num_cpus()};
-    size_t num_workers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
+    // read the number of available workers from the thread pool
+    const size_t available_workers = g.num_workers;
+    size_t num_workers = ((available_workers + num_warps - 1) / num_warps) * num_warps;
     assert(num_workers % num_warps == 0);
 
     size_t num_teams = num_workers / num_warps;
 #if 1
     // avoid lots of teams doing little work
     size_t blocks_per_team = ceil((float)N / (num_teams));
-    while(blocks_per_team < 64) {{
+    while(blocks_per_team < 32) {{
         if (num_teams == 1) break;
         num_teams /= 2;
         blocks_per_team = ceil((float)N / (num_teams)); 
@@ -267,8 +396,23 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     const size_t block_stride = num_teams * consecutive_blocks;
     // setting consecutive blocks may have modified num_teams, so reset num_workers
     num_workers = num_teams * num_warps; 
-    printf("size = %ld, blocks = %ld, blocks_per_team = %ld, consecutive_blocks = %ld, block_stride = %ld, num_teams = %ld, num_workers = %ld\\n", N * 1024, N, N / num_teams, consecutive_blocks, block_stride, num_teams, num_workers);
+    fprintf(stderr, "size = %ld, blocks = %ld, blocks_per_team = %ld, consecutive_blocks = %ld, block_stride = %ld, num_teams = %ld, num_workers = %ld\\n", N * 1024, N, N / num_teams, consecutive_blocks, block_stride, num_teams, num_workers);
+#if 1
 
+    assert(num_workers <= available_workers);
+
+    Job j = {{
+        .active_workers = num_workers,
+        .num_warps = num_warps,
+        .num_teams = num_teams,
+        .consecutive_blocks = consecutive_blocks,
+        .block_stride = block_stride,
+        .kernel = kernel_ptr,
+        {','.join(worker_struct_params)}
+    }};
+    _dispatch_job_to_pool(j);
+
+#else
     WorkerArgs *args = aligned_alloc(128, num_workers * sizeof(*args));
     assert(args);
 
@@ -289,6 +433,7 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     for (size_t w = 0; w < num_workers; ++w) pthread_join(args[w].thread_id, NULL);
 
     free(args);
+#endif 
 }}
 
 typedef struct _DevicePtrInfo {{
@@ -393,8 +538,24 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   return Py_None;
 }}
 
+static PyObject* pool_init(PyObject* self, PyObject* args) {{
+    int num_workers = 0;
+    if(!PyArg_ParseTuple(args, "i", &num_workers)) {{
+        return NULL;
+    }}
+    Py_BEGIN_ALLOW_THREADS;
+    _pool_init(num_workers);
+    Py_END_ALLOW_THREADS;
+    return Py_None;
+}}
+
+static void at_exit_cb() {{
+    _pool_shutdown();
+}}
+
 static PyMethodDef ModuleMethods[] = {{
   {{"launch", launch, METH_VARARGS, "Entry point for all kernels with this signature"}},
+  {{"pool_init", pool_init, METH_VARARGS, "Initialize the thread pool"}},
   {{NULL, NULL, 0, NULL}} // sentinel
 }};
 
@@ -412,6 +573,7 @@ PyMODINIT_FUNC PyInit___triton_launcher(void) {{
     return NULL;
   }}
   PyModule_AddFunctions(m, ModuleMethods);
+  Py_AtExit(at_exit_cb);
   return m;
 }}
 """
@@ -429,6 +591,7 @@ class NPULauncher(object):
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs, libraries=libraries,
                                       ccflags=system_ccflags())
+        mod.pool_init(get_num_cpus())
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
