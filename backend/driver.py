@@ -195,7 +195,7 @@ typedef struct _GridCoordinate {{
     int z;
 }} GridCoordinate;
 
-static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gridZ) {{
+static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gridZ) {{
     GridCoordinate coord;
     coord.z = idx / (gridX * gridY);
     coord.y = (idx % (gridX * gridY)) / gridX;
@@ -245,6 +245,9 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     printf("size = %u, N = %u, passes = %u, consecutive_blocks = %u, block_stride = %u, num_teams = %d\\n", N * 1024, N, passes, consecutive_blocks, block_stride, num_teams);
 
 #if 1 
+
+    omp_set_dynamic(0);
+    //    omp_set_num_threads(maxThreads);
 
     #pragma omp parallel num_threads(num_teams * num_warps)
     {{
