@@ -207,23 +207,33 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 
 typedef struct __attribute__((aligned(128))) {{
     size_t worker_id;
-    size_t num_warps;
-    size_t blocks_per_worker;
+    size_t num_warps; // threads per team
+    size_t num_teams; // each team cooperatively processes one block
+    size_t consecutive_blocks;
+    size_t block_stride;
     kernel_ptr_t kernel;
     {worker_struct_decls};
 }} WorkerArgs;
 
 static void *worker_func(void *arg) {{
     WorkerArgs *a = (WorkerArgs*)arg;
-    size_t warp_id = a->worker_id % a->num_warps;
+    const size_t warp_id = a->worker_id % a->num_warps;
+    const size_t team_id = a->worker_id / a->num_warps; 
+    const size_t num_teams = a->num_teams;
 
-    size_t blocks_per_worker = a->blocks_per_worker;
-    size_t block_start = (a->worker_id / a->num_warps) * blocks_per_worker;
+    const size_t total_blocks = a->gridX * a->gridY * a->gridZ;
+    const size_t consecutive_blocks = a->consecutive_blocks;
+    const size_t block_stride = a->block_stride;
 
-    for(size_t i = block_start; i < block_start + blocks_per_worker; i++) {{
-        GridCoordinate coord = get_grid_coordinate(i, a->gridX, a->gridY, a->gridZ);
-        size_t thread_id = warp_id;
-        (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+    size_t block_start = consecutive_blocks * team_id;
+
+    for(size_t i = block_start; i < total_blocks; i+=block_stride) {{
+        const size_t run_end = (i + consecutive_blocks < total_blocks) ? (i + consecutive_blocks) : total_blocks; 
+        for (size_t j = i; j < run_end; j++) {{
+            GridCoordinate coord = get_grid_coordinate(j, a->gridX, a->gridY, a->gridZ);
+            size_t thread_id = warp_id;
+            (*a->kernel)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+        }}
     }}
 
     return NULL;
@@ -234,28 +244,54 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     if (N == 0) return;
 
     size_t numCpuCores = sysconf(_SC_NPROCESSORS_ONLN);
-    size_t numWorkers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
-    size_t blocks_per_worker = ceil((float)N / (numWorkers / num_warps));
-
-    while (blocks_per_worker < 256) {{
-        if (numCpuCores == 1)
-            break;
+    // limit the number of cpu cores to the size of the grid (maybe include warps here?)
+    if (N < numCpuCores)
+        numCpuCores = N;
+    // disable hyperthreading for smaller grid sizes 
+#if 0
+    if (N / (numCpuCores / num_warps) < 128)
         numCpuCores /= 2;
-        numWorkers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
-        blocks_per_worker = ceil((float)N / (numWorkers / num_warps));
+#endif 
+    size_t num_workers = ((numCpuCores + num_warps - 1) / num_warps) * num_warps;
+    assert(num_workers % num_warps == 0);
+
+    size_t num_teams = num_workers / num_warps;
+    assert(num_teams > 0);
+
+    size_t blocks_per_team = ceil((float)N / (num_workers / num_warps));
+
+    size_t consecutive_blocks = ceil((float)N / (2 * num_teams));
+#if 0
+    if (N < 64) {{
+        // for small grids we want to spread the work around more team members 
+        consecutive_blocks = 1;
+    }} else {{
+        while (num_teams * consecutive_blocks < N) {{
+            consecutive_blocks *= 2;
+        }}
     }}
+#endif 
+    size_t block_stride = num_teams * consecutive_blocks;
+#if 0
+    while (block_stride > num_teams) {{
+        consecutive_blocks /= 2;
+        block_stride = num_teams * consecutive_blocks;
+    }}
+#endif 
 
-    assert(numWorkers % num_warps == 0);
+    printf("size = %ld, blocks = %ld, blocks_per_team = %ld, consecutive_blocks = %ld, block_stride = %ld, num_teams = %ld\\n", N * 1024, N, blocks_per_team, consecutive_blocks, block_stride, num_teams);
 
-    pthread_t *ts = malloc(numWorkers * sizeof(*ts));
-    WorkerArgs *args = aligned_alloc(128, numWorkers * sizeof(*args));
+    pthread_t *ts = malloc(num_workers * sizeof(*ts));
+    WorkerArgs *args = aligned_alloc(128, num_workers * sizeof(*args));
     assert(ts && args);
 
-    for (size_t w = 0; w < numWorkers; ++w) {{
+    for (size_t w = 0; w < num_workers; ++w) {{
         args[w] = (WorkerArgs){{
             .worker_id = w,
             .num_warps = num_warps,
-            .blocks_per_worker = blocks_per_worker,
+            .num_teams = num_teams,
+            .consecutive_blocks = consecutive_blocks,
+            .block_stride = block_stride,
             .kernel = kernel_ptr,
             {','.join(worker_struct_params)}
         }};
@@ -263,7 +299,7 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
         int rc = pthread_create(&ts[w], NULL, worker_func, &args[w]);
         assert(rc == 0 && "failed to create thread");
     }}
-    for (size_t w = 0; w < numWorkers; ++w) pthread_join(ts[w], NULL);
+    for (size_t w = 0; w < num_workers; ++w) pthread_join(ts[w], NULL);
 
     free(args);
     free(ts);
