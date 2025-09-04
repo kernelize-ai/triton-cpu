@@ -223,7 +223,7 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
 
         const unsigned block_start = consecutive_blocks * team_id;
 
-        const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N; 
+        const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
         for(unsigned i = block_start; i < run_end; i++) {{
             GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
