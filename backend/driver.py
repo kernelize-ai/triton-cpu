@@ -205,15 +205,6 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 
 static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
-#if 0
-    if (N == 1) {{
-      GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
-      const int thread_id = 0;
-      (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-      return;
-    }}
-#endif 
-
     assert(num_warps == 1); // currently only support 1 warp per block
 
     int maxThreads = 1;
@@ -223,33 +214,16 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     int num_teams = maxThreads / num_warps;
 
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
-#if 0
-    if (consecutive_blocks > 512) {{
-        num_teams *= 2;
-        consecutive_blocks = ceil((float)N / (num_teams));
-    }}
-#endif 
     unsigned block_stride = num_teams * consecutive_blocks;
-#if 1
-    
-#else
-    unsigned passes = ceil((float)N / (consecutive_blocks * num_teams));
-    while (block_stride > 1024) {{
-        consecutive_blocks /= 2;
-        block_stride = num_teams * consecutive_blocks;
-    }}
-#endif 
+
 
     const unsigned passes = ceil((float)N / (consecutive_blocks * num_teams));
     assert(passes == 1);
-    printf("size = %u, N = %u, passes = %u, consecutive_blocks = %u, block_stride = %u, num_teams = %d\\n", N * 1024, N, passes, consecutive_blocks, block_stride, num_teams);
-
-#if 1 
+    //printf("size = %u, N = %u, passes = %u, consecutive_blocks = %u, block_stride = %u, num_teams = %d\\n", N * 1024, N, passes, consecutive_blocks, block_stride, num_teams);
 
     omp_set_dynamic(0);
-    //    omp_set_num_threads(maxThreads);
 
-    #pragma omp parallel num_threads(num_teams * num_warps)
+    #pragma omp parallel num_threads(num_teams * num_warps) shared(num_warps, consecutive_blocks, gridX, gridY, gridZ)
     {{
         int worker_id = omp_get_thread_num();
         const int warp_id = worker_id % num_warps;
@@ -264,17 +238,6 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
     }}
-
-#else
-
-#pragma omp parallel for schedule(static) num_threads(num_teams)
- for (size_t i = 0; i < N; ++i) {{
-    GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
-    const int thread_id = 0;
-    (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
- }}
-#endif 
-
 }}
 
 typedef struct _DevicePtrInfo {{
