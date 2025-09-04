@@ -205,25 +205,16 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 
 static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
-    assert(num_warps == 1); // currently only support 1 warp per block
 
-    int maxThreads = 1;
     const int ompMaxThreads = omp_get_max_threads();
-    maxThreads = N < ompMaxThreads ? N : ompMaxThreads;
+    const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
 
-    int num_teams = maxThreads / num_warps;
-
+    int num_teams = max_threads / num_warps;
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
-    unsigned block_stride = num_teams * consecutive_blocks;
-
-
-    const unsigned passes = ceil((float)N / (consecutive_blocks * num_teams));
-    assert(passes == 1);
-    //printf("size = %u, N = %u, passes = %u, consecutive_blocks = %u, block_stride = %u, num_teams = %d\\n", N * 1024, N, passes, consecutive_blocks, block_stride, num_teams);
 
     omp_set_dynamic(0);
 
-    #pragma omp parallel num_threads(num_teams * num_warps) shared(num_warps, consecutive_blocks, gridX, gridY, gridZ)
+    #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
     {{
         int worker_id = omp_get_thread_num();
         const int warp_id = worker_id % num_warps;
