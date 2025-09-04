@@ -309,7 +309,9 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   }}
 
   {newline.join(ptr_decls)}
+  Py_BEGIN_ALLOW_THREADS;
   _launch(gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  Py_END_ALLOW_THREADS;
   if (PyErr_Occurred()) {{
     return NULL;
   }}
