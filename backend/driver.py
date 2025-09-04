@@ -425,7 +425,7 @@ class NPULauncher(object):
         src = make_launcher(constants, signature, metadata.warp_size)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs, libraries=libraries,
-                                      ccflags=system_ccflags() + ["-fno-omit-frame-pointer"])
+                                      ccflags=system_ccflags())
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
