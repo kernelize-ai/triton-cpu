@@ -21,8 +21,21 @@ public:
   LogicalResult
   matchAndRewrite(mlir::gpu::ThreadIdOp threadIdOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<LLVM::ConstantOp>(
-        threadIdOp, i32_ty, rewriter.getI32IntegerAttr(0));
+    auto funcOp = threadIdOp->getParentOfType<FunctionOpInterface>();
+    assert(funcOp && "expected LLVM::FuncOp as a parent of ThreadIdOp");
+    auto args = funcOp.getArguments();
+
+    auto threadIdDim = threadIdOp.getDimension();
+    if (threadIdDim != mlir::gpu::Dimension::x) {
+      threadIdOp.emitError("unsupported thread id dimension");
+    }
+
+    assert(args.size() > 7 &&
+           "incorrect npu kernel function signature"); 
+    auto funcArgIdx = args.size() - 7;
+    assert(args[funcArgIdx].getType().isInteger(32) &&
+           "Thread ID argument must be i32");
+    rewriter.replaceOp(threadIdOp, args[funcArgIdx]);
     return success();
   }
 };

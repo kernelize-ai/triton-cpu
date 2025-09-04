@@ -178,9 +178,9 @@ def make_launcher(constants, signature):
 
     has_spmd_args = True
     if has_spmd_args:
-        kernel_params.extend(["coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+        kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
         arg_types += ', '
-        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
     src = f"""
 #include <stdbool.h>
@@ -205,13 +205,16 @@ static GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gri
     return coord;
 }}
 
-static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     size_t N = gridX * gridY * gridZ;
     if (N == 1) {{
       GridCoordinate coord = get_grid_coordinate(0, gridX, gridY, gridZ);
+      const int thread_id = 0;
       (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
       return;
     }}
+
+    assert(num_warps == 1); // currently only support 1 warp per block
 
     int maxThreads = 1;
 #ifdef _OPENMP
@@ -224,6 +227,7 @@ static void _launch(int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', 
 #endif // _OPENMP
  for (size_t i = 0; i < N; ++i) {{
     GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+    const int thread_id = 0;
     (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
  }}
 
@@ -291,12 +295,10 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
   kernel_ptr_t kernel_ptr = (kernel_ptr_t)(_function);
 
-   // Extract num_threads metadata.
-  int num_threads = 0;
-  if (PyObject_HasAttrString(kernel_metadata, "num_threads")) {{
-    PyObject *num_threads_attr = PyObject_GetAttrString(kernel_metadata, "num_threads");
-    assert(PyLong_Check(num_threads_attr));
-    num_threads = PyLong_AsLong(num_threads_attr);
+  int num_warps, num_ctas, shared_memory, clusterDimX, clusterDimY, clusterDimZ;
+  if (!PyArg_ParseTuple(kernel_metadata, \"iiiiii\", &num_warps, &num_ctas, &shared_memory, &clusterDimX, &clusterDimY, &clusterDimZ)) {{
+    PyErr_SetString(PyExc_TypeError, "kernel_metadata must be a tuple");
+    return NULL;
   }}
 
   // extract launch metadata
@@ -310,7 +312,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
   {newline.join(ptr_decls)}
   Py_BEGIN_ALLOW_THREADS;
-  _launch(gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  _launch(num_warps, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   Py_END_ALLOW_THREADS;
   if (PyErr_Occurred()) {{
     return NULL;
