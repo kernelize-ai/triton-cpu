@@ -221,30 +221,32 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     maxThreads = N < ompMaxThreads ? N : ompMaxThreads;
 
     int num_teams = maxThreads / num_warps;
-    unsigned blocks_per_team = ceil((float)N / (num_teams));
-#if 0
-    while(blocks_per_team < 32) {{
-        if (num_teams == 1) break;
-        num_teams /= 2;
-        blocks_per_team = ceil((float)N / (num_teams)); 
-    }}
-#endif 
 
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
-    const unsigned block_stride = num_teams * consecutive_blocks;
-
 #if 0
-    if (blocks_per_team > 256) {{
+    if (consecutive_blocks > 512) {{
         num_teams *= 2;
-        //blocks_per_team = ceil((float)N / (num_teams));
+        consecutive_blocks = ceil((float)N / (num_teams));
     }}
-    unsigned consecutive_blocks = ceil((float)N / (num_teams));
 #endif 
-    printf("size = %u, N = %u, blocks_per_team = %u, consecutive_blocks = %u, num_teams = %d\\n", N * 1024, N, blocks_per_team, consecutive_blocks, num_teams);
+    unsigned block_stride = num_teams * consecutive_blocks;
+#if 1
+    
+#else
+    unsigned passes = ceil((float)N / (consecutive_blocks * num_teams));
+    while (block_stride > 1024) {{
+        consecutive_blocks /= 2;
+        block_stride = num_teams * consecutive_blocks;
+    }}
+#endif 
+
+    const unsigned passes = ceil((float)N / (consecutive_blocks * num_teams));
+    assert(passes == 1);
+    printf("size = %u, N = %u, passes = %u, consecutive_blocks = %u, block_stride = %u, num_teams = %d\\n", N * 1024, N, passes, consecutive_blocks, block_stride, num_teams);
 
 #if 1 
 
-    #pragma omp parallel num_threads(num_teams)
+    #pragma omp parallel num_threads(num_teams * num_warps)
     {{
         int worker_id = omp_get_thread_num();
         const int warp_id = worker_id % num_warps;
@@ -253,12 +255,10 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
 
         const unsigned block_start = consecutive_blocks * team_id;
 
-        for(unsigned i = block_start; i < N; i+=block_stride) {{
-            const unsigned run_end = (i + consecutive_blocks < N) ? (i + consecutive_blocks) : N; 
-            for (unsigned j = i; j < run_end; j++) {{
-                GridCoordinate coord = get_grid_coordinate(j, gridX, gridY, gridZ);
-                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-            }}
+        const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N; 
+        for(unsigned i = block_start; i < run_end; i++) {{
+            GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
     }}
 
