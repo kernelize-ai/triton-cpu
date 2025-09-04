@@ -188,6 +188,16 @@ def make_launcher(constants, signature, warp_size):
 #include <Python.h>
 #include <pthread.h>
 #include <math.h>
+#include <sched.h>
+
+#ifndef __APPLE__
+static int pin_worker_to_cpu(int cpu_id) {{
+    cpu_set_t set; 
+    CPU_ZERO(&set);
+    CPU_SET(cpu_id, &set);
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+}}
+#endif
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -207,6 +217,7 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 
 typedef struct __attribute__((aligned(128))) {{
     size_t worker_id;
+    size_t num_cpu_cores;
     size_t num_warps; // threads per team
     size_t num_teams; // each team cooperatively processes one block
     size_t consecutive_blocks;
@@ -220,6 +231,21 @@ static void *worker_func(void *arg) {{
     const size_t warp_id = a->worker_id % a->num_warps;
     const size_t team_id = a->worker_id / a->num_warps; 
     const size_t num_teams = a->num_teams;
+
+#if 0
+#if 0
+    size_t stride = (a->num_cpu_cores/2u) ? (a->num_cpu_cores/2u) : 1u;
+    if (stride % 2 == 0) stride++;                // make it odd
+    int cpu_id = a->worker_id * stride % a->num_cpu_cores;
+#else
+    int half = a->num_cpu_cores/2 ? a->num_cpu_cores/2 : 1;
+    int cpu_id = num_teams < a->num_cpu_cores ? a->worker_id % half : a->worker_id;
+#endif 
+    int ret = pin_worker_to_cpu(cpu_id % a->num_cpu_cores);
+    if (ret < 0) {{
+        fprintf(stderr, "Failed to pin worker %ld to CPU %ld with error: %s\\n", a->worker_id, a->worker_id % a->num_cpu_cores, strerror(errno));
+    }}
+#endif 
 
     const size_t total_blocks = a->gridX * a->gridY * a->gridZ;
     const size_t consecutive_blocks = a->consecutive_blocks;
@@ -243,7 +269,8 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     size_t N = gridX * gridY * gridZ;
     if (N == 0) return;
 
-    size_t numCpuCores = sysconf(_SC_NPROCESSORS_ONLN);
+    const size_t sysNumCpuCores = sysconf(_SC_NPROCESSORS_ONLN);
+    size_t numCpuCores = sysNumCpuCores;
     // limit the number of cpu cores to the size of the grid (maybe include warps here?)
     if (N < numCpuCores)
         numCpuCores = N;
@@ -258,9 +285,12 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     size_t num_teams = num_workers / num_warps;
     assert(num_teams > 0);
 
-    size_t blocks_per_team = ceil((float)N / (num_workers / num_warps));
-
-    size_t consecutive_blocks = ceil((float)N / (2 * num_teams));
+    size_t consecutive_blocks = ceil((float)N / (num_teams));
+    while(consecutive_blocks < 256) {{
+        if (num_teams == 1) break;
+        num_teams -= 1;
+        consecutive_blocks = ceil((float)N / (num_teams)); 
+    }}
 #if 0
     if (N < 64) {{
         // for small grids we want to spread the work around more team members 
@@ -279,6 +309,8 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     }}
 #endif 
 
+    num_workers = num_teams * num_warps; // is this re-def ok? 
+    size_t blocks_per_team = ceil((float)N / num_teams);
     printf("size = %ld, blocks = %ld, blocks_per_team = %ld, consecutive_blocks = %ld, block_stride = %ld, num_teams = %ld\\n", N * 1024, N, blocks_per_team, consecutive_blocks, block_stride, num_teams);
 
     pthread_t *ts = malloc(num_workers * sizeof(*ts));
@@ -288,6 +320,7 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     for (size_t w = 0; w < num_workers; ++w) {{
         args[w] = (WorkerArgs){{
             .worker_id = w,
+            .num_cpu_cores = sysNumCpuCores,
             .num_warps = num_warps,
             .num_teams = num_teams,
             .consecutive_blocks = consecutive_blocks,
