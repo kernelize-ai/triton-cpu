@@ -114,23 +114,8 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-  // TODO: if we can make this work we can bail on the shufflexor below
-  llvm::errs() << "reduce op: " << op << "\n";
-  llvm::errs() << "accum size: " << acc.size() << "\n";
-  llvm::errs() << "numLaneToReduce: " << numLaneToReduce << "\n";
-  Operation *reduxOp = op.getSingleCombiner();
-  if (reduxOp)
-    llvm::errs() << "single combiner: " << *reduxOp << "\n";
-
-  if (!reduxOp)
-    return false;
-
-  // TODO: this might need a re-think
-  for (int i = 0; i < acc.size(); i++) {
-    Value buf;
-    auto valType = acc[i].getType();
-  }
-  return false;
+  // all warps on CPU are single-threaded, so warp reductions are not necessary
+  return true;
 }
 
 std::string TargetInfo::getMulhiFuncName(Type resultElementTy) const {

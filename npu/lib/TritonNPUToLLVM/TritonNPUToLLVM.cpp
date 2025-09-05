@@ -172,14 +172,11 @@ private:
     // Set array size 0 and external linkage indicates that we use dynamic
     // shared allocation to allow a larger shared memory size for each kernel.
     //
-    // Ask for 16B alignment on global_smem because that's the largest we should
-    // ever need (4xi32).
     auto arrayTy = LLVM::LLVMArrayType::get(elemTy, 0);
     unsigned cpuAddrSpace = 0u;
     auto global = b.create<LLVM::GlobalOp>(
         loc, arrayTy, /*isConstant=*/false, LLVM::Linkage::External,
-        "global_smem", /*value=*/Attribute(), /*alignment=*/16, cpuAddrSpace);
-    global->setAttr("thread_local", b.getBoolAttr(true));
+        "global_smem", /*value=*/Attribute(), /*alignment=*/64, cpuAddrSpace);
   }
 };
 

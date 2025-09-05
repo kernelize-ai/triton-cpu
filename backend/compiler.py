@@ -157,16 +157,16 @@ class NPUBackend(BaseBackend):
         llvm.attach_datalayout(llvm_mod, npu.get_default_target_triple(), options.arch, target_features)
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
+        metadata["shared"] = src.get_int_attr("ttg.shared")
 
         # TODO: match nvidia compiler cleanups?
         return str(llvm_mod)
 
     @staticmethod
     def make_asm(src, metadata, options):
-        names = re.findall(r"define void @([a-zA-Z_][a-zA-Z0-9_]*)", src)
+        names = re.findall(r"define void @(?!(?:barrier)\b)([a-zA-Z_][a-zA-Z0-9_]*)", src)
         assert len(names) == 1
         metadata["name"] = names[0]
-        metadata["shared"] = 1
 
         flags = []
         return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
@@ -180,7 +180,7 @@ class NPUBackend(BaseBackend):
             lib_dirs = npu_driver.library_dirs()
             libs = ["sleef"]  # TODO: conditionally include?
             include_dirs = []
-            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, [])
+            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, ["-undefined", "dynamic_lookup"])
             with open(so, "rb") as f:
                 return f.read()
 
