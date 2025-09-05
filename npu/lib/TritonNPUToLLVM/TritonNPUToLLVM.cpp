@@ -131,8 +131,8 @@ struct ConvertTritonNPUToLLVM
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateMathToLLVMConversionPatterns(typeConverter, patterns);
 
-    mlir::triton::npu::populateGPUtoLLVMConversionPatterns(typeConverter,
-                                                           patterns, benefit);
+    mlir::triton::npu::populateGPUtoLLVMConversionPatterns(
+        typeConverter, targetInfo, patterns, benefit);
 
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
     mlir::triton::populateViewOpToLLVMPatterns(typeConverter, patterns,
