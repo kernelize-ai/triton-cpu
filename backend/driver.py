@@ -181,11 +181,16 @@ def make_launcher(constants, signature):
         kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
         arg_types += ', '
         arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
-
+        
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
 #include <omp.h>
+
+#include <stdalign.h>
+
+// we need this per-block, probably
+alignas(64) unsigned char* global_smem;
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -203,13 +208,21 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
     return coord;
 }}
 
-static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
 
     const int ompMaxThreads = omp_get_max_threads();
     const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
 
     int num_teams = max_threads / num_warps;
+
+    fprintf(stderr, "num_warps = %d, num_teams = %d, shared_memory = %d\\n", num_warps, num_teams, shared_memory);
+    unsigned shared_memory_plus_barrier = shared_memory + 8;
+    unsigned shared_memory_aligned = (shared_memory_plus_barrier + 63) & ~63u;
+    global_smem = aligned_alloc(64, shared_memory_aligned);
+    assert(global_smem);
+    memset(global_smem, 0, shared_memory_aligned);
+
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
 
     omp_set_dynamic(0);
@@ -218,6 +231,7 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     {{
         int worker_id = omp_get_thread_num();
         const int warp_id = worker_id % num_warps;
+        fprintf(stderr, "warp_id = %d\\n", warp_id);
         const int thread_id = warp_id;
         const int team_id = worker_id / num_warps;
 
@@ -309,7 +323,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
   {newline.join(ptr_decls)}
   Py_BEGIN_ALLOW_THREADS;
-  _launch(num_warps, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  _launch(num_warps, shared_memory, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   Py_END_ALLOW_THREADS;
   if (PyErr_Occurred()) {{
     return NULL;
@@ -366,7 +380,7 @@ class NPULauncher(object):
         signature = {idx: value for idx, value in src.signature.items()}
         src = make_launcher(constants, signature)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
+                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags() + ["-g"])
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
