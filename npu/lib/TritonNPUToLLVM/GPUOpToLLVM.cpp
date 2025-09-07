@@ -32,7 +32,7 @@ public:
     }
 
     assert(args.size() > 7 && "incorrect npu kernel function signature");
-    auto funcArgIdx = args.size() - 7;
+    auto funcArgIdx = args.size() + npu::kThreadIdOffset;
     assert(args[funcArgIdx].getType().isInteger(32) &&
            "Thread ID argument must be i32");
     rewriter.replaceOp(threadIdOp, args[funcArgIdx]);
@@ -57,7 +57,7 @@ public:
     auto programIdDim = blockIdOp.getAxisAsInt();
     assert(programIdDim >= 0 && programIdDim < 3);
 
-    auto funcArgIdx = args.size() - 6 + programIdDim;
+    auto funcArgIdx = args.size() + npu::kProgramIdArgsOffset + programIdDim;
     assert(funcArgIdx < args.size() && "invalid SPMD program argument index");
     assert(args[funcArgIdx].getType().isInteger(32) &&
            "SPMD program argument must be i32");
@@ -73,7 +73,7 @@ Value getNumPrograms(mlir::FunctionOpInterface funcOp, int axis) {
   assert(axis >= 0 && axis < 3);
 
   // The last three of the args are gridX, gridY, gridZ (bounds) of grid.
-  auto argIdx = args.size() - 3 + axis;
+  auto argIdx = args.size() + npu::kProgramIdArgsOffset + 3 + axis;
   assert(argIdx < args.size() && "out-of-bounds arg index");
   assert(args[argIdx].getType().isInteger(32) && "unexpected arg type");
   return args[argIdx];

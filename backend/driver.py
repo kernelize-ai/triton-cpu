@@ -176,12 +176,11 @@ def make_launcher(constants, signature):
     # TODO: float_storage_decls?
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
-    has_spmd_args = True
-    if has_spmd_args:
-        kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
-        arg_types += ', '
-        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
-        
+    # add thread ID, block args, and shared memory ptr
+    kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ", "shared_mem_ptr"])
+    arg_types += ', '
+    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int8_t*"])
+
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
@@ -190,6 +189,7 @@ def make_launcher(constants, signature):
 #include <stdalign.h>
 
 // we need this per-block, probably
+// TODO: make this work for multiple blocks
 alignas(64) unsigned char* global_smem;
 
 typedef void(*kernel_ptr_t)({arg_types});
@@ -216,7 +216,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     int num_teams = max_threads / num_warps;
 
-    fprintf(stderr, "num_warps = %d, num_teams = %d, shared_memory = %d\\n", num_warps, num_teams, shared_memory);
+    //fprintf(stderr, "num_warps = %d, num_teams = %d, shared_memory = %d\\n", num_warps, num_teams, shared_memory);
     unsigned shared_memory_plus_barrier = shared_memory + 8;
     unsigned shared_memory_aligned = (shared_memory_plus_barrier + 63) & ~63u;
     global_smem = aligned_alloc(64, shared_memory_aligned);
@@ -227,11 +227,13 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     omp_set_dynamic(0);
 
+    int8_t* shared_mem_ptr = NULL;
+
     #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
     {{
         int worker_id = omp_get_thread_num();
         const int warp_id = worker_id % num_warps;
-        fprintf(stderr, "warp_id = %d\\n", warp_id);
+        // fprintf(stderr, "warp_id = %d\\n", warp_id);
         const int thread_id = warp_id;
         const int team_id = worker_id / num_warps;
 
