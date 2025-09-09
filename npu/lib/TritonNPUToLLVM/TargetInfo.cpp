@@ -63,8 +63,6 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
   if (ctaId.has_value())
     llvm::report_fatal_error(
         "NPU does not support cross-CTA shared memory transfers");
-  npu::llPrintf("storing to smem %p : %f", {ptr, val}, {false, false}, rewriter,
-                *this);
   mlir::triton::npu::llStore(rewriter, loc, ptr, val, pred, /*alignment=*/4);
 }
 
@@ -79,44 +77,29 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
   auto load =
       mlir::triton::npu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
                                 /*alignment=*/4);
-  npu::llPrintf("loading from smem %p : %f (%if)", {ptr, load, pred},
-                {false, false, false}, rewriter, *this);
   return load;
 }
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
-#if 1
-  llvm::errs() << "shuffle val: " << val << "\n";
-  llvm::errs() << "index: " << i << "\n";
-  llvm::errs() << "val = " << val << "\n";
-  llvm::errs() << "val type = " << val.getType() << "\n";
-
   auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
 
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  // first make sure we have enough memory for this operation
   int shared = 0;
   if (auto sharedAttr = mod->getAttr("ttg.shared")) {
     shared = cast<IntegerAttr>(sharedAttr).getInt();
   }
-  unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
-#if 1
-  // becasuse we are inside a reduction, the total shared memory should be
-  // enough for this op due to shared memory being used to store other values
-  // during the reductions
-#else
-  int totalMemorySizeBytes =
-      i * elemSizeBits /
-      8; // TODO this isn't right, it should be num_warps not i * elemSizeByes
-  llvm::errs() << "total memory size for shuffle: " << totalMemorySizeBytes
-               << "\n";
-  if (shared < totalMemorySizeBytes) {
-    mod->setAttr("ttg.shared",
-                 rewriter.getIntegerAttr(i32_ty, totalMemorySizeBytes));
-  }
-#endif
+  assert(shared > 0 &&
+         "shared memory allocation is required for shuffle XOR operation");
+
+  // Unfortunately we do not have access to the original reduction op here.
+  // However, because we are inside a reduction, the total shared memory should
+  // be enough for this op due to shared memory being used to store other values
+  // during the reductions. And the barrier prevents any other users of the
+  // shared memory from interfering with this particular shuffle. If triton were
+  // to buffer data in shared memory this could be a problem, though - something
+  // to keep an eye on.
   auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
                                           getSharedAddressSpace());
   auto funcOp = val.getParentRegion()->getParentOfType<FunctionOpInterface>();
@@ -131,7 +114,7 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   Value laneId = b.urem(threadId, warpSize);
 
   // write to our slot
-  llvm::errs() << "int_ty(elemSizeBits) = " << int_ty(elemSizeBits) << "\n";
+  unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
   Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
   storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
 
@@ -139,17 +122,12 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
 
   // read from our neighbor
   Value neighbor = b.xor_(threadId, b.i32_val(i));
-  llPrintf("thread %d warpsize %d lane %d reducing val %f from %d",
-           {threadId, warpSize, laneId, val, neighbor},
-           {false, false, false, false, false}, rewriter, *this);
-
   Value neighborSlot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, neighbor);
   Value loaded = loadDShared(rewriter, loc, neighborSlot, std::nullopt,
                              val.getType(), b.true_val());
 
   barrier(loc, rewriter);
   return loaded;
-#endif
 }
 
 Value TargetInfo::shuffleUp(RewriterBase &rewriter, Location loc, Value val,
@@ -185,67 +163,10 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-#if 1
-  // warp size on NPU is always 1, so we only need to reduce if multiple lanes
-  // in the block are participating. If so, fall back to shuffleXOR or other
-  // shuffle instruction + accumulator.
-  llvm::errs() << "numLaneToReduce = " << numLaneToReduce << "\n";
+  // warp size on NPU is always 1, so we only need to reduce if multiple warps
+  // in the block are participating in the reduction. If so, fall back to
+  // shuffleXOR or other shuffle instruction + accumulator.
   return numLaneToReduce == 1;
-#else
-  llvm::errs() << "acc size: " << acc.size() << "\n";
-  llvm::errs() << "numLaneToReduce: " << numLaneToReduce << "\n";
-  llvm::errs() << "interleave: " << interleave << "\n";
-
-  if (numLaneToReduce == 1) {
-    return true;
-  }
-  auto moduleOp = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
-  int numLanes = triton::gpu::TritonGPUDialect::getThreadsPerWarp(moduleOp);
-  if (numLaneToReduce != numLanes) {
-    // is this a problem?
-    op->emitWarning("NPU backend is only optimized for warp reductions across "
-                    "all warps in a block");
-  }
-
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-
-  ReduceOpHelper helper(op);
-  auto offset = helper.getThreadOffsetOnReductionAxis();
-  llvm::errs() << "reduction offset = " << offset << "\n";
-  auto smemShape = helper.getScratchRepShape();
-  for (auto shape : smemShape) {
-    llvm::errs() << "smem shape: " << shape << "\n";
-  }
-
-  Operation *reduxOp = op.getSingleCombiner();
-  if (!reduxOp)
-    return false;
-  llvm::errs() << "reduxOp = " << *reduxOp << "\n";
-
-  auto elemTy = acc[0].getType();
-  llvm::errs() << "elemTy = " << elemTy << "\n";
-
-  auto basePtr =
-      LLVM::getSharedMemoryBase(loc, rewriter, *this, op.getOperation());
-  for (unsigned i = 0; i < numLaneToReduce; i++) {
-    auto ptrOffset = b.gep(basePtr.getType(), elemTy, basePtr, b.i32_val(i));
-    Value ptrLoad = loadDShared(rewriter, loc, ptrOffset, std::nullopt, elemTy,
-                                b.true_val());
-    llPrintf("Load for warp reduce index %d = %f\n",
-             {LLVM::createConstantI32(loc, rewriter, i), ptrLoad},
-             {true, false}, rewriter, *this);
-  }
-
-  // reduce into lane 0
-
-  assert(acc.size() == 1);
-  llPrintf("warpReduce acc (num lanes = %d): %f",
-           {LLVM::createConstantI32(loc, rewriter, numLaneToReduce), acc[0]},
-           {true, false}, rewriter, *this);
-  // TODO: seeing 2 lanes to reduce seems like a sign...
-  // all warps on CPU are single-threaded, so warp reductions are not necessary
-  return true;
-#endif
 }
 
 std::string TargetInfo::getMulhiFuncName(Type resultElementTy) const {

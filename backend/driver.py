@@ -212,7 +212,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
 
-    fprintf(stderr, "num_warps = %d, num_teams = %d, shared_memory = %d\\n", num_warps, num_teams, shared_memory);
+    // TODO: only add the plus barrier when we have a barrier
     unsigned shared_memory_plus_barrier = shared_memory + 8;
     unsigned shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
     unsigned shared_memory_aligned = shared_memory_aligned_per_team * num_teams;
@@ -229,10 +229,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     {{
         int worker_id = omp_get_thread_num();
         const int warp_id = worker_id % num_warps;
-        // fprintf(stderr, "warp_id = %d\\n", warp_id);
         const int thread_id = warp_id;
         const int team_id = worker_id / num_warps;
-        fprintf(stderr, "worker id = %d, team_id = %d, warp_id = %d\\n", worker_id, team_id, warp_id);
         const unsigned block_start = consecutive_blocks * team_id;
 
         int8_t* shared_mem_ptr = (int8_t*)&global_smem[team_id * shared_memory_aligned_per_team];
