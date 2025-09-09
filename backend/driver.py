@@ -188,10 +188,6 @@ def make_launcher(constants, signature):
 
 #include <stdalign.h>
 
-// we need this per-block, probably
-// TODO: make this work for multiple blocks
-alignas(64) unsigned char* global_smem;
-
 typedef void(*kernel_ptr_t)({arg_types});
 
 typedef struct _GridCoordinate {{
@@ -216,10 +212,11 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
 
-    //fprintf(stderr, "num_warps = %d, num_teams = %d, shared_memory = %d\\n", num_warps, num_teams, shared_memory);
+    fprintf(stderr, "num_warps = %d, num_teams = %d, shared_memory = %d\\n", num_warps, num_teams, shared_memory);
     unsigned shared_memory_plus_barrier = shared_memory + 8;
-    unsigned shared_memory_aligned = (shared_memory_plus_barrier + 63) & ~63u;
-    global_smem = aligned_alloc(64, shared_memory_aligned);
+    unsigned shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
+    unsigned shared_memory_aligned = shared_memory_aligned_per_team * num_teams;
+    alignas(64) unsigned char* global_smem = aligned_alloc(64, shared_memory_aligned);
     assert(global_smem);
     memset(global_smem, 0, shared_memory_aligned);
 
@@ -227,7 +224,6 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     omp_set_dynamic(0);
 
-    int8_t* shared_mem_ptr = global_smem;
 
     #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
     {{
@@ -236,8 +232,10 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         // fprintf(stderr, "warp_id = %d\\n", warp_id);
         const int thread_id = warp_id;
         const int team_id = worker_id / num_warps;
-
+        fprintf(stderr, "worker id = %d, team_id = %d, warp_id = %d\\n", worker_id, team_id, warp_id);
         const unsigned block_start = consecutive_blocks * team_id;
+
+        int8_t* shared_mem_ptr = (int8_t*)&global_smem[team_id * shared_memory_aligned_per_team];
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
         for(unsigned i = block_start; i < run_end; i++) {{
