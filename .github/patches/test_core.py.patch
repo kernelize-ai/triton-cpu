@@ -1,0 +1,14 @@
+diff --git a/python/test/unit/language/test_core.py b/python/test/unit/language/test_core.py
+index 657e0031e..da96bf78f 100644
+--- a/python/test/unit/language/test_core.py
++++ b/python/test/unit/language/test_core.py
+@@ -121,6 +121,9 @@ def check_type_supported(dtype, device):
+     '''
+     skip test if dtype is not supported on the current device
+     '''
++    if device in ['cpu']:
++        if (dtype is tl.bfloat16 or dtype == "bfloat16" or dtype is torch.bfloat16):
++            pytest.skip("bfloat16 is not supported on CPU")
+     if device in ['cuda']:
+         cc = torch.cuda.get_device_capability()
+         if cc[0] < 8 and (dtype is tl.bfloat16 or dtype == "bfloat16" or dtype is torch.bfloat16):

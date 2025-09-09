@@ -41,6 +41,10 @@ jobs:
           path: triton
           submodules: true
           ref: ${{ env.triton_commit_hash }}
+      - name: Apply Triton patches
+        working-directory: ./triton
+        run: |
+          git apply -v ${GITHUB_WORKSPACE}/.github/patches/*.patch
       - name: Compute cache keys
         id: cache-key
         run: |
@@ -92,9 +96,8 @@ jobs:
         run: make test-lit
       - name: Run python tests on CPU
         working-directory: ./triton
-        if: false
         run: |
-          make NUM_PROCS=24 test-unit
+          python -m pytest -vvv --device "cpu" python/test/unit/language/test_core.py -k "test_reduce1d"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
         run: |
