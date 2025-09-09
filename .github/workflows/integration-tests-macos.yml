@@ -106,6 +106,10 @@ jobs:
           which clang++
           clang++ --version
           TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
+      - name: Apply Triton patches
+        working-directory: ./triton
+        run: |
+          git apply -v ${GITHUB_WORKSPACE}/.github/patches/*.patch
       - name: CCache Stats
         run: ccache --print-stats
       - name: Run lit tests
@@ -113,10 +117,16 @@ jobs:
         run: |-
           source ~/.venv/bin/activate
           make test-lit
+      - name: Run python tests on CPU
+        working-directory: ./triton
+        run: |
+          source ~/.venv/bin/activate
+          python -m pytest -vvv --device "cpu" python/test/unit/language/test_core.py -k "test_reduce1d"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
         run: |
           source ~/.venv/bin/activate
+          # MPLBackend disables matplotlib from popping up the graph and hanging
           MPLBACKEND=Agg python python/tutorials/01-vector-add.py
       - name: Run C++ unittests
         working-directory: ./triton
