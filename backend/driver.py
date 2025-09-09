@@ -227,7 +227,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     omp_set_dynamic(0);
 
-    int8_t* shared_mem_ptr = NULL;
+    int8_t* shared_mem_ptr = global_smem;
 
     #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
     {{

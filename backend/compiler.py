@@ -128,6 +128,7 @@ class NPUBackend(BaseBackend):
         passes.convert.add_index_to_llvmir(pm)
 
         npu.passes.ttnpuir.add_to_llvmir(pm)
+        npu.passes.ttnpuir.add_shared_memory_global_conversion(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
 
