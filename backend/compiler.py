@@ -91,7 +91,7 @@ class NPUBackend(BaseBackend):
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
-        pm.run(mod)
+        pm.run(mod, 'make_ttir')
         return mod
 
     @staticmethod
@@ -112,7 +112,7 @@ class NPUBackend(BaseBackend):
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)
-        pm.run(mod)
+        pm.run(mod, 'make_ttgir')
 
         return mod
 
@@ -135,7 +135,7 @@ class NPUBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
-        pm.run(mod)
+        pm.run(mod, 'make_llir')
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
         llvm.init_targets()
