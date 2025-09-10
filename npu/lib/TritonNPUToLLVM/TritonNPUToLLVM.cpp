@@ -140,6 +140,9 @@ struct ConvertTritonNPUToLLVM
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns,
                                                 targetInfo, benefit);
 
+    mlir::triton::npu::populateMemoryOpToLLVMPatterns(
+        typeConverter, targetInfo, patterns, benefit);
+
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo,
                                                    patterns, benefit);
     mlir::triton::populateInstrumentationToLLVMPatterns(

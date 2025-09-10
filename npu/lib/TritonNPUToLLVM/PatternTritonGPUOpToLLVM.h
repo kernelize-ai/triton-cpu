@@ -24,6 +24,11 @@ void populateFuncOpConversionPattern(LLVMTypeConverter &typeConverter,
                                      const TargetInfoBase &targetInfo,
                                      PatternBenefit benefit);
 
+void populateMemoryOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                    const TargetInfoBase &targetInfo,
+                                    RewritePatternSet &patterns,
+                                    PatternBenefit benefit);
+
 void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        const TargetInfo &targetInfo,
                                        RewritePatternSet &patterns,

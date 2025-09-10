@@ -4,6 +4,7 @@ add_triton_library(TritonNPUToLLVM
     FuncOpToLLVM.cpp
     GPUOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
+    MemoryOpToLLVM.cpp
     SharedMemoryGlobalConversion.cpp
     TritonNPUToLLVM.cpp
     TargetInfo.cpp

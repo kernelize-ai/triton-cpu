@@ -21,6 +21,7 @@ from types import ModuleType
 class NPUOptions:
     num_warps: int = 1
     num_ctas: int = 1
+    num_stages: int = 1
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
     arch: str = None
@@ -97,7 +98,7 @@ class NPUBackend(BaseBackend):
     @staticmethod
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
-        pm.enable_debug()
+        dump_enabled = pm.enable_debug()
         threads_per_warp = 1
         metadata["warp_size"] = threads_per_warp
         num_ctas = 1
@@ -108,6 +109,12 @@ class NPUBackend(BaseBackend):
         passes.ttgpuir.add_optimize_thread_locality(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttir.add_loop_aware_cse(pm)
+        passes.common.add_canonicalizer(pm)
+
+        passes.ttgpuir.add_assign_latencies(pm, options.num_stages)
+        passes.ttgpuir.add_schedule_loops(pm)
+        passes.ttgpuir.add_pipeline(pm, options.num_stages, dump_enabled)
+        
         passes.common.add_symbol_dce(pm)
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
