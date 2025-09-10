@@ -57,8 +57,8 @@ jobs:
       - name: Update format files
         if: steps.compare.outputs.changed == 'true'
         run: |
-          cp ./triton/.clang-format .clang-format 
-          cp ./triton/.pre-commit-config.yaml .pre-commit-config.yaml 
+          cp ./triton/.clang-format .clang-format
+          cp ./triton/.pre-commit-config.yaml .pre-commit-config.yaml
           cp ./triton/pyproject.toml pyproject.toml
       - name: Create pull request
         if: steps.compare.outputs.changed == 'true'
