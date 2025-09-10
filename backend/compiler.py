@@ -181,7 +181,8 @@ class NPUBackend(BaseBackend):
             lib_dirs = npu_driver.library_dirs()
             libs = ["sleef"]  # TODO: conditionally include?
             include_dirs = []
-            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, ["-undefined", "dynamic_lookup"] if npu_driver.is_macos() else [])
+            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs,
+                        ["-undefined", "dynamic_lookup"] if npu_driver.is_macos() else [])
             with open(so, "rb") as f:
                 return f.read()
 
