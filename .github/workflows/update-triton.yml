@@ -51,17 +51,27 @@ jobs:
           else
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
-
+      - name: Create PR Body
+        run: |
+          echo "Update `triton.txt` with the latest commit hash from Triton." > pr-body.md
+      - name: Update format files
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          cp .clang-format ./triton/.clang-format
+          cp .pre-commit-config.yaml ./triton/.pre-commit-config.yaml
+          cp pyproject.toml ./triton/pyproject.toml
       - name: Create pull request
         if: steps.compare.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           add-paths: |
             triton.txt
+            .clang-format
+            .pre-commit-config.yaml
+            pyproject.toml
           commit-message: "Update Triton commit hash to `${{ env.new_triton_commit_hash }}`"
           title: "[${{ github.event.schedule && 'Scheduled' || 'Manual' }}] Update Triton Commit Hash to `${{ env.new_triton_commit_hash }}`"
-          body: |
-            Update `triton.txt` with the latest commit hash from Triton.
+          body-path: pr-body.md
           branch: "update-triton-hash-${{ github.run_id }}"
           base: main
           delete-branch: true

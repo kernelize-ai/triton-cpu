@@ -34,11 +34,6 @@ jobs:
           ls -la triton
           echo "Listing Github workspace directory:"
           ls -la ${GITHUB_WORKSPACE}/
-      - name: Copy pre-commit config from Triton to NPU submodule
-        run: |
-          cp ${GITHUB_WORKSPACE}/triton/.pre-commit-config.yaml ${GITHUB_WORKSPACE}/.pre-commit-config.yaml
-          cp ${GITHUB_WORKSPACE}/triton/.clang-format ${GITHUB_WORKSPACE}/.clang-format
-          cp ${GITHUB_WORKSPACE}/triton/pyproject.toml ${GITHUB_WORKSPACE}/pyproject.toml
       - name: Compute hash of pre-commit config
         id: cache-key
         run: |
