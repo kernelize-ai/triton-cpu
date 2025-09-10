@@ -32,7 +32,7 @@ void init_triton_npu_passes_ttgpuir(py::module &&m) {
 
 void init_triton_npu_passes_tenstorrent(py::module &&m) {
   m.def("add_to_kernel_dialect", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::createConvertTritonNPUToTenstorrentPass());
+    pm.addPass(mlir::triton::npu::createConvertTritonNPUToTenstorrentPass());
   });
 }
 
