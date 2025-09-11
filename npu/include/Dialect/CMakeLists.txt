@@ -1,1 +1,2 @@
 add_subdirectory(TritonCPU)
+add_subdirectory(TritonTenstorrent)
