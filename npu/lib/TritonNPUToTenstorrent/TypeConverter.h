@@ -7,9 +7,9 @@ using namespace mlir;
 using namespace mlir::triton;
 
 class TritonNPUToTenstorrentTypeConverter : public TypeConverter {
-    public:
-    using TypeConverter::convertType;
-    TritonNPUToTenstorrentTypeConverter() : TypeConverter() {}
+public:
+  using TypeConverter::convertType;
+  TritonNPUToTenstorrentTypeConverter() : TypeConverter() {}
 };
 
 #endif

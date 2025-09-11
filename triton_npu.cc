@@ -6,7 +6,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/Host.h"
 
-// TODO: conditionally include based on if we're building with tenstorrent support
+// TODO: conditionally include based on if we're building with tenstorrent
+// support
 #include "ttmlir/Dialect/TTKernel/IR/TTKernel.h"
 
 #include <pybind11/pybind11.h>

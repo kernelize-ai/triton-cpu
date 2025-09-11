@@ -2,14 +2,14 @@
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "npu/include/TritonNPUToTenstorrent/Passes.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Analysis/AxisInfo.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
-#include "TypeConverter.h"
 #include "../TritonNPUToLLVM/TargetInfo.h"
 #include "PatternTritonNPUOpToTenstorrent.h"
+#include "TypeConverter.h"
 
 #include "ttmlir/Dialect/TTKernel/IR/TTKernel.h"
 
@@ -30,17 +30,17 @@ class TritonTenstorrentFunctionConversionTarget : public ConversionTarget {
 public:
   explicit TritonTenstorrentFunctionConversionTarget(MLIRContext &ctx)
       : ConversionTarget(ctx) {
-      addLegalDialect<func::FuncDialect>();
-      addLegalOp<mlir::UnrealizedConversionCastOp>();
-      }
-    };
+    addLegalDialect<func::FuncDialect>();
+    addLegalOp<mlir::UnrealizedConversionCastOp>();
+  }
+};
 
 struct TritonTenstorrentConversionTarget : public ConversionTarget {
 public:
   explicit TritonTenstorrentConversionTarget(MLIRContext &ctx)
       : ConversionTarget(ctx) {
-            addIllegalDialect<triton::TritonDialect>();
-      }
+    addIllegalDialect<triton::TritonDialect>();
+  }
 };
 
 struct ConvertTritonNPUToTenstorrent
@@ -50,30 +50,31 @@ struct ConvertTritonNPUToTenstorrent
 
   ConvertTritonNPUToTenstorrent() : ConvertTritonNPUToTenstorrentBase() {}
 
-  void runOnOperation() override { 
+  void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
 
     // Set up the type converter and patterns
-    mlir::triton::npu::TargetInfo targetInfo; // TODO: tenstorrent specific target info
+    mlir::triton::npu::TargetInfo
+        targetInfo; // TODO: tenstorrent specific target info
     TritonNPUToTenstorrentTypeConverter typeConverter;
 
-    // Lower functions 
+    // Lower functions
     TritonTenstorrentFunctionConversionTarget funcTarget(*context);
     RewritePatternSet funcPatterns(context);
 
     // TODO: clean up namespacing
     mlir::triton::npu::tt::populateFuncOpConversionPattern(
-        typeConverter, funcPatterns, targetInfo, npu::tt::patternBenefitDefault);
+        typeConverter, funcPatterns, targetInfo,
+        npu::tt::patternBenefitDefault);
     if (failed(
             applyPartialConversion(mod, funcTarget, std::move(funcPatterns))))
       return signalPassFailure();
 
-
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     RewritePatternSet patterns(context);
 
-    // TODO: rest :) 
+    // TODO: rest :)
 
     TritonTenstorrentConversionTarget convTarget(*context);
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns))))
