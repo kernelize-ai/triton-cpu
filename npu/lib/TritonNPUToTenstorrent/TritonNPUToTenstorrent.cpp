@@ -57,7 +57,7 @@ struct ConvertTritonNPUToTenstorrent
     // Set up the type converter and patterns
     mlir::triton::npu::TargetInfo
         targetInfo; // TODO: tenstorrent specific target info
-    TritonNPUToTenstorrentTypeConverter typeConverter;
+    TritonNPUToTenstorrentTypeConverter typeConverter(context);
 
     // Lower functions
     TritonTenstorrentFunctionConversionTarget funcTarget(*context);
