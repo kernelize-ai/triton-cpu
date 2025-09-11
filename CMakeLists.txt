@@ -19,6 +19,12 @@ foreach(lib ${TTMLIR_LIB_NAMES})
     )
 endforeach()
 
+
+include_directories(
+    "${TENSTORRENT_MLIR}/include"
+    "${TENSTORRENT_MLIR}/build/include"
+)
+
 add_subdirectory(npu)
 if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonNPU ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu.cc LINK_LIBS
@@ -28,12 +34,6 @@ if(TRITON_BUILD_PYTHON_MODULE)
     LINK_LIBS ${TTMLIR_LIBS} MLIRQuantDialect
   )
   target_link_libraries(TritonNPU PRIVATE Python3::Module pybind11::headers)
-
-  target_include_directories(TritonNPU PRIVATE
-      "${TENSTORRENT_MLIR}/include"
-      "${TENSTORRENT_MLIR}/build/include"
-  )
-
 endif()
 if(TRITON_BUILD_UT)
   add_subdirectory(unittest)

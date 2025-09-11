@@ -4,4 +4,6 @@ add_triton_library(TritonNPUToTenstorrent
 
     DEPENDS
     TritonNPUTenstorrentConversionPassIncGen
+
+    LINK_LIBS ${TTMLIR_LIBS}
 )

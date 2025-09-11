@@ -11,6 +11,8 @@
 #include "../TritonNPUToLLVM/TargetInfo.h"
 #include "PatternTritonNPUOpToTenstorrent.h"
 
+#include "ttmlir/Dialect/TTKernel/IR/TTKernel.h"
+
 namespace mlir {
 namespace triton {
 namespace npu {
