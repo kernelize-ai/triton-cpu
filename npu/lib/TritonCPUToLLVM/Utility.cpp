@@ -2,6 +2,8 @@
 
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
+#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+
 using namespace mlir;
 using namespace mlir::triton;
 
@@ -26,26 +28,13 @@ Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
              Value pred, Value falseVal, unsigned alignment) {
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-
-  Block &predicatedLoad = npu::createPredicatedBlock(
-      rewriter, loc, pred, falseVal, [&]() -> SmallVector<Value, 1> {
-        return {b.load(elemTy, ptr, alignment)};
-      });
-  Value loadVal = *predicatedLoad.args_begin();
-
-  return loadVal;
+  return rewriter.create<cpu::MaskedLoadOp>(loc, elemTy, ptr, pred, falseVal)
+      .getResult();
 }
 
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
              Value pred, unsigned alignment) {
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
-  auto ctx = rewriter.getContext();
-
-  npu::createPredicatedBlock(rewriter, loc, pred, [&]() -> ArrayRef<Value> {
-    b.store(val, ptr, alignment);
-    return {};
-  });
+  rewriter.create<cpu::MaskedStoreOp>(loc, ptr, val, pred);
 }
 
 } // namespace mlir::triton::npu

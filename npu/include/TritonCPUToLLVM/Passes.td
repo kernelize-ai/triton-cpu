@@ -20,6 +20,20 @@ def ConvertTritonCPUToLLVM : Pass<"convert-triton-npu-to-llvm", "mlir::ModuleOp"
                              ];
 }
 
+def ConvertMaskedOpsToLLVM : Pass<"convert-masked-ops-to-llvm", "mlir::ModuleOp"> {
+    let summary = "Convert masked operations to LLVM";
+
+    let description = [{
+        The `convert-masked-ops-to-llvm` pass transforms TritonCPU masked operations
+        into equivalent LLVM instructions. This is done after ConvertTritonCPUToLLVM for debugging and observability purposes.
+    }];
+
+    let dependentDialects = ["mlir::arith::ArithDialect",
+                             "mlir::LLVM::LLVMDialect",
+                             "mlir::triton::cpu::TritonCPUDialect"
+                            ];
+}
+
 def AllocateSharedMemoryNPU : Pass<"allocate-shared-memory-npu", "mlir::ModuleOp"> {
     let summary = "Add metadata for NPU shared memory allocation";
 

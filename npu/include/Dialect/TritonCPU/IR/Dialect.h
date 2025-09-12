@@ -1,6 +1,7 @@
 #ifndef TRITON_DIALECT_TRITONCPU_IR_DIALECT_H_
 #define TRITON_DIALECT_TRITONCPU_IR_DIALECT_H_
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dialect.h"

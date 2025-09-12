@@ -2,6 +2,7 @@
 #define TRITONNPU_CONVERSION_TRITONCPUTOLLVM_PASSES_H
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 

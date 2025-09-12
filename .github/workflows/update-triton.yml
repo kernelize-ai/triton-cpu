@@ -33,6 +33,10 @@ jobs:
           LATEST_COMMIT=$(git rev-parse HEAD)
           echo "Latest Triton commit hash: ${LATEST_COMMIT}"
           echo "${LATEST_COMMIT}" > ../triton.txt
+      - name: Apply Triton patches for pre-commit files
+        working-directory: ./triton
+        run: |
+          git apply -v ${GITHUB_WORKSPACE}/.github/patches/.pre-commit-config.yaml.patch
       - name: Compare hashes
         id: compare
         run: |
