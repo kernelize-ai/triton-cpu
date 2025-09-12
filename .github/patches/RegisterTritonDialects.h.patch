@@ -1,0 +1,33 @@
+diff --git a/bin/RegisterTritonDialects.h b/bin/RegisterTritonDialects.h
+index 4cd0834f8..e3951866b 100644
+--- a/bin/RegisterTritonDialects.h
++++ b/bin/RegisterTritonDialects.h
+@@ -39,6 +39,9 @@
+ #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
+ #include "mlir/InitAllPasses.h"
+ 
++#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
++#include "npu/include/TritonCPUToLLVM/Passes.h"
++
+ namespace mlir {
+ namespace test {
+ void registerTestAliasPass();
+@@ -122,6 +125,11 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
+   mlir::triton::proton::gpu::registerScheduleBufferStorePass();
+   mlir::triton::proton::gpu::registerAddSchedBarriersPass();
+ 
++  // NPU
++  mlir::triton::npu::registerConvertTritonCPUToLLVM();
++  mlir::triton::npu::registerAllocateSharedMemoryNPU();
++  mlir::triton::npu::registerConvertMaskedOpsToLLVM();
++
+   registry.insert<
+       mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
+       mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect,
+@@ -133,5 +141,5 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
+       mlir::triton::amdgpu::TritonAMDGPUDialect,
+       mlir::triton::proton::ProtonDialect,
+       mlir::triton::proton::gpu::ProtonGPUDialect, mlir::ROCDL::ROCDLDialect,
+-      mlir::triton::gluon::GluonDialect>();
++      mlir::triton::gluon::GluonDialect, mlir::triton::cpu::TritonCPUDialect>();
+ }

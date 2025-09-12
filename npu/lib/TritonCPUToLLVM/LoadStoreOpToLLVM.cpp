@@ -73,6 +73,18 @@ struct LoadStoreConversionBase {
     return zeroVal;
   }
 
+  // Create a LLVM vector of type `vecTy` containing all true values
+  Value createTrueVector(OpBuilder &builder, Location loc,
+                         VectorType inVecTy) const {
+    mlir::Attribute oneAttr = builder.getBoolAttr(true);
+    VectorType vecTy = VectorType::get(inVecTy.getShape(), builder.getI1Type());
+
+    auto denseValue =
+        DenseElementsAttr::get(cast<mlir::ShapedType>(vecTy), oneAttr);
+    Value trueVal = builder.create<LLVM::ConstantOp>(loc, vecTy, denseValue);
+    return trueVal;
+  }
+
   // Given a vector of values `elems` and a starting point `start`, create a
   // LLVM vector of length `vec` whose elements are `elems[start, ...,
   // elems+vec-1]`
@@ -225,7 +237,12 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
         continue;
       }
 
-      Value pred = mask ? maskElems[vecStart] : b.int_val(1, 1);
+      Value pred =
+          mask ? packElementRangeIntoVector(
+                     rewriter, getTypeConverter(), loc,
+                     cast<VectorType>(LLVM::getVectorType(i1_ty, vec)),
+                     maskElems, vecStart)
+               : createTrueVector(rewriter, loc, cast<VectorType>(vecTy));
       Value ptr = ptrElems[vecStart];
 
       Value falseVal = createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
@@ -331,8 +348,16 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
         continue;
       }
 
-      Value pred =
-          llMask ? b.and_(threadPred, maskElems[vecStart]) : threadPred;
+      Value pred = packLLVector(
+          loc, ValueRange{llvm::SmallVector<Value>(vec, threadPred)}, rewriter);
+
+      if (maskElems.size()) {
+        Value maskVector = packElementRangeIntoVector(
+            rewriter, getTypeConverter(), loc,
+            cast<VectorType>(LLVM::getVectorType(i1_ty, vec)), maskElems,
+            vecStart);
+        pred = b.and_(pred, maskVector);
+      }
 
       // predicated store
       Value storeVal = packElementRangeIntoVector(
@@ -340,14 +365,8 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
           valueElems, vecStart);
 
       const uint32_t alignment = vec * valueElemNBytes;
-      for (size_t ii = 0; ii < vec; ++ii) {
-        Value vecIdx =
-            mlir::LLVM::createIndexConstant(rewriter, loc, typeConverter, ii);
-        npu::llStore(rewriter, loc,
-                     b.bitcast(ptrElems[vecStart + ii], ptr_ty(ctx, 1)),
-                     b.extract_element(valueElemTy, storeVal, b.i32_val(ii)),
-                     pred, alignment);
-      }
+      npu::llStore(rewriter, loc, b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1)),
+                   storeVal, pred, alignment);
     }
     rewriter.eraseOp(op);
     return success();

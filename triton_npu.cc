@@ -31,6 +31,9 @@ void init_triton_npu_passes_ttgpuir(py::module &&m) {
   m.def("add_shared_memory_global_conversion", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::npu::createSharedMemoryGlobalConversionPass());
   });
+  m.def("add_masked_ops_to_llvm", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::npu::createConvertMaskedOpsToLLVM());
+  });
 }
 
 void init_triton_npu(py::module &&m) {

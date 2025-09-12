@@ -6,6 +6,9 @@ include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
 include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 
+include "mlir/Dialect/LLVMIR/LLVMOpBase.td"
+
+
 class TTC_Op<string mnemonic, list<Trait> traits = []> :
     Op<TritonCPU_Dialect, mnemonic,
        !listconcat(traits, [])> {
@@ -32,6 +35,47 @@ def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
     int32_t getAxisAsInt() {
       return static_cast<int32_t>(getAxis());
     }
+  }];
+}
+
+def TTC_MaskedLoadOp : TTC_Op<"masked_load", [
+  TypesMatchWith<"mask size matches false val size", "falseVal", "mask", "mlir::getI1SameShape($_self)">,
+  TypesMatchWith<"result type matches false val type", "result", "falseVal", "$_self">,
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Masked load operation";
+
+  let description = [{
+    Load operation which lowers to a predicated load, scalar load, or masked vector load intrinsic.
+  }];
+
+  let arguments = (ins LLVM_AnyPointer:$ptr, AnyTypeOf<[LLVM_VectorOf<I1>, I1]>:$mask, AnyTypeOf<[LLVM_VectorOf<LLVM_Type>, LLVM_Type]>:$falseVal);
+
+  let results = (outs LLVM_Type:$result);
+
+  let assemblyFormat = [{
+    $ptr `,` $mask `,` $falseVal
+    attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def TTC_MaskedStoreOp : TTC_Op<"masked_store", [
+  TypesMatchWith<"mask type matches value type", "value", "mask",
+                 "mlir::getI1SameShape($_self)">
+]> {
+  let summary = "Masked store operation";
+
+  let description = [{
+    Store operation which conditionally lowers to the llvm.masked.store intrinsic, a predicated store, or a LLVM store if the mask is provably always true.
+  }];
+
+  let arguments = (ins LLVM_AnyPointer:$ptr, LLVM_Type:$value, AnyTypeOf<[LLVM_VectorOf<I1>, I1]>:$mask);
+
+  let results = (outs);
+
+  let assemblyFormat = [{
+    $ptr `,` $value `,` $mask
+    attr-dict `:` functional-type(operands, results)
   }];
 }
 

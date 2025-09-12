@@ -47,6 +47,8 @@ public:
     addIllegalDialect<triton::gpu::TritonGPUDialect>();
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
+    addLegalOp<mlir::triton::cpu::MaskedLoadOp,
+               mlir::triton::cpu::MaskedStoreOp>();
   }
 };
 
@@ -65,6 +67,8 @@ struct ConvertTritonCPUToLLVM
     mlir::triton::npu::TargetInfo targetInfo;
 
     // Allocate shared memory (uses default allocation scratch size function)
+    // TODO: consider overloading defaultAllocationAnalysisScratchSizeFn if the
+    // barrier is present
     ModuleAllocation allocation(mod);
     ModuleMembarAnalysis membarPass(&allocation);
     membarPass.run();
@@ -77,8 +81,8 @@ struct ConvertTritonCPUToLLVM
     TritonLLVMFunctionConversionTarget funcTarget(*context);
     RewritePatternSet funcPatterns(context);
 
-    mlir::triton::npu::populateFuncOpConversionPattern(
-        typeConverter, funcPatterns, targetInfo, patternBenefitDefault);
+    npu::populateFuncOpConversionPattern(typeConverter, funcPatterns,
+                                         targetInfo, patternBenefitDefault);
     if (failed(
             applyPartialConversion(mod, funcTarget, std::move(funcPatterns))))
       return signalPassFailure();
@@ -94,11 +98,11 @@ struct ConvertTritonCPUToLLVM
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
 
-    mlir::triton::npu::populateElementwiseOpToLLVMPatterns(
+    npu::populateElementwiseOpToLLVMPatterns(
         typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
 
-    populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
-                                      axisInfoAnalysis, benefit);
+    npu::populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
+                                           axisInfoAnalysis, benefit);
     mlir::triton::populateReduceOpToLLVMPatterns(typeConverter, patterns,
                                                  targetInfo, benefit);
     mlir::triton::populateScanOpToLLVMPatterns(typeConverter, patterns,

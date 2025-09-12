@@ -93,7 +93,10 @@ jobs:
         run: ccache --print-stats
       - name: Run lit tests
         working-directory: ./triton
-        run: make test-lit
+        run: |
+          make test-lit
+          export BUILD_DIR="$(cd python; python -c 'from build_helpers import get_cmake_dir; print(get_cmake_dir())')"
+          ninja -C ${BUILD_DIR} check-triton-npu-lit-tests
       - name: Run python tests on CPU
         working-directory: ./triton
         run: |

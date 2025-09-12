@@ -1,0 +1,13 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eadb62a15..ccc257731 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -197,6 +197,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
+       cmake_path(APPEND TRITON_BINARY_DIR "third_party" ${PLUGIN_NAME} OUTPUT_VARIABLE PLUGIN_DIR_BUILD_OUTPUT)
+       message(STATUS "Building plugin '${PLUGIN_NAME}' from ${PLUGIN_DIR} with output ${PLUGIN_DIR_BUILD_OUTPUT}")
+       add_subdirectory(${PLUGIN_DIR} ${PLUGIN_DIR_BUILD_OUTPUT})
++      include_directories(${PLUGIN_DIR})
++      include_directories(${PROJECT_BINARY_DIR}/${PLUGIN_DIR_BUILD_OUTPUT})
+     endforeach()
+   endif()
+ 
