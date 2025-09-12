@@ -381,7 +381,7 @@ class NPULauncher(object):
         signature = {idx: value for idx, value in src.signature.items()}
         src = make_launcher(constants, signature)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags() + ["-g"])
+                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
