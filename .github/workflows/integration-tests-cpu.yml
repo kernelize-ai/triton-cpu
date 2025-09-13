@@ -97,7 +97,7 @@ jobs:
       - name: Run python tests on CPU
         working-directory: ./triton
         run: |
-          python -m pytest -vvv --device "cpu" python/test/unit/language/test_core.py -k "test_reduce1d"
+          python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "test_reduce1d or test_load_store_same_ptr"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
         run: |
