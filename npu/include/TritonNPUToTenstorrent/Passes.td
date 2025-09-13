@@ -11,6 +11,7 @@ def ConvertTritonNPUToTenstorrent : Pass<"convert-triton-npu-to-tenstorrent", "m
     }];
 
     let dependentDialects = ["mlir::triton::TritonDialect",
+                             "mlir::triton::npu::tt::TritonTenstorrentDialect",
                              "mlir::func::FuncDialect",
                              "mlir::tt::ttkernel::TTKernelDialect"
                             ];

@@ -154,6 +154,8 @@ class NPUBackend(BaseBackend):
     @staticmethod
     def make_tenstorrent_mlir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
         npu.passes.tenstorrent.add_to_kernel_dialect(pm)
         pm.run(mod, "make_tenstorrentir")
         return mod

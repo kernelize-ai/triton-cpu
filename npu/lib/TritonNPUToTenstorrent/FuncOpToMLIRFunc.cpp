@@ -2,6 +2,7 @@
 
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "npu/include/Dialect/TritonTenstorrent/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 
 namespace {
@@ -25,7 +26,7 @@ struct TritonFuncOpConversion : public OpConversionPattern<triton::FuncOp> {
     MLIRContext *ctx = funcOp.getContext();
 
     // create a new funcop void -> void and copy over (or re-use) regions/blocks
-    FunctionType tritonTy = funcOp.getFunctionType();
+    mlir::FunctionType tritonTy = funcOp.getFunctionType();
     assert(tritonTy.getResults().empty() &&
            "expected triton kernel to return void");
     auto inputTypes = tritonTy.getInputs();
@@ -36,14 +37,17 @@ struct TritonFuncOpConversion : public OpConversionPattern<triton::FuncOp> {
 
     // ttKernel lowering expects a function with no arguments and no return in
     // the signature. Arguments will retrieved with get_compile_time_arg_val op.
-    FunctionType newTy =
-        FunctionType::get(ctx, /*inputs=*/TypeRange{}, /*results=*/TypeRange{});
+    mlir::FunctionType newTy = mlir::FunctionType::get(
+        ctx, /*inputs=*/TypeRange{}, /*results=*/TypeRange{});
 
     // TODO: should we copy the name or use `ttkernel_compute`?
-    auto newFunc = rewriter.create<func::FuncOp>(loc, funcOp.getName(), newTy);
+    auto newFunc =
+        rewriter.create<mlir::func::FuncOp>(loc, funcOp.getName(), newTy);
     if (auto vis = funcOp.getOperation()->getAttr(
             SymbolTable::getVisibilityAttrName()))
       newFunc->setAttr(SymbolTable::getVisibilityAttrName(), vis);
+
+    // TODO: set tenstorrent specific function attributes
 
     // Skip copying function attributes from the old function for now.
 
@@ -58,15 +62,24 @@ struct TritonFuncOpConversion : public OpConversionPattern<triton::FuncOp> {
     SmallVector<Value> newArgVals(entry.getNumArguments());
     for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i) {
       Type argTy = entry.getArgument(i).getType();
-      llvm::errs() << "need to convert arg : " << argTy << "\n";
-      // TODO: try and leverage upstream tenstorrent type converter
 
-      //   auto idxAttr = rewriter.getI32IntegerAttr(static_cast<int32_t>(i));
-      //   auto val = rewriter.create<mydialect::KernelArgOp>(loc, argTy,
-      //   idxAttr) /*.getResult()*/; newArgVals[i] = val.getResult(0);
+      auto val = rewriter.create<npu::tt::KernelArgOp>(
+          loc, argTy, rewriter.getIndexAttr(i));
+
+      // TODO: val or getResult?
+      newArgVals[i] = val;
     }
 
-    return failure();
+    // Replace all uses of the block args with the newly created ops.
+    for (unsigned i = 0, e = entry.getNumArguments(); i < e; ++i)
+      entry.getArgument(i).replaceAllUsesWith(newArgVals[i]);
+
+    // Now remove the block arguments (backwards to keep indices stable).
+    for (int i = static_cast<int>(entry.getNumArguments()) - 1; i >= 0; --i)
+      entry.eraseArgument(i);
+
+    rewriter.eraseOp(funcOp); // old symbol is gone; newFunc replaces it
+    return success();
   }
 };
 

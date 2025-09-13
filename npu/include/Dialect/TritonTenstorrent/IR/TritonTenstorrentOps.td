@@ -10,12 +10,10 @@ class TTTS_Op<string mnemonic, list<Trait> traits = []> :
        !listconcat(traits, [])> {
 }
 
-def IndexLike: AnyTypeOf<[Index, I32]>;
-
-def TTTS_KernelArg : TTTS_Op<"kernel_arg"> {
+def TTTS_KernelArgOp : TTTS_Op<"kernel_arg"> {
   let summary = "Placeholder for translation of a runtime kernel arg to compile time constant in the Tenstorrent compute kernel.";
 
-  let arguments = (ins IndexLike:$arg_index);
+  let arguments = (ins IndexAttr:$arg_index);
 
   let results = (outs AnyTypeOf<[TT_PtrLike, TT_FloatLike, TT_IntLike]>:$result);
 

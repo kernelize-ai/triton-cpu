@@ -1,6 +1,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "npu/include/Dialect/TritonTenstorrent/IR/Dialect.h"
 #include "npu/include/TritonNPUToTenstorrent/Passes.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
