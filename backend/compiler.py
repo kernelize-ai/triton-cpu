@@ -79,6 +79,16 @@ class NPUBackend(BaseBackend):
         npu.load_dialects(ctx)
 
     @staticmethod
+    def parse_attr(desc):
+        ret = []
+        if "D" in desc:
+            ret += [["tt.divisibility", 8]]
+        # pop D from desc
+        desc = desc.replace("D", "")
+        ret += BaseBackend.parse_attr(desc)
+        return ret
+
+    @staticmethod
     def make_ttir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
