@@ -209,7 +209,7 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
     const int ompMaxThreads = omp_get_max_threads();
     const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
 
-    int num_teams = max_threads / num_warps;
+    int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
 
     omp_set_dynamic(0);
