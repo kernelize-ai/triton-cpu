@@ -1,10 +1,7 @@
-// #include "TritonToTritonCPU/Passes.h"
-
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
 #include "npu/include/TritonNPUToLLVM/Passes.h"
 
 #include "mlir/Pass/PassManager.h"
-// #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/Host.h"
 
@@ -43,9 +40,7 @@ void init_triton_npu(py::module &&m) {
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
     registry.insert<mlir::triton::cpu::TritonCPUDialect>();
-    // registry.insert<mlir::vector::VectorDialect>();
-    // mlir::triton::cpu::registerTritonOpScalarizeExternalModels(registry);
-    // mlir::registerAMXDialectTranslation(registry);
+
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });
