@@ -3,7 +3,7 @@
 
 include "mlir/Pass/PassBase.td"
 
-def ConvertTritonNPUToLLVM : Pass<"convert-triton-npu-to-llvm", "mlir::ModuleOp"> {
+def ConvertTritonCPUToLLVM : Pass<"convert-triton-npu-to-llvm", "mlir::ModuleOp"> {
     let summary = "Convert TritonNPU to LLVM";
     let description = [{
         The `convert-triton-npu-to-llvm` pass converts Triton NPU operations

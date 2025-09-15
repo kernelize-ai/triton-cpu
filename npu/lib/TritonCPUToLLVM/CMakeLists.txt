@@ -1,11 +1,11 @@
-add_triton_library(TritonNPUToLLVM
+add_triton_library(TritonCPUToLLVM
     Allocation.cpp
     ElementwiseOpToLLVM.cpp
     FuncOpToLLVM.cpp
     GPUOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
     SharedMemoryGlobalConversion.cpp
-    TritonNPUToLLVM.cpp
+    TritonCPUToLLVM.cpp
     TargetInfo.cpp
     Utility.cpp
 

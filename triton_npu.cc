@@ -1,5 +1,5 @@
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
-#include "npu/include/TritonNPUToLLVM/Passes.h"
+#include "npu/include/TritonCPUToLLVM/Passes.h"
 
 #include "mlir/Pass/PassManager.h"
 #include "llvm/IR/Module.h"
@@ -23,7 +23,7 @@ std::string getDefaultTargerOrProcessTriple() {
 
 void init_triton_npu_passes_ttgpuir(py::module &&m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::npu::createConvertTritonNPUToLLVMPass());
+    pm.addPass(mlir::triton::npu::createConvertTritonCPUToLLVMPass());
   });
   m.def("add_allocate_shared_memory", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::npu::createAllocateSharedMemoryPass());

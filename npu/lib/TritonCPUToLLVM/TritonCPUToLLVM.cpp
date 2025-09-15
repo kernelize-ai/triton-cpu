@@ -10,7 +10,7 @@
 
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
-#include "npu/include/TritonNPUToLLVM/Passes.h"
+#include "npu/include/TritonCPUToLLVM/Passes.h"
 
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
@@ -18,8 +18,8 @@
 namespace mlir {
 namespace triton {
 namespace npu {
-#define GEN_PASS_DEF_CONVERTTRITONNPUTOLLVM
-#include "npu/include/TritonNPUToLLVM/Passes.h.inc"
+#define GEN_PASS_DEF_CONVERTTRITONCPUTOLLVM
+#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
 } // namespace npu
 } // namespace triton
 } // namespace mlir
@@ -60,12 +60,12 @@ public:
   }
 };
 
-struct ConvertTritonNPUToLLVM
-    : public triton::npu::impl::ConvertTritonNPUToLLVMBase<
-          ConvertTritonNPUToLLVM> {
-  using ConvertTritonNPUToLLVMBase::ConvertTritonNPUToLLVMBase;
+struct ConvertTritonCPUToLLVM
+    : public triton::npu::impl::ConvertTritonCPUToLLVMBase<
+          ConvertTritonCPUToLLVM> {
+  using ConvertTritonCPUToLLVMBase::ConvertTritonCPUToLLVMBase;
 
-  ConvertTritonNPUToLLVM() : ConvertTritonNPUToLLVMBase() {}
+  ConvertTritonCPUToLLVM() : ConvertTritonCPUToLLVMBase() {}
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -185,8 +185,8 @@ private:
 namespace mlir {
 namespace triton {
 namespace npu {
-std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonNPUToLLVMPass() {
-  return std::make_unique<ConvertTritonNPUToLLVM>();
+std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonCPUToLLVMPass() {
+  return std::make_unique<ConvertTritonCPUToLLVM>();
 }
 } // namespace npu
 } // namespace triton
