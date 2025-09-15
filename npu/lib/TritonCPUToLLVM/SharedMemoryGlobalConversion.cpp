@@ -1,4 +1,4 @@
-#include "npu/include/TritonNPUToLLVM/Passes.h"
+#include "npu/include/TritonCPUToLLVM/Passes.h"
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
@@ -13,7 +13,7 @@ namespace mlir {
 namespace triton {
 namespace npu {
 #define GEN_PASS_DEF_SHAREDMEMORYGLOBALCONVERSIONNPU
-#include "npu/include/TritonNPUToLLVM/Passes.h.inc"
+#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
 } // namespace npu
 } // namespace triton
 } // namespace mlir
