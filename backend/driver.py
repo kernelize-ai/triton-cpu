@@ -448,8 +448,6 @@ class NPUDriver(DriverBase):
     @staticmethod
     def is_active():
         try:
-            import torch
-            #return torch.cuda.is_available() and (torch.version.hip is None)
             return True
         except ImportError:
             return False
@@ -471,7 +469,7 @@ class NPUDriver(DriverBase):
 
     def get_current_target(self):
         capability = "npu"
-        warp_size = 32
+        warp_size = 1
         return GPUTarget("npu", capability, warp_size)
 
     def get_active_torch_device(self):
