@@ -122,6 +122,11 @@ class NPUBackend(BaseBackend):
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)
+        npu.passes.ttnpuir.add_core_specialize(pm)
+        passes.common.add_symbol_dce(pm)
+        passes.common.add_sccp(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_canonicalizer(pm)
         pm.run(mod, 'make_ttgir')
 
         return mod

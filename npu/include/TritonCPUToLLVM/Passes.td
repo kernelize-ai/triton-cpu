@@ -3,6 +3,21 @@
 
 include "mlir/Pass/PassBase.td"
 
+def CoreSpecialize : Pass<"core-specialize", "mlir::ModuleOp"> {
+    let summary = "Convert TritonNPU to LLVM";
+    let description = [{
+        The `convert-triton-npu-to-llvm` pass converts Triton NPU operations
+        into LLVM operations, enabling further optimizations and code generation.
+    }];
+
+    let dependentDialects = ["mlir::arith::ArithDialect",
+                             "mlir::math::MathDialect",
+                             "mlir::scf::SCFDialect",
+                             "mlir::triton::TritonDialect",
+                             "mlir::triton::cpu::TritonCPUDialect"
+                             ];
+}
+
 def ConvertTritonCPUToLLVM : Pass<"convert-triton-npu-to-llvm", "mlir::ModuleOp"> {
     let summary = "Convert TritonNPU to LLVM";
     let description = [{
