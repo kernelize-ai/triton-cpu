@@ -33,7 +33,6 @@ public:
   explicit TritonLLVMFunctionConversionTarget(MLIRContext &ctx)
       : ConversionTarget(ctx) {
     addLegalDialect<LLVM::LLVMDialect>();
-    // addLegalDialect<NVVM::NVVMDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
   }
 };
@@ -43,20 +42,11 @@ public:
   explicit TritonLLVMConversionTarget(MLIRContext &ctx)
       : ConversionTarget(ctx) {
     addLegalDialect<LLVM::LLVMDialect>();
-    // addLegalDialect<NVVM::NVVMDialect>();
-    // addLegalDialect<mlir::triton::nvgpu::NVGPUDialect>();
     addLegalDialect<mlir::cf::ControlFlowDialect>();
     addIllegalDialect<triton::TritonDialect>();
     addIllegalDialect<triton::gpu::TritonGPUDialect>();
-    // addIllegalDialect<triton::nvidia_gpu::TritonNvidiaGPUDialect>();
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
-
-    // // Warp specialization is lowered later.
-    // addLegalOp<triton::gpu::WarpSpecializeOp>();
-    // addLegalOp<triton::gpu::WarpYieldOp>();
-    // addLegalOp<triton::gpu::WarpSpecializePartitionsOp>();
-    // addLegalOp<triton::gpu::WarpReturnOp>();
   }
 };
 
