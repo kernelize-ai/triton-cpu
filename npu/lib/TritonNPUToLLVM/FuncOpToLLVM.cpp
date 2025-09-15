@@ -16,8 +16,9 @@ using namespace mlir::triton;
 struct FuncOpSPMDParamConversion
     : public ConvertOpToLLVMPattern<triton::FuncOp> {
   FuncOpSPMDParamConversion(LLVMTypeConverter &converter,
+                            const TargetInfoBase &targetInfo,
                             PatternBenefit benefit)
-      : ConvertOpToLLVMPattern(converter, benefit) {}
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
 
   /// Only retain those attributes that are not constructed by
   /// `LLVMFuncOp::build`. If `filterArgAttrs` is set, also filter out argument
@@ -41,21 +42,24 @@ struct FuncOpSPMDParamConversion
     // gridZ) grid sizes.
     auto loc = funcOp.getLoc();
     auto ctx = funcOp->getContext();
+    auto sharedPtrTy =
+        LLVM::LLVMPointerType::get(ctx, targetInfo.getSharedAddressSpace());
 
     // 1. Modify the function type to add the new arguments.
     auto funcTy = funcOp.getFunctionType();
     auto amendedInputTy = llvm::to_vector<4>(funcTy.getInputs());
     bool isKernel = triton::isKernel(funcOp);
     if (!isKernel)
-      return funcOp; // do nothing?
+      return funcOp; // TODO: pass shared memory to child functions
 
-    amendedInputTy.push_back(i32_ty); // thread_id
-    amendedInputTy.push_back(i32_ty); // x
-    amendedInputTy.push_back(i32_ty); // y
-    amendedInputTy.push_back(i32_ty); // z
-    amendedInputTy.push_back(i32_ty); // gridX
-    amendedInputTy.push_back(i32_ty); // gridY
-    amendedInputTy.push_back(i32_ty); // gridZ
+    amendedInputTy.push_back(i32_ty);      // thread_id
+    amendedInputTy.push_back(i32_ty);      // x
+    amendedInputTy.push_back(i32_ty);      // y
+    amendedInputTy.push_back(i32_ty);      // z
+    amendedInputTy.push_back(i32_ty);      // gridX
+    amendedInputTy.push_back(i32_ty);      // gridY
+    amendedInputTy.push_back(i32_ty);      // gridZ
+    amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
 
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
@@ -79,13 +83,14 @@ struct FuncOpSPMDParamConversion
         funcOp.getLoc(), funcOp.getName(), amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
 
-    region.addArgument(i32_ty, loc); // thread_id
-    region.addArgument(i32_ty, loc); // x
-    region.addArgument(i32_ty, loc); // y
-    region.addArgument(i32_ty, loc); // z
-    region.addArgument(i32_ty, loc); // gridX
-    region.addArgument(i32_ty, loc); // gridY
-    region.addArgument(i32_ty, loc); // gridZ
+    region.addArgument(i32_ty, loc);      // thread_id
+    region.addArgument(i32_ty, loc);      // x
+    region.addArgument(i32_ty, loc);      // y
+    region.addArgument(i32_ty, loc);      // z
+    region.addArgument(i32_ty, loc);      // gridX
+    region.addArgument(i32_ty, loc);      // gridY
+    region.addArgument(i32_ty, loc);      // gridZ
+    region.addArgument(sharedPtrTy, loc); // shared memory ptr
 
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());
@@ -128,6 +133,9 @@ struct FuncOpSPMDParamConversion
 
     return success();
   }
+
+private:
+  const TargetInfoBase &targetInfo;
 };
 
 } // namespace
@@ -135,5 +143,5 @@ struct FuncOpSPMDParamConversion
 void mlir::triton::npu::populateFuncOpConversionPattern(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const TargetInfoBase &targetInfo, PatternBenefit benefit) {
-  patterns.add<FuncOpSPMDParamConversion>(typeConverter, benefit);
+  patterns.add<FuncOpSPMDParamConversion>(typeConverter, targetInfo, benefit);
 }

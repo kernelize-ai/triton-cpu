@@ -4,6 +4,9 @@
 #include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Pass/Pass.h"
+#include "triton/Analysis/Allocation.h"
+#include "triton/Analysis/AxisInfo.h"
+#include "triton/Analysis/Membar.h"
 
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
@@ -70,6 +73,12 @@ struct ConvertTritonNPUToLLVM
 
     // Set up the type converter and patterns
     mlir::triton::npu::TargetInfo targetInfo;
+
+    // Allocate shared memory (uses default allocation scratch size function)
+    ModuleAllocation allocation(mod);
+    ModuleMembarAnalysis membarPass(&allocation);
+    membarPass.run();
+
     mlir::LowerToLLVMOptions option(context);
     option.overrideIndexBitwidth(32);
     TritonGPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
@@ -84,6 +93,10 @@ struct ConvertTritonNPUToLLVM
             applyPartialConversion(mod, funcTarget, std::move(funcPatterns))))
       return signalPassFailure();
 
+    // initSharedMemory is run before the conversion of call and ret ops,
+    // because the call op has to know the shared memory base address of each
+    // function
+    initSharedMemory(typeConverter);
     ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
 
     RewritePatternSet patterns(context);
@@ -118,8 +131,8 @@ struct ConvertTritonNPUToLLVM
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
     mlir::populateMathToLLVMConversionPatterns(typeConverter, patterns);
 
-    mlir::triton::npu::populateGPUtoLLVMConversionPatterns(typeConverter,
-                                                           patterns, benefit);
+    mlir::triton::npu::populateGPUtoLLVMConversionPatterns(
+        typeConverter, targetInfo, patterns, benefit);
 
     mlir::ub::populateUBToLLVMConversionPatterns(typeConverter, patterns);
     mlir::triton::populateViewOpToLLVMPatterns(typeConverter, patterns,
@@ -147,6 +160,23 @@ struct ConvertTritonNPUToLLVM
                                                           cfPatterns);
     if (failed(applyPartialConversion(mod, cfTarget, std::move(cfPatterns))))
       return signalPassFailure();
+  }
+
+private:
+  void initSharedMemory(LLVMTypeConverter &typeConverter) {
+    ModuleOp mod = getOperation();
+    OpBuilder b(mod.getBodyRegion());
+    auto ctx = mod.getContext();
+    auto loc = mod.getLoc();
+    auto elemTy = typeConverter.convertType(b.getIntegerType(8));
+    // Set array size 0 and external linkage indicates that we use dynamic
+    // shared allocation to allow a larger shared memory size for each kernel.
+    //
+    auto arrayTy = LLVM::LLVMArrayType::get(elemTy, 0);
+    unsigned cpuAddrSpace = 0u;
+    auto global = b.create<LLVM::GlobalOp>(
+        loc, arrayTy, /*isConstant=*/false, LLVM::Linkage::External,
+        "global_smem", /*value=*/Attribute(), /*alignment=*/64, cpuAddrSpace);
   }
 };
 

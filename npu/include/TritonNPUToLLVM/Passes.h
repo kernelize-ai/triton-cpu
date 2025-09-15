@@ -21,6 +21,9 @@ namespace npu {
 #include "npu/include/TritonNPUToLLVM/Passes.h.inc"
 
 std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonNPUToLLVMPass();
+std::unique_ptr<OperationPass<ModuleOp>> createAllocateSharedMemoryPass();
+std::unique_ptr<OperationPass<ModuleOp>>
+createSharedMemoryGlobalConversionPass();
 
 #define GEN_PASS_REGISTRATION
 #include "npu/include/TritonNPUToLLVM/Passes.h.inc"

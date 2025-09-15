@@ -79,7 +79,10 @@ class NpuUtils(object):
             return (lib, fn_ptr_as_void_p, 1, 0, 2**12)
 
     def get_device_properties(self, *args):
-        return {"max_num_regs": 1000, "max_shared_mem": 8192, "multiprocessor_count": 1, "warpSize": 1}
+        return {
+            "max_num_regs": os.cpu_count() * 4, "max_shared_mem": 256, "multiprocessor_count": os.cpu_count(),
+            "warpSize": 1
+        }
 
 
 def ty_to_cpp(ty):
@@ -176,16 +179,17 @@ def make_launcher(constants, signature):
     # TODO: float_storage_decls?
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
-    has_spmd_args = True
-    if has_spmd_args:
-        kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
-        arg_types += ', '
-        arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+    # add thread ID, block args, and shared memory ptr
+    kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ", "shared_mem_ptr"])
+    arg_types += ', '
+    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int8_t*"])
 
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
 #include <omp.h>
+
+#include <stdalign.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
 
@@ -203,16 +207,26 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
     return coord;
 }}
 
-static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
 
     const int ompMaxThreads = omp_get_max_threads();
     const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
 
     int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
+
+    // TODO: only add the plus barrier when we have a barrier
+    unsigned shared_memory_plus_barrier = shared_memory + 8;
+    unsigned shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
+    unsigned shared_memory_aligned = shared_memory_aligned_per_team * num_teams;
+    alignas(64) unsigned char* global_smem = aligned_alloc(64, shared_memory_aligned);
+    assert(global_smem);
+    memset(global_smem, 0, shared_memory_aligned);
+
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
 
     omp_set_dynamic(0);
+
 
     #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
     {{
@@ -220,8 +234,9 @@ static void _launch(int num_warps, int gridX, int gridY, int gridZ, kernel_ptr_t
         const int warp_id = worker_id % num_warps;
         const int thread_id = warp_id;
         const int team_id = worker_id / num_warps;
-
         const unsigned block_start = consecutive_blocks * team_id;
+
+        int8_t* shared_mem_ptr = (int8_t*)&global_smem[team_id * shared_memory_aligned_per_team];
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
         for(unsigned i = block_start; i < run_end; i++) {{
@@ -309,7 +324,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
   {newline.join(ptr_decls)}
   Py_BEGIN_ALLOW_THREADS;
-  _launch(num_warps, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  _launch(num_warps, shared_memory, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   Py_END_ALLOW_THREADS;
   if (PyErr_Occurred()) {{
     return NULL;

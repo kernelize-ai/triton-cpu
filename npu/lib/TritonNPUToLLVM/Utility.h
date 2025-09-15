@@ -11,6 +11,12 @@ namespace mlir {
 namespace triton {
 namespace npu {
 
+// kernel func calling convention is (kernel_args..., thread_id, block_args...,
+// shared_memory_ptr)
+constexpr int kSharedMemoryOffset = -1;
+constexpr int kProgramIdArgsOffset = -6 + kSharedMemoryOffset;
+constexpr int kThreadIdOffset = -1 + kProgramIdArgsOffset;
+
 /// Create a predicated block, using \p cond as the condition and \p ops for the
 /// values supplied by the conditional branch to the exit block. The \p
 /// thenOpsFn function is used to inject operations in the 'then' branch:

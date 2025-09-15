@@ -20,4 +20,20 @@ def ConvertTritonNPUToLLVM : Pass<"convert-triton-npu-to-llvm", "mlir::ModuleOp"
                              ];
 }
 
+def AllocateSharedMemoryNPU : Pass<"allocate-shared-memory-npu", "mlir::ModuleOp"> {
+    let summary = "Add metadata for NPU shared memory allocation";
+
+    let description = [{
+        coming soon
+    }];
+}
+
+def SharedMemoryGlobalConversionNPU : Pass<"shared-memory-global-conversion-npu", "mlir::ModuleOp"> {
+    let summary = "Convert NPU shared memory ptrs from global arguments to function args";
+
+    let description = [{
+        coming soon
+    }];
+}
+
 #endif

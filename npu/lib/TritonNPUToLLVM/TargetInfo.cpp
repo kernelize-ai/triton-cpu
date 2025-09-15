@@ -1,8 +1,11 @@
 #include "TargetInfo.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "triton/Analysis/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+
+#include "Utility.h"
 
 using namespace mlir;
 
@@ -47,27 +50,84 @@ Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
 
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
                          bool isWarpSync) const {
-  llvm::report_fatal_error("barrier not supported on NPU");
+  if (isWarpSync) {
+    llvm::report_fatal_error("warp sync barrier not supported on NPU");
+  }
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  b.barrier();
 }
 
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               std::optional<Value> ctaId, Value val,
                               Value pred) const {
-  llvm::report_fatal_error(
-      "NPU does not support cross-CTA shared memory transfers");
+  if (ctaId.has_value())
+    llvm::report_fatal_error(
+        "NPU does not support cross-CTA shared memory transfers");
+  mlir::triton::npu::llStore(rewriter, loc, ptr, val, pred, /*alignment=*/4);
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               std::optional<Value> ctaId, Type elemTy,
                               Value pred, Operation *localLoadOp) const {
-  llvm::report_fatal_error(
-      "NPU does not support cross-CTA shared memory transfers");
+  if (ctaId.has_value())
+    llvm::report_fatal_error(
+        "NPU does not support cross-CTA shared memory transfers");
+  Value falseVal = rewriter.create<LLVM::ConstantOp>(
+      loc, elemTy, rewriter.getZeroAttr(elemTy));
+  auto load =
+      mlir::triton::npu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
+                                /*alignment=*/4);
+  return load;
 }
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
-  llvm::report_fatal_error("shuffleXor not supported on NPU");
-  return Value();
+  auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+  int shared = 0;
+  if (auto sharedAttr = mod->getAttr("ttg.shared")) {
+    shared = cast<IntegerAttr>(sharedAttr).getInt();
+  }
+  assert(shared > 0 &&
+         "shared memory allocation is required for shuffle XOR operation");
+
+  // Unfortunately we do not have access to the original reduction op here.
+  // However, because we are inside a reduction, the total shared memory should
+  // be enough for this op due to shared memory being used to store other values
+  // during the reductions. And the barrier prevents any other users of the
+  // shared memory from interfering with this particular shuffle. If triton were
+  // to buffer data in shared memory this could be a problem, though - something
+  // to keep an eye on.
+  auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
+                                          getSharedAddressSpace());
+  auto funcOp = val.getParentRegion()->getParentOfType<FunctionOpInterface>();
+  Value smemBase = LLVM::getStackPointer(rewriter, funcOp);
+
+  Value threadId = getThreadId(rewriter, loc);
+
+  unsigned iWarpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
+  assert(iWarpSize == 1 && "only size 1 warps supported for reductions on NPU");
+
+  Value warpSize = b.i32_val(iWarpSize);
+  Value laneId = b.urem(threadId, warpSize);
+
+  // write to our slot
+  unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
+  Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
+  storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
+
+  barrier(loc, rewriter);
+
+  // read from our neighbor
+  Value neighbor = b.xor_(threadId, b.i32_val(i));
+  Value neighborSlot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, neighbor);
+  Value loaded = loadDShared(rewriter, loc, neighborSlot, std::nullopt,
+                             val.getType(), b.true_val());
+
+  barrier(loc, rewriter);
+  return loaded;
 }
 
 Value TargetInfo::shuffleUp(RewriterBase &rewriter, Location loc, Value val,
@@ -103,8 +163,10 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-  // not supported on CPU
-  return false;
+  // warp size on NPU is always 1, so we only need to reduce if multiple warps
+  // in the block are participating in the reduction. If so, fall back to
+  // shuffleXOR or other shuffle instruction + accumulator.
+  return numLaneToReduce == 1;
 }
 
 std::string TargetInfo::getMulhiFuncName(Type resultElementTy) const {
