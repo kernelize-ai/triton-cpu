@@ -160,8 +160,10 @@ class NPUBackend(BaseBackend):
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
         metadata["shared"] = src.get_int_attr("ttg.shared")
 
-        # TODO: match nvidia compiler cleanups?
-        return str(llvm_mod)
+        ret = str(llvm_mod)
+        del llvm_mod
+        del context
+        return ret
 
     @staticmethod
     def make_asm(src, metadata, options):
