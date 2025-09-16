@@ -14,7 +14,7 @@ namespace mlir {
 namespace triton {
 namespace npu {
 #define GEN_PASS_DEF_CORESPECIALIZE
-#include "npu/include/TritonNPUToLLVM/Passes.h.inc"
+#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
 } // namespace npu
 } // namespace triton
 } // namespace mlir
@@ -28,13 +28,18 @@ class Specializer {
   SmallVector<triton::gpu::LocalAllocOp> allocs;
   SmallVector<triton::LoadOp> loads;
   SmallVector<triton::StoreOp> stores;
+  DenseMap<Operation *, triton::gpu::LocalAllocOp> allocMap;
   public:
   Specializer(ModuleOp m, triton::FuncOp _func) : func(_func) {
     // collect all tile sizes and create multi-buffers
     for (auto load : func.getOps<triton::LoadOp>()) {
+      auto alloc = createSharedBuffer(load, cast<RankedTensorType>(load.getType()));
+      allocMap[load] = alloc;
       loads.push_back(load);
     }
     for (auto store : func.getOps<triton::StoreOp>()) {
+      auto alloc = createSharedBuffer(store, cast<RankedTensorType>(store.getValue().getType()));
+      allocMap[store] = alloc;
       stores.push_back(store);
     }
 
@@ -51,6 +56,10 @@ class Specializer {
     m.insert(func, writerFunc);
   }
   ~Specializer() {
+    allocs.clear();
+    loads.clear();
+    stores.clear();
+    allocMap.clear();
     func.erase();
   }
 
@@ -66,22 +75,13 @@ class Specializer {
 
 triton::gpu::LocalAllocOp createSharedBuffer(Operation *op, RankedTensorType rtType) {
   auto ctx = func.getContext();
-  OpBuilder b(op);
+  OpBuilder b(func.getBody());
   auto shape = rtType.getShape();
   int32_t size = shape[0]; // tile size?
   SmallVector<std::pair<unsigned, unsigned>> intervalPads{{1, 1}};
-  #if 0
-  auto blockDim = StringAttr::get(ctx, "block"); // must be "[offset, block]"
-  auto offsetDim = StringAttr::get(ctx, "offset"); // must be "[offset, block]"
-  auto outDim = StringAttr::get(ctx, "dim0");
-  auto ll = mlir::triton::LinearLayout::identity1D(size, offsetDim, outDim) *
-            mlir::triton::LinearLayout::identity1D(0, blockDim, outDim);
-  auto sharedEncoding = triton::gpu::PaddedSharedEncodingAttr::get(ctx, intervalPads, ll);
-  #else
   SmallVector<unsigned, 4> order{0};
   auto ctaLayout = triton::gpu::CTALayoutAttr::getDefault(ctx, 1);
   auto sharedEncoding = triton::gpu::PaddedSharedEncodingAttr::get(ctx, intervalPads, order, shape, ctaLayout);
-  #endif
   auto memdesc = triton::gpu::MemDescType::get(shape, rtType.getElementType(),
                                           sharedEncoding, triton::gpu::SharedMemorySpaceAttr::get(ctx), true);
   auto alloc = b.create<triton::gpu::LocalAllocOp>(op->getLoc(), memdesc);
@@ -95,78 +95,86 @@ triton::gpu::LocalAllocOp createSharedBuffer(Operation *op, RankedTensorType rtT
 // Create a global tensor shared-buffer that is externally visible
 // 
   triton::FuncOp makeReader(triton::FuncOp func) {
-    auto readerFunc = func.clone();
+    IRMapping map;
+    auto readerFunc = cast<triton::FuncOp>(func->clone(map));
     readerFunc.setName(func.getName().str() + "__reader");
     
     // Replace all loads with DMA to SRAM
     // TODO: handle address loads for subsequent loads
     // TODO: preload first N tiles (needs address logic..)
-    for (auto load : readerFunc.getOps<triton::LoadOp>()) {
-      //auto memdesc = bfunc.create<triton::gpu::MemdescIndexOp>(loc, alloc.getMemDesc(), load.getIndex());
-      
-      auto alloc = createSharedBuffer(load, cast<RankedTensorType>(load.getType()));
-      //alloc.setMemDesc(memdesc);
-      auto b = OpBuilder(load);
-      auto loc = load.getLoc();
+    for (auto load : loads) {
+      auto alloc = allocMap[load];
+      auto cload = cast<triton::LoadOp>(map.lookup(load).getDefiningOp());
+      auto calloc = cast<triton::gpu::LocalAllocOp>(map.lookup(alloc).getDefiningOp());
+      auto b = OpBuilder(cload);
+      auto loc = cload.getLoc();
       // create async copy, commit group, and wait
-      auto asyncCopy = b.create<triton::gpu::AsyncCopyGlobalToLocalOp>(loc, load.getPtr(), alloc, load.getMask(), load.getOther());
+      auto asyncCopy = b.create<triton::gpu::AsyncCopyGlobalToLocalOp>(loc, cload.getPtr(), calloc, cload.getMask(), cload.getOther());
       auto commitGroup = b.create<triton::gpu::AsyncCommitGroupOp>(loc, asyncCopy.getToken());
       auto wait = b.create<triton::gpu::AsyncWaitOp>(loc, commitGroup.getAsyncToken(), 1);
       // replace uses with null value
-      auto nullValue = b.create<arith::ConstantOp>(loc, load.getType(), b.getZeroAttr(load.getType()));
-      load.replaceAllUsesWith(nullValue.getResult());
+      auto nullValue = b.create<arith::ConstantOp>(loc, cload.getType(), b.getZeroAttr(cload.getType()));
+      cload.replaceAllUsesWith(nullValue.getResult());
     }
     // Erase all stores
-    SmallVector<triton::StoreOp> stores;
-    for (auto store : readerFunc.getOps<triton::StoreOp>()) {
-      stores.push_back(store);
-    }
     for (auto store : stores) {
-      store.erase();
+      auto cstore = cast<triton::StoreOp>(map.lookup(store));
+      cstore.erase();
     }
     return readerFunc;
   }
 
   triton::FuncOp makeCompute(triton::FuncOp func) {
-    // TODO: implement
-    auto computeFunc = func.clone();
+    IRMapping map;
+    auto computeFunc = cast<triton::FuncOp>(func->clone(map));
     computeFunc.setName(func.getName().str() + "__compute");
-    
+
     // Replace all loads with local loads
-    for (auto load : computeFunc.getOps<triton::LoadOp>()) {
-      auto alloc = createSharedBuffer(load, cast<RankedTensorType>(load.getType()));
-      auto b = OpBuilder(load);
-      auto loc = load.getLoc();
-      auto lload = b.create<triton::gpu::LocalLoadOp>(loc, load.getType(), alloc);
-      load.replaceAllUsesWith(lload.getResult());
+    for (auto load : loads) {
+      auto alloc = allocMap[load];
+      auto cload = cast<triton::LoadOp>(map.lookup(load).getDefiningOp());
+      auto calloc = cast<triton::gpu::LocalAllocOp>(map.lookup(alloc).getDefiningOp());
+      auto b = OpBuilder(cload);
+      auto loc = cload.getLoc();
+      auto lload = b.create<triton::gpu::LocalLoadOp>(loc, cload.getType(), calloc);
+      cload.replaceAllUsesWith(lload.getResult());
     }
     // Erase all stores
-    SmallVector<triton::StoreOp> stores;
-    for (auto store : computeFunc.getOps<triton::StoreOp>()) {
-      auto alloc = createSharedBuffer(store, cast<RankedTensorType>(store.getValue().getType()));
-      auto b = OpBuilder(store);
-      auto loc = store.getLoc();
-      auto lstore = b.create<triton::gpu::LocalStoreOp>(loc, store.getValue(), alloc);
-      stores.push_back(store);
-    }
     for (auto store : stores) {
-      store.erase();
+      auto alloc = allocMap[store];
+      auto cstore = cast<triton::StoreOp>(map.lookup(store));
+      auto calloc = cast<triton::gpu::LocalAllocOp>(map.lookup(alloc).getDefiningOp());
+      auto b = OpBuilder(cstore);
+      auto loc = cstore.getLoc();
+      auto lstore = b.create<triton::gpu::LocalStoreOp>(loc, cstore.getValue(), calloc);
+      cstore.erase();
     }
     return computeFunc;
   }
 
   triton::FuncOp makeWriter(triton::FuncOp func) {
-    // TODO: implement
-    auto writerFunc = func.clone();
+    IRMapping map;
+    auto writerFunc = cast<triton::FuncOp>(func->clone(map));
     writerFunc.setName(func.getName().str() + "__writer");
     
     // Replace all stores with local stores
-    for (auto store : writerFunc.getOps<triton::StoreOp>()) {
-      auto alloc = createSharedBuffer(store, cast<RankedTensorType>(store.getValue().getType()));
-      auto b = OpBuilder(store);
-      auto loc = store.getLoc();
-      auto lload = b.create<triton::gpu::LocalLoadOp>(loc, store.getValue().getType(), alloc);
-      store.getValueMutable().assign(lload.getResult());
+    for (auto store : stores) {
+      auto alloc = allocMap[store];
+      auto cstore = cast<triton::StoreOp>(map.lookup(store));
+      auto calloc = cast<triton::gpu::LocalAllocOp>(map.lookup(alloc).getDefiningOp());
+      auto b = OpBuilder(cstore);
+      auto loc = cstore.getLoc();
+      #if 1
+      // Use local load until async store is supported
+      auto lload = b.create<triton::gpu::LocalLoadOp>(loc, cstore.getValue().getType(), calloc);
+      cstore.getValueMutable().assign(lload.getResult());
+      #else
+      // create async copy, commit group, and wait
+      auto asyncCopy = b.create<triton::gpu::AsyncCopyLocalToGlobalOp>(loc, calloc, cstore.getPtr(), cstore.getMask());
+      auto commitGroup = b.create<triton::gpu::AsyncCommitGroupOp>(loc, asyncCopy.getToken());
+      auto wait = b.create<triton::gpu::AsyncWaitOp>(loc, commitGroup.getAsyncToken(), 1);
+      cstore.erase();
+      #endif
     }
     return writerFunc;
   }
@@ -185,8 +193,6 @@ public:
     for (auto func : funcOps) {
       Specializer(m, func);
     }
-
-    m.dump();
     return;
   }
 };
