@@ -16,7 +16,7 @@ def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
 
   let arguments = (ins TT_ProgramDim:$axis);
 
-  let results = (outs Index:$blockId);
+  let results = (outs I32:$blockId);
 
   let description = [{
     Get the ID of the current block.
@@ -24,7 +24,7 @@ def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
 
   let builders = [
     OpBuilder<(ins "ProgramIDDim":$axis), [{
-      build($_builder, $_state, $_builder.getIndexType(), ProgramIDDimAttr::get($_builder.getContext(), axis));
+      build($_builder, $_state, $_builder.getI32Type(), ProgramIDDimAttr::get($_builder.getContext(), axis));
     }]>
   ];
 
