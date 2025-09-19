@@ -5,7 +5,6 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
-#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Analysis/Utility.h"
 
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
@@ -74,6 +73,7 @@ class Specializer {
 
 
 triton::gpu::LocalAllocOp createSharedBuffer(Operation *op, RankedTensorType rtType) {
+  int idx = allocs.size();
   auto ctx = func.getContext();
   OpBuilder b(func.getBody());
   auto shape = rtType.getShape();
@@ -85,6 +85,7 @@ triton::gpu::LocalAllocOp createSharedBuffer(Operation *op, RankedTensorType rtT
   auto memdesc = triton::gpu::MemDescType::get(shape, rtType.getElementType(),
                                           sharedEncoding, triton::gpu::SharedMemorySpaceAttr::get(ctx), true);
   auto alloc = b.create<triton::gpu::LocalAllocOp>(op->getLoc(), memdesc);
+  alloc->setAttr("alloc_idx", b.getI32IntegerAttr(idx));
 
   allocs.push_back(alloc);
   return alloc;
@@ -108,13 +109,19 @@ triton::gpu::LocalAllocOp createSharedBuffer(Operation *op, RankedTensorType rtT
       auto calloc = cast<triton::gpu::LocalAllocOp>(map.lookup(alloc).getDefiningOp());
       auto b = OpBuilder(cload);
       auto loc = cload.getLoc();
+      // replace uses with null value
+      auto nullValue = b.create<arith::ConstantOp>(loc, cload.getType(), b.getZeroAttr(cload.getType()));
+      cload.replaceAllUsesWith(nullValue.getResult());
+      #if 0
       // create async copy, commit group, and wait
       auto asyncCopy = b.create<triton::gpu::AsyncCopyGlobalToLocalOp>(loc, cload.getPtr(), calloc, cload.getMask(), cload.getOther());
       auto commitGroup = b.create<triton::gpu::AsyncCommitGroupOp>(loc, asyncCopy.getToken());
       auto wait = b.create<triton::gpu::AsyncWaitOp>(loc, commitGroup.getAsyncToken(), 1);
-      // replace uses with null value
-      auto nullValue = b.create<arith::ConstantOp>(loc, cload.getType(), b.getZeroAttr(cload.getType()));
-      cload.replaceAllUsesWith(nullValue.getResult());
+      #else
+      // Use local store until async copy is supported
+      b.setInsertionPointAfter(cload);
+      auto lstore = b.create<triton::gpu::LocalStoreOp>(loc, cload.getResult(), calloc);
+      #endif
     }
     // Erase all stores
     for (auto store : stores) {
