@@ -60,6 +60,7 @@ jobs:
           # no shell to interpret them in the paths.
           path: |
             ~/.triton/llvm
+            ~/.triton/nvidia
             ~/.triton/json
           key: ${{ runner.os }}-${{ runner.arch }}-triton-${{ steps.cache-key.outputs.triton }}
       - name: Inspect cache directories

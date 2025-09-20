@@ -65,7 +65,9 @@ jobs:
           # Note that we cannot use environment variables here given there is
           # no shell to interpret them in the paths.
           path: |
-            ~/.triton/triton
+            ~/.triton/llvm
+            ~/.triton/nvidia
+            ~/.triton/json
           key: ${{ runner.os }}-${{ runner.arch }}-triton-${{ steps.cache-key.outputs.triton }}
       - name: Inspect cache directories
         run: |
