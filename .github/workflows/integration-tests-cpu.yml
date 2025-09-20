@@ -27,7 +27,7 @@ jobs:
       - name: Install ccache
         run: sudo apt-get update && sudo apt-get install -y ccache
       - name: Checkout NPU Plugin
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Fetch Triton upstream Commit Hash
         shell: bash
         run: |
@@ -35,7 +35,7 @@ jobs:
           echo "Found Triton commit hash: ${TRITON_COMMIT_HASH}"
           echo "triton_commit_hash=${TRITON_COMMIT_HASH}" >> ${GITHUB_ENV}
       - name: Checkout Triton upstream repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: triton-lang/triton
           path: triton
