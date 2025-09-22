@@ -38,6 +38,7 @@ LLVM_LIBRARY_DIR="$LLVM_BUILD_DIR/lib"
 MLIR_DIR="$LLVM_LIBRARY_DIR/cmake/mlir"
 LLVM_DIR="$LLVM_LIBRARY_DIR/cmake/llvm"
 
+mkdir -p "$TTMLIR_TOOLCHAIN_DIR/bin"
 [ ! -f "$TTMLIR_TOOLCHAIN_DIR/bin/llvm-ar" ] && ln -s "$LLVM_BUILD_DIR/bin/llvm-ar" "$TTMLIR_TOOLCHAIN_DIR/bin/llvm-ar"
 [ ! -f "$TTMLIR_TOOLCHAIN_DIR/bin/llvm-ranlib" ] && ln -s "$LLVM_BUILD_DIR/bin/llvm-ranlib" "$TTMLIR_TOOLCHAIN_DIR/bin/llvm-ranlib"
 
@@ -60,8 +61,10 @@ if [[ -z "${NO_TTMLIR_RUNTIME:-}" ]]; then
     # TODO: install ttrt and install tt-mlir/tt-metal for actual runtime usage
 else
     echo "Building tt-mlir without runtime"
+    # Hack: create the lib64 directory to avoid cmake error about missing dir on MacOS
+    mkdir -p "$TTMLIR_TOOLCHAIN_DIR/lib64"
+
     cmake -G Ninja -B build -DMLIR_DIR="$MLIR_DIR" -DLLVM_DIR="$LLVM_DIR" \
-    -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX \
     -DTTMLIR_ENABLE_BINDINGS_PYTHON=OFF -DTTMLIR_ENABLE_RUNTIME=OFF -DTT_RUNTIME_ENABLE_TTNN=OFF -DTT_RUNTIME_ENABLE_TTMETAL=OFF -DTTMLIR_ENABLE_RUNTIME_TESTS=OFF
     cmake --build build
 fi
