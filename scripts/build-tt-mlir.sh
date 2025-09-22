@@ -2,6 +2,7 @@
 set -euo pipefail
 
 TTMLIR_TOOLCHAIN_DIR="/opt/ttmlir-toolchain/"
+export TTMLIR_PYTHON_VERSION="${TTMLIR_PYTHON_VERSION:-python3.11}"
 
 : "${LLVM_BUILD_DIR:?LLVM_BUILD_DIR must be set to the triton LLVM build root directory (typically in ~/.triton/llvm/llvm-OSDISTRO-ARCH)}"
 
