@@ -34,3 +34,10 @@ jobs:
     uses: ./.github/workflows/integration-tests-macos.yml
     with:
       matrix: ${{ needs.runner-preparation.outputs.matrix-MACOS }}
+
+  integration-tests-tenstorrent:
+    needs: runner-preparation
+    if: needs.runner-preparation.outputs.matrix-TENSTORRENT != ''
+    uses: ./.github/workflows/integration-tests-tenstorrent.yml
+    with:
+      matrix: ${{ needs.runner-preparation.outputs.matrix-TENSTORRENT }}
