@@ -215,12 +215,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         num_physical_cores = N;
     const int max_threads = N * num_warps < num_physical_cores ? N * num_warps : num_physical_cores;
 
-#if 1
     int num_teams = num_physical_cores;
-#else
-    // TODO: this needs to be fixed up
-    int num_teams = num_physical_cores; // max_threads > num_warps ? max_threads / num_warps : 1;
-#endif 
+ 
     // TODO: only add the plus barrier when we have a barrier
     unsigned shared_memory_plus_barrier = shared_memory + 8;
     unsigned shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
@@ -229,7 +225,11 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     assert(global_smem);
     memset(global_smem, 0, shared_memory_aligned);
 
-    const unsigned consecutive_blocks = ceil((float)N / (num_teams));
+    const unsigned blocks_in_chunk_max = 4;
+    const unsigned blocks_in_chunk = N > blocks_in_chunk_max ? blocks_in_chunk_max : N;
+    const unsigned chunks_per_team = ceil((float)N / (num_teams * blocks_in_chunk));
+    //fprintf(stderr, "N = %d, num_teams = %d, chunks_per_team = %d\\n", N, num_teams, chunks_per_team);
+    //const unsigned consecutive_blocks = ceil((float)N / (num_teams));
     // fprintf(stderr, "consecutive blocks = %d\\n", consecutive_blocks);
 
     omp_set_dynamic(0);
@@ -238,26 +238,35 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     omp_set_nested(1);
     omp_set_max_active_levels(2);
     //fprintf(stderr, "starting %d teams with %d threads per team (%d physical cores)\\n", num_teams, num_warps, num_physical_cores);
-    #pragma omp parallel num_threads(num_physical_cores) proc_bind(close)
+    #pragma omp parallel num_threads(num_physical_cores) proc_bind(spread)
     {{
 #if 1
         const int core_id = omp_get_thread_num();
         int8_t* shared_mem_ptr = (int8_t*)&global_smem[core_id * shared_memory_aligned_per_team];
 
-        const unsigned start = core_id * consecutive_blocks;
-        const unsigned end = (core_id * consecutive_blocks + consecutive_blocks < N) ? (core_id * consecutive_blocks + consecutive_blocks) : N;
+        const unsigned start = core_id * blocks_in_chunk;
+        const unsigned offset = blocks_in_chunk * num_teams;
 
-        //fprintf(stderr, "team %d processing blocks [%d, %d)\\n", core_id, start, end);
-        #pragma omp parallel num_threads(num_warps) proc_bind(master) firstprivate(core_id, shared_mem_ptr, start, end)
+        //fprintf(stderr, "core_id = %d, start = %d, offset = %d\\n", core_id, start, offset);
+
+        #pragma omp parallel num_threads(num_warps) proc_bind(close) firstprivate(core_id, shared_mem_ptr, start, offset)
         {{
             //int p = omp_get_num_threads();
             //assert(p == num_warps);
 
             const int thread_id = omp_get_thread_num();
 
-            for (unsigned i = start; i < end; i++) {{
-                const GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
-                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});                
+            for (unsigned k = start; k < N; k += offset) {{
+                const unsigned end = (k + blocks_in_chunk < N) ? (k + blocks_in_chunk) : N;
+                for (unsigned i = k; i < end; i++) {{
+                    GridCoordinate coord;
+                    #pragma omp single copyprivate(coord)
+                    {{
+                        coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+                    }}
+                    #pragma omp barrier 
+                    (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});                
+                }}
             }}
         }}
 #else
