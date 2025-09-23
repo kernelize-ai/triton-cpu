@@ -229,7 +229,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     assert(global_smem);
     memset(global_smem, 0, shared_memory_aligned);
 
-    unsigned consecutive_blocks = ceil((float)N / (num_teams));
+    const unsigned consecutive_blocks = ceil((float)N / (num_teams));
+    // fprintf(stderr, "consecutive blocks = %d\\n", consecutive_blocks);
 
     omp_set_dynamic(0);
 
@@ -237,25 +238,26 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     omp_set_nested(1);
     omp_set_max_active_levels(2);
     //fprintf(stderr, "starting %d teams with %d threads per team (%d physical cores)\\n", num_teams, num_warps, num_physical_cores);
-    #pragma omp parallel num_threads(num_physical_cores) proc_bind(spread)
+    #pragma omp parallel num_threads(num_physical_cores) proc_bind(close)
     {{
 #if 1
         const int core_id = omp_get_thread_num();
-
         int8_t* shared_mem_ptr = (int8_t*)&global_smem[core_id * shared_memory_aligned_per_team];
 
-        #pragma omp for schedule(dynamic)
-        for (unsigned i = 0; i < N; i++) {{
-            GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+        const unsigned start = core_id * consecutive_blocks;
+        const unsigned end = (core_id * consecutive_blocks + consecutive_blocks < N) ? (core_id * consecutive_blocks + consecutive_blocks) : N;
 
-             #pragma omp parallel num_threads(num_warps) proc_bind(close) firstprivate(core_id)
-            {{
-                int p = omp_get_num_threads();
-                assert(p == num_warps);
-                
-                const int thread_id = omp_get_thread_num();
-                //fprintf(stderr, "core %d, team %d, thread %d running block %d (coord: %d,%d,%d)\\n", core_id, core_id, thread_id, i, coord.x, coord.y, coord.z);
-                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''}); 
+        //fprintf(stderr, "team %d processing blocks [%d, %d)\\n", core_id, start, end);
+        #pragma omp parallel num_threads(num_warps) proc_bind(master) firstprivate(core_id, shared_mem_ptr, start, end)
+        {{
+            //int p = omp_get_num_threads();
+            //assert(p == num_warps);
+
+            const int thread_id = omp_get_thread_num();
+
+            for (unsigned i = start; i < end; i++) {{
+                const GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});                
             }}
         }}
 #else
