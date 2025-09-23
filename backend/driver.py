@@ -215,9 +215,12 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         num_physical_cores = N;
     const int max_threads = N * num_warps < num_physical_cores ? N * num_warps : num_physical_cores;
 
+#if 1
+    int num_teams = num_physical_cores;
+#else
     // TODO: this needs to be fixed up
     int num_teams = num_physical_cores; // max_threads > num_warps ? max_threads / num_warps : 1;
-
+#endif 
     // TODO: only add the plus barrier when we have a barrier
     unsigned shared_memory_plus_barrier = shared_memory + 8;
     unsigned shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
@@ -231,10 +234,33 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     omp_set_dynamic(0);
 
 #if 1
+    omp_set_nested(1);
     omp_set_max_active_levels(2);
-
+    // fprintf(stderr, "starting %d teams with %d threads per team (%d physical cores)", num_teams, num_warps, num_physical_cores);
     #pragma omp parallel num_threads(num_physical_cores) proc_bind(spread)
     {{
+#if 1
+        const int core_id = omp_get_thread_num();
+
+        // TODO: instroducing consecutive_blcoks seems ot have made this bad. can we undo that?
+        // also TODO: can we make this work if we push the block loop up a level? 
+        #pragma omp parallel num_threads(num_warps) proc_bind(close) firstprivate(core_id)
+        {{
+            int p = omp_get_num_threads();
+            assert(p == num_warps);
+            const unsigned block_start = consecutive_blocks * core_id;
+            const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
+            for (size_t i = block_start; i < run_end; i++) {{
+                int8_t* shared_mem_ptr = (int8_t*)&global_smem[core_id * shared_memory_aligned_per_team];
+                GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+                
+                const int thread_id = omp_get_thread_num();
+                //fprintf(stderr, "core %d, team %d, thread %d running block %d (coord: %d,%d,%d)\\n", core_id, core_id, thread_id, i, coord.x, coord.y, coord.z);
+                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});            
+            }}
+        }}
+#else
+        // TODO: try conditionally disabling set_nested if num_warps > 1
         #pragma omp for schedule(static, 1)
         for (unsigned i = 0; i < N; i++) {{
             GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
@@ -253,6 +279,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
                 }}
             }}
         }}
+#endif
     }}
 #else
     #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
