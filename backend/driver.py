@@ -236,27 +236,26 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 #if 1
     omp_set_nested(1);
     omp_set_max_active_levels(2);
-    // fprintf(stderr, "starting %d teams with %d threads per team (%d physical cores)", num_teams, num_warps, num_physical_cores);
+    //fprintf(stderr, "starting %d teams with %d threads per team (%d physical cores)\\n", num_teams, num_warps, num_physical_cores);
     #pragma omp parallel num_threads(num_physical_cores) proc_bind(spread)
     {{
 #if 1
         const int core_id = omp_get_thread_num();
 
-        // TODO: instroducing consecutive_blcoks seems ot have made this bad. can we undo that?
-        // also TODO: can we make this work if we push the block loop up a level? 
-        #pragma omp parallel num_threads(num_warps) proc_bind(close) firstprivate(core_id)
-        {{
-            int p = omp_get_num_threads();
-            assert(p == num_warps);
-            const unsigned block_start = consecutive_blocks * core_id;
-            const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
-            for (size_t i = block_start; i < run_end; i++) {{
-                int8_t* shared_mem_ptr = (int8_t*)&global_smem[core_id * shared_memory_aligned_per_team];
-                GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+        int8_t* shared_mem_ptr = (int8_t*)&global_smem[core_id * shared_memory_aligned_per_team];
+
+        #pragma omp for schedule(dynamic)
+        for (unsigned i = 0; i < N; i++) {{
+            GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+
+             #pragma omp parallel num_threads(num_warps) proc_bind(close) firstprivate(core_id)
+            {{
+                int p = omp_get_num_threads();
+                assert(p == num_warps);
                 
                 const int thread_id = omp_get_thread_num();
                 //fprintf(stderr, "core %d, team %d, thread %d running block %d (coord: %d,%d,%d)\\n", core_id, core_id, thread_id, i, coord.x, coord.y, coord.z);
-                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});            
+                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''}); 
             }}
         }}
 #else
