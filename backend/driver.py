@@ -107,7 +107,7 @@ def ty_to_cpp(ty):
     }[ty]
 
 
-def make_launcher(constants, signature):
+def make_launcher(constants, signature, shared_mem_size):
 
     def _flatten_signature(sig, output):
         # Flatten tuples
@@ -180,9 +180,13 @@ def make_launcher(constants, signature):
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
     # add thread ID, block args, and shared memory ptr
-    kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ", "shared_mem_ptr"])
+    kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
     arg_types += ', '
-    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int8_t*"])
+    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+
+    if shared_mem_size > 0:
+        arg_types += ', int8_t*'
+        kernel_params.append("shared_mem_ptr")
 
     src = f"""
 #include <stdbool.h>
@@ -216,12 +220,16 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
 
     // TODO: only add the plus barrier when we have a barrier
-    unsigned shared_memory_plus_barrier = shared_memory + 8;
-    unsigned shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
-    unsigned shared_memory_aligned = shared_memory_aligned_per_team * num_teams;
-    alignas(64) unsigned char* global_smem = aligned_alloc(64, shared_memory_aligned);
-    assert(global_smem);
-    memset(global_smem, 0, shared_memory_aligned);
+    alignas(64) unsigned char* global_smem = NULL;
+    unsigned shared_memory_aligned_per_team = 0;
+    if (shared_memory > 0) {{
+        unsigned shared_memory_plus_barrier = shared_memory + 128;
+        shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
+        unsigned shared_memory_aligned = shared_memory_aligned_per_team * num_teams;
+        global_smem = aligned_alloc(64, shared_memory_aligned);
+        assert(global_smem);
+        memset(global_smem, 0, shared_memory_aligned);
+    }}
 
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
 
@@ -236,7 +244,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         const int team_id = worker_id / num_warps;
         const unsigned block_start = consecutive_blocks * team_id;
 
-        int8_t* shared_mem_ptr = (int8_t*)&global_smem[team_id * shared_memory_aligned_per_team];
+        int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
         for(unsigned i = block_start; i < run_end; i++) {{
@@ -379,7 +387,7 @@ class NPULauncher(object):
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
-        src = make_launcher(constants, signature)
+        src = make_launcher(constants, signature, metadata.shared)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
         self.launch = mod.launch

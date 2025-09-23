@@ -129,6 +129,17 @@ public:
 
     auto func =
         rewriter.create<LLVM::LLVMFuncOp>(moduleOp.getLoc(), kName, funcTy);
+    auto setBarrierPtrAttrs = [&](unsigned idx) {
+      func.setArgAttr(idx, "llvm.align",
+                      rewriter.getIntegerAttr(rewriter.getIntegerType(64), 64));
+      func.setArgAttr(idx, "llvm.nonnull", rewriter.getUnitAttr());
+      func.setArgAttr(idx, "llvm.nocapture", rewriter.getUnitAttr());
+      func.setArgAttr(idx, "llvm.noalias", rewriter.getUnitAttr());
+    };
+    setBarrierPtrAttrs(0);
+    setBarrierPtrAttrs(1);
+
+    func->setAttr("llvm.nounwind", rewriter.getUnitAttr());
 
     Block *entryBlock = func.addEntryBlock(rewriter);
     Block *lastBlock = new Block(), *waitBlock = new Block(),
@@ -144,7 +155,7 @@ public:
 
     // get the current phase
     Value phasePtr = func.getArgument(1);
-    Value crtPhase = b.load(i32_ty, phasePtr);
+    Value crtPhase = b.load(i32_ty, phasePtr, /*align=*/64);
 
     // atomically increment the count
     Value countPtr = func.getArgument(0);
@@ -163,7 +174,7 @@ public:
     {
       rewriter.setInsertionPointToEnd(lastBlock);
       // reset count
-      b.store(b.i32_val(0), countPtr);
+      b.store(b.i32_val(0), countPtr, /*align=*/64);
       // increment phase + release
       Value next = b.add(crtPhase, b.i32_val(1));
       auto release =
@@ -177,10 +188,9 @@ public:
     {
       rewriter.setInsertionPointToEnd(waitBlock);
       // check to see if the phase changed
-      LLVM::LoadOp latest = b.load(i32_ty, phasePtr);
+      LLVM::LoadOp latest = b.load(i32_ty, phasePtr, /*align=*/64);
       latest->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
                                       context, LLVM::AtomicOrdering::acquire));
-      latest->setAttr("alignment", rewriter.getI64IntegerAttr(4));
       Value same = b.icmp_eq(latest, crtPhase);
       rewriter.create<cf::CondBranchOp>(loc, same, waitBlock, afterSpinBlock);
     }
@@ -224,14 +234,14 @@ public:
         mlir::cast<mlir::IntegerAttr>(moduleOp->getAttr("ttg.shared")).getInt();
 
     // barrier shared memory allocation is implicit, so the ptrs we want are
-    // offVal and offVal + 4
+    // offVal and offVal + 64
     auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
                                             targetInfo.getSharedAddressSpace());
     auto smemPtr = LLVM::getStackPointer(rewriter, funcOp);
     Value countPtr =
         b.gep(ptrTy, i8_ty, smemPtr, b.i32_val(sharedMemSizeInBytes));
     Value phasePtr =
-        b.gep(ptrTy, i8_ty, smemPtr, b.i32_val(sharedMemSizeInBytes + 4));
+        b.gep(ptrTy, i8_ty, smemPtr, b.i32_val(sharedMemSizeInBytes + 64));
 
     SmallVector<Value> args{countPtr, phasePtr, numThreads};
     rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, barrierFunc, args);
