@@ -210,10 +210,13 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
 
-    const int ompMaxThreads = omp_get_max_threads();
-    const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
+    int num_physical_cores = omp_get_max_threads();
+    if (N < num_physical_cores)
+        num_physical_cores = N;
+    const int max_threads = N * num_warps < num_physical_cores ? N * num_warps : num_physical_cores;
 
-    int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
+    // TODO: this needs to be fixed up
+    int num_teams = num_physical_cores; // max_threads > num_warps ? max_threads / num_warps : 1;
 
     // TODO: only add the plus barrier when we have a barrier
     unsigned shared_memory_plus_barrier = shared_memory + 8;
@@ -227,7 +230,31 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     omp_set_dynamic(0);
 
+#if 1
+    omp_set_max_active_levels(2);
 
+    #pragma omp parallel num_threads(num_physical_cores) proc_bind(spread)
+    {{
+        #pragma omp for schedule(static, 1)
+        for (unsigned i = 0; i < N; i++) {{
+            GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+            if (num_warps == 1) {{
+                // assume no need for shared memory synchronization
+                int8_t* shared_mem_ptr = NULL;
+                const int thread_id = 0;
+                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+            }} else {{
+                #pragma omp parallel num_threads(num_warps) proc_bind(close)
+                {{
+                    const int thread_id = omp_get_thread_num() % num_warps;
+                    const int team_id = thread_id / num_warps;
+                     int8_t* shared_mem_ptr = (int8_t*)&global_smem[team_id * shared_memory_aligned_per_team];
+                    (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+                }}
+            }}
+        }}
+    }}
+#else
     #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
     {{
         int worker_id = omp_get_thread_num();
@@ -244,6 +271,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
     }}
+#endif 
 }}
 
 typedef struct _DevicePtrInfo {{
