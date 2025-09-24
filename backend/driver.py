@@ -252,6 +252,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
     }}
+
+    if (global_smem) free(global_smem);
 }}
 
 typedef struct _DevicePtrInfo {{
