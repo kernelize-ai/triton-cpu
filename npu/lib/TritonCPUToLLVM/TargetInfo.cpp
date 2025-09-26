@@ -163,10 +163,64 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-  // warp size on NPU is always 1, so we only need to reduce if multiple warps
-  // in the block are participating in the reduction. If so, fall back to
-  // shuffleXOR or other shuffle instruction + accumulator.
-  return numLaneToReduce == 1;
+  // no need to reduce if only one lane is involved
+  if (numLaneToReduce == 1)
+    return true;
+
+  Operation *reduceOp = op.getSingleCombiner();
+  if (!reduceOp)
+    return false;
+
+  assert(acc.size() == 1 && "only single value reduction supported on NPU");
+  auto val = acc[0];
+
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
+                                          getSharedAddressSpace());
+  Value smemBase = LLVM::getSharedMemoryBase(loc, rewriter, *this, op);
+  Value threadId = getThreadId(rewriter, loc);
+
+  // only thread (warp) 0 reduces
+  Value zero = b.i32_val(0);
+  Value isWarp0 = b.icmp_eq(threadId, zero);
+
+  // Split the current block
+  Block *currentBlock = rewriter.getBlock();
+  Block *thenBlock =
+      rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+  Block *continueBlock = rewriter.splitBlock(thenBlock, thenBlock->begin());
+  continueBlock->addArgument(val.getType(), loc);
+
+  // Create conditional branch
+  rewriter.setInsertionPointToEnd(currentBlock);
+  Value undef = b.undef(val.getType());
+  rewriter.create<cf::CondBranchOp>(loc, isWarp0, thenBlock, ArrayRef<Value>{},
+                                    continueBlock, ArrayRef<Value>{undef});
+
+  // Set insertion point to then block for reduction logic
+  rewriter.setInsertionPointToStart(thenBlock);
+
+  // Thread 0 reduces
+  unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
+  Value crtVal = val;
+  for (unsigned other = 1; other < numLaneToReduce; ++other) {
+    Value otherThreadId = b.i32_val(other);
+    Value otherSlot =
+        b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
+    Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
+                                 val.getType(), b.true_val());
+
+    IRMapping mapping;
+    mapping.map(reduceOp->getOperand(0), crtVal);
+    mapping.map(reduceOp->getOperand(1), otherVal);
+    crtVal = rewriter.clone(*reduceOp, mapping)->getResult(0);
+  }
+
+  // write back is handled by the caller
+  rewriter.create<cf::BranchOp>(loc, continueBlock, ValueRange{crtVal});
+  rewriter.setInsertionPointToStart(continueBlock);
+  acc[0] = continueBlock->getArgument(0);
+  return true;
 }
 
 std::string TargetInfo::getMulhiFuncName(Type resultElementTy) const {
