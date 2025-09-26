@@ -184,9 +184,13 @@ def make_launcher(constants, signature, shared_mem_size):
     arg_types += ', '
     arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
-    # the kernel always has shared mem arguments
+    # shared memory
     arg_types += ', int8_t*'
     kernel_params.append("shared_mem_ptr")
+
+    # start and end block
+    arg_types += ', int32_t, int32_t'
+    kernel_params.extend(["start", "end"])
 
     src = f"""
 #include <stdbool.h>
@@ -247,10 +251,20 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
+#if 1
+        // TODO: this won't quite work because we need to modify the coord
+        const GridCoordinate coord = get_grid_coordinate(block_start, gridX, gridY, gridZ);
+        const int start = block_start;
+        const int end = run_end;
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+#else
         for(unsigned i = block_start; i < run_end; i++) {{
             GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+            int start = i;
+            int end = i + 1;
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
+#endif
     }}
 
     if (global_smem) free(global_smem);
