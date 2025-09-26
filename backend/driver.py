@@ -66,7 +66,7 @@ class NpuUtils(object):
         pass
 
     def load_binary(self, name, kernel, shared_mem, device):
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=".so") as f:
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".so", delete=False) as f:
             f.write(kernel)
             f.flush()
             os.fsync(f.fileno())

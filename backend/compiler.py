@@ -148,7 +148,29 @@ class NPUBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
+
+        if not knobs.compilation.disable_line_info and not knobs.compilation.dump_ir_extract_di_local_variables:
+            passes.llvmir.add_di_scope(pm)
+
         pm.run(mod, 'make_llir')
+
+        if knobs.compilation.dump_ir_extract_di_local_variables:
+            # comments below on why separate it
+            if not knobs.compilation.disable_line_info:
+                pm = ir.pass_manager(mod.context)
+                pm.enable_debug()
+                passes.llvmir.add_di_scope(pm)
+                pm.run(mod, 'make_llir.disable_line_info')
+
+            # insert dbg intrinsic with several DI Attribute including source
+            # var name and type info note: unknown reason for now, but this
+            # pass and add_di_scope has to be run separately, otherwise if we
+            # put them into previous pipline, it trigger a segmentfault without
+            # any error message; could be due to a bug in mlir or pybind11
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            passes.llvmir.add_di_local_variable(pm)
+            pm.run(mod, 'make_llir.dump_ir_extract_di_local_variables')
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
         llvm.init_targets()
@@ -171,13 +193,21 @@ class NPUBackend(BaseBackend):
         names = re.findall(r"define void @(?!(?:barrier)\b)([a-zA-Z_][a-zA-Z0-9_]*)", src)
         assert len(names) == 1
         metadata["name"] = names[0]
-
+            
         flags = []
-        return llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
+        asm =  llvm.translate_to_asm(src, npu.get_default_target_triple(), options.arch, '', flags,
                                      options.enable_fp_fusion, False)
+        # fixup file paths 
+        # Matches: .file <num> "dir" "file"
+        pattern = re.compile(r'^(\s*\.file\s+\d+)\s+"([^"]+)"\s+"([^"]+)"', re.MULTILINE)
+        # Replace with: .file <num> "dir/file"
+        asm = pattern.sub(lambda m: f'{m.group(1)} "{m.group(2)}/{m.group(3)}"', asm)
+        
+        return asm
 
     @staticmethod
     def make_library(src, metadata, options):
+        # TODO: considering merging this and the ASM step above into a single binary stage.
         with tempfile.TemporaryDirectory() as tmpdir:
             asm_path = os.path.join(tmpdir, "kernel.s")
             Path(asm_path).write_text(src)
@@ -185,7 +215,7 @@ class NPUBackend(BaseBackend):
             libs = ["sleef"]  # TODO: conditionally include?
             include_dirs = []
             so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs,
-                        ["-undefined", "dynamic_lookup"] if npu_driver.is_macos() else [])
+                        ["-undefined", "dynamic_lookup"] if npu_driver.is_macos() else ["-g"])
             with open(so, "rb") as f:
                 return f.read()
 
