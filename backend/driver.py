@@ -184,9 +184,9 @@ def make_launcher(constants, signature, shared_mem_size):
     arg_types += ', '
     arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
-    if shared_mem_size > 0:
-        arg_types += ', int8_t*'
-        kernel_params.append("shared_mem_ptr")
+    # the kernel always has shared mem arguments
+    arg_types += ', int8_t*'
+    kernel_params.append("shared_mem_ptr")
 
     src = f"""
 #include <stdbool.h>
