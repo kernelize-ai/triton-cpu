@@ -50,4 +50,12 @@ def SharedMemoryGlobalConversionNPU : Pass<"shared-memory-global-conversion-npu"
     }];
 }
 
+def GenerateKernelWrapper : Pass<"generate-kernel-wrapper", "mlir::ModuleOp"> {
+    let summary = "Create wrapper function which unpacks kernel arguments and calls the kernel in a loop over a caller provided set of grid coordinates.";
+
+    let description = [{
+        coming soon
+    }];
+}
+
 #endif

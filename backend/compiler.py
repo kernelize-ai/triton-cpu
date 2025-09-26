@@ -143,9 +143,11 @@ class NPUBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
 
+        npu.passes.ttnpuir.generate_kernel_wrapper(pm)
         passes.convert.add_cf_to_llvmir(pm)
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
+        passes.common.add_inliner(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
         pm.run(mod, 'make_llir')
