@@ -200,7 +200,6 @@ public:
       rewriter.setInsertionPointToEnd(afterSpinBlock);
       auto acquire =
           LLVM::AtomicOrderingAttr::get(context, LLVM::AtomicOrdering::acquire);
-      rewriter.create<LLVM::FenceOp>(loc, LLVM::AtomicOrdering::acquire);
       rewriter.create<cf::BranchOp>(loc, exitBlock);
     }
 
