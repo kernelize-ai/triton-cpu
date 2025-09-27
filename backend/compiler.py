@@ -19,7 +19,7 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class NPUOptions:
-    num_warps: int = 1
+    num_warps: int = 16
     num_ctas: int = 1
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
@@ -112,7 +112,7 @@ class NPUBackend(BaseBackend):
         metadata["warp_size"] = threads_per_warp
         num_ctas = 1
         passes.ttir.add_convert_to_ttgpuir(pm, "npu", options.num_warps, threads_per_warp, num_ctas)
-        passes.ttgpuir.add_coalesce(pm)
+        npu.passes.ttcpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 
         passes.ttgpuir.add_optimize_thread_locality(pm)

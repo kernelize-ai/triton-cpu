@@ -215,7 +215,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     unsigned N = gridX * gridY * gridZ;
 
     const int ompMaxThreads = omp_get_max_threads();
-    const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
+    const int max_threads = num_warps; // N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
 
     int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
 
