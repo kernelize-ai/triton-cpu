@@ -44,6 +44,9 @@ void init_triton_cpu_passes(py::module &&m) {
   m.def("add_coalesce", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce());
   });
+  m.def("add_kernel_stream", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createAddKernelStreamPass());
+  });
 }
 
 void init_triton_npu(py::module &&m) {

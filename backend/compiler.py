@@ -19,8 +19,9 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class NPUOptions:
-    num_warps: int = 16
+    num_warps: int = 4
     num_ctas: int = 1
+    num_stages: int = 3
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
     arch: str = None
@@ -107,7 +108,7 @@ class NPUBackend(BaseBackend):
     @staticmethod
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
-        pm.enable_debug()
+        dump_enabled = pm.enable_debug()
         threads_per_warp = 1
         metadata["warp_size"] = threads_per_warp
         num_ctas = 1
@@ -118,6 +119,24 @@ class NPUBackend(BaseBackend):
         passes.ttgpuir.add_optimize_thread_locality(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttir.add_loop_aware_cse(pm)
+
+        # loop optimization + pipelining
+        passes.ttgpuir.add_fuse_nested_loops(pm)
+        
+        npu.passes.ttcpuir.add_kernel_stream(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.common.add_inliner(pm)
+
+        passes.ttir.add_triton_licm(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttgpuir.add_assign_latencies(pm, options.num_stages)
+        passes.ttgpuir.add_schedule_loops(pm)
+        passes.ttgpuir.add_pipeline(pm, options.num_stages, True)
+        
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        
+        #passes.ttgpuir.add_prefetch(pm) # does nothing 
         passes.common.add_symbol_dce(pm)
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
