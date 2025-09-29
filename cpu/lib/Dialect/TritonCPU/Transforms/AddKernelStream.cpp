@@ -100,12 +100,7 @@ static triton::FuncOp cloneTTFuncWithExtraI32Arg(ModuleOp mod,
   auto newFunc = b.create<triton::FuncOp>(src.getLoc(), newName, newFTy,
                                           /*attrs=*/userAttrs,
                                           /*argAttrs=*/argDicts);
-
-  // Preserve visibility (or make it private if you want to hide the impl).
-  if (auto vis = src->getAttrOfType<StringAttr>(kAttrSymVisibility))
-    newFunc->setAttr(kAttrSymVisibility, vis);
-  else
-    newFunc.setPrivate();
+  newFunc.setPrivate();
 
   // Preserve result attrs (builder signature didn’t include res_attrs).
   if (auto resArr = src->getAttr(kAttrResAttrs))
