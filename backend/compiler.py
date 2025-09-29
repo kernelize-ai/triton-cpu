@@ -19,7 +19,7 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class NPUOptions:
-    num_warps: int = 4
+    num_warps: int = 8
     num_ctas: int = 1
     num_stages: int = 3
     cluster_dims: tuple = (1, 1, 1)
@@ -122,9 +122,9 @@ class NPUBackend(BaseBackend):
 
         # loop optimization + pipelining
         passes.ttgpuir.add_fuse_nested_loops(pm)
+        passes.common.add_canonicalizer(pm)
 
         npu.passes.ttcpuir.add_kernel_stream(pm)
-        passes.common.add_canonicalizer(pm)
         passes.common.add_inliner(pm)
 
         passes.ttir.add_triton_licm(pm)
@@ -134,6 +134,8 @@ class NPUBackend(BaseBackend):
         passes.ttgpuir.add_pipeline(pm, options.num_stages, True)
 
         passes.common.add_canonicalizer(pm)
+        passes.ttgpuir.add_coalesce_async_copy(pm)  # does this do anything?
+        passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttir.add_loop_aware_cse(pm)
 
         #passes.ttgpuir.add_prefetch(pm) # does nothing
@@ -162,7 +164,7 @@ class NPUBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
 
-        npu.passes.ttnpuir.generate_kernel_wrapper(pm)
+        # npu.passes.ttnpuir.generate_kernel_wrapper(pm)
         passes.convert.add_cf_to_llvmir(pm)
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
