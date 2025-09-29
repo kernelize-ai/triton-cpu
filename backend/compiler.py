@@ -129,7 +129,7 @@ class CPUBackend(BaseBackend):
 
         # loop optimization + pipelining
         passes.ttgpuir.add_fuse_nested_loops(pm)
-        
+
         npu.passes.ttcpuir.add_kernel_stream(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_inliner(pm)
@@ -139,11 +139,11 @@ class CPUBackend(BaseBackend):
         passes.ttgpuir.add_assign_latencies(pm, options.num_stages)
         passes.ttgpuir.add_schedule_loops(pm)
         passes.ttgpuir.add_pipeline(pm, options.num_stages, True)
-        
+
         passes.common.add_canonicalizer(pm)
         passes.ttir.add_loop_aware_cse(pm)
-        
-        #passes.ttgpuir.add_prefetch(pm) # does nothing 
+
+        #passes.ttgpuir.add_prefetch(pm) # does nothing
         passes.common.add_symbol_dce(pm)
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
