@@ -366,8 +366,8 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
           valueElems, vecStart);
 
       const uint32_t alignment = vec * valueElemNBytes;
-      npu::llStore(rewriter, loc, b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 0)),
-                   storeVal, pred, alignment);
+      npu::llStore(rewriter, loc, ptrElems[vecStart], storeVal, pred,
+                   alignment);
     }
     rewriter.eraseOp(op);
     return success();
@@ -471,12 +471,11 @@ struct AsyncCopyGlobalToLocalOpConversion
     Value threadPred =
         emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
 
-    auto emitCpAsync = [&b, threadPred, ptrTy, hasMask = bool(llMask)](
+    auto emitCpAsync = [&b, this, threadPred, ptrTy, hasMask = bool(llMask)](
                            RewriterBase &rewriter, Location loc,
                            ArrayRef<Value> vals, Value shmemAddr, int startIdx,
                            VectorType vecTy) -> SmallVector<Value> {
       assert(isa<VectorType>(vecTy));
-#if 1
       auto ctx = rewriter.getContext();
       auto i1Ty = rewriter.getI1Type();
       auto elemTy = vecTy.getElementType();
@@ -497,6 +496,51 @@ struct AsyncCopyGlobalToLocalOpConversion
       Value shBase = shmemAddr; // b.bitcast(ptrTy, shmemAddr);
 
       // Constants
+#if 1
+
+#if 1
+      Value c0 = createZeroVector(rewriter, loc, vecTy);
+#else
+      // TODO: should we fix this somewhere else? seems silly to have to
+      // specialize for the 1 case but getting a masked load mismatch. maybe the
+      // load verifier is too strict.
+      Value c0 = nElts == 1 ? rewriter.create<LLVM::ConstantOp>(
+                                  loc, elemTy, rewriter.getZeroAttr(elemTy))
+                            : createZeroVector(rewriter, loc, vecTy);
+#endif
+      Value truePred = b.true_val();
+      Value laneMaskSplat = hasMask ? maskVal : truePred;
+      Value threadPredVal = threadPred ? threadPred : truePred;
+
+      // Combined predicate: threadPred && laneMask (scalar path uses same pred
+      // for each lane)
+      Value combinedPred = b.and_(threadPredVal, laneMaskSplat);
+
+      // Scalarize: GEP each lane, load (predicated, zero-fill), store
+      // (predicated)
+
+      // If you have a vector mask (e.g., vector<nxi1>), replace combinedPred
+      // with mask[i]:
+      //   Value laneMask = b.extract_element(i1Ty, maskVec, idx);
+      //   Value lanePred = b.and_(threadPredVal, laneMask);
+      VectorType maskTy = VectorType::get(nElts, i1_ty);
+      Value lanePred = b.undef(maskTy);
+      for (unsigned i = 0; i < nElts; i++) {
+        lanePred =
+            b.insert_element(maskTy, lanePred, combinedPred, b.i32_val(i));
+      }
+
+      // Note: alignment is not currently used in llLoad - it is computed when
+      // lowering the generated cpu masked load op to LLVM. If that changes,
+      // we need to change this value here as it is likely too conservative.
+      // load with zero-fill on miss (pred=false)
+      Value val = npu::llLoad(rewriter, loc, srcBase, vecTy, /*pred=*/lanePred,
+                              /*falseVal=*/c0, /*alignment=*/1);
+
+      // store under the same predicate (I wonder if we should always store?)
+      npu::llStore(rewriter, loc, shBase, val, /*pred=*/lanePred,
+                   /*alignment=*/1);
+#else
       Value c0 = rewriter.create<LLVM::ConstantOp>(
           loc, elemTy, rewriter.getZeroAttr(elemTy));
       Value truePred = b.true_val();
@@ -534,40 +578,6 @@ struct AsyncCopyGlobalToLocalOpConversion
         npu::llStore(rewriter, loc, sh_i, val_i, /*pred=*/lanePred,
                      /*alignment=*/1);
       }
-#else
-      auto *ctx = rewriter.getContext();
-      auto elemTy = vecTy.getElementType();
-      auto nBytes = vecTy.getNumElements() * elemTy.getIntOrFloatBitWidth() / 8;
-      // assert(nBytes == 16 || nBytes == 8 || nBytes == 4);
-
-      auto structElem = vals[startIdx];
-      auto srcElem = b.extract_val(ptrTy, structElem, 0);
-      auto maskElem = b.extract_val(i1_ty, structElem, 1);
-
-      // Value loadVec =
-      // npu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, alignment);
-
-      PTXBuilder ptxBuilder;
-      auto &copyAsyncOp =
-          *ptxBuilder.create<PTXCpAsyncLoadInstr>(srcCacheModifier);
-      auto *dstOperand = ptxBuilder.newAddrOperand(shmemAddr, "r");
-      auto *srcOperand = ptxBuilder.newAddrOperand(srcElem, "l");
-      auto *copySize = ptxBuilder.newConstantOperand(nBytes);
-      auto *srcSize = copySize;
-      if (hasMask) {
-        // We don't use predicate in this case, setting src-size to 0
-        // if there's any mask. cp.async will automatically fill the
-        // remaining slots with 0 if cp-size > src-size.
-        // XXX(Keren): Always assume other = 0 for now.
-        // When 'other != 0' is supported, we will need to fold the
-        // op.getMask() and redundantDataMask() into the same predicate, the
-        // way it is done for LoadOp.
-        auto selectOp = b.select(maskElem, b.i32_val(nBytes), b.i32_val(0));
-        srcSize = ptxBuilder.newOperand(selectOp, "r");
-      }
-      copyAsyncOp(dstOperand, srcOperand, copySize, srcSize)
-          .maybePredicate(threadPred);
-      ptxBuilder.launch(rewriter, loc, void_ty(ctx));
 #endif
       return {};
     };
