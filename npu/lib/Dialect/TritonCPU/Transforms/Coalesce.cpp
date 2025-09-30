@@ -88,8 +88,7 @@ getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
   unsigned maxMultiple = std::max(maxMultipleBytes / elemNumBytes, 1u);
   unsigned maxContig =
       std::min(valInfo.getContiguity(order[0]), shapePerCTA[order[0]]);
-  unsigned alignment = std::min(
-      maxContig, 64 / elemNumBytes);  // std::min(maxMultiple, maxContig);
+  unsigned alignment = maxContig;     // std::min(maxMultiple, maxContig);
   unsigned currPerThread = alignment; // std::min(alignment, 512 / elemNumBits);
   LDBG("elemNumBytes: " << elemNumBytes
                         << ", divisibility: " << maxMultipleBytes
