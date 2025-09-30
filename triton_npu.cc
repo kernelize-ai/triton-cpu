@@ -1,4 +1,5 @@
 #include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h"
 #include "npu/include/TritonCPUToLLVM/Passes.h"
 
 #include "mlir/Pass/PassManager.h"
@@ -36,9 +37,16 @@ void init_triton_npu_passes_ttgpuir(py::module &&m) {
   });
 }
 
+void init_triton_cpu_passes(py::module &&m) {
+  m.def("add_coalesce", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce());
+  });
+}
+
 void init_triton_npu(py::module &&m) {
   auto passes = m.def_submodule("passes");
   init_triton_npu_passes_ttgpuir(passes.def_submodule("ttnpuir"));
+  init_triton_cpu_passes(passes.def_submodule("ttcpuir"));
 
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
