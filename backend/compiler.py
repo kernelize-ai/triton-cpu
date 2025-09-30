@@ -19,9 +19,9 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class NPUOptions:
-    num_warps: int = 8
+    num_warps: int = 16
     num_ctas: int = 1
-    num_stages: int = 3
+    num_stages: int = 4
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
     arch: str = None
@@ -131,7 +131,7 @@ class NPUBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.ttgpuir.add_assign_latencies(pm, options.num_stages)
         passes.ttgpuir.add_schedule_loops(pm)
-        passes.ttgpuir.add_pipeline(pm, options.num_stages, True)
+        passes.ttgpuir.add_pipeline(pm, options.num_stages, dump_enabled)
 
         passes.common.add_canonicalizer(pm)
         passes.ttgpuir.add_coalesce_async_copy(pm)  # does this do anything?
