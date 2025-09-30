@@ -74,6 +74,18 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
         "NPU does not support cross-CTA shared memory transfers");
   Value falseVal = rewriter.create<LLVM::ConstantOp>(
       loc, elemTy, rewriter.getZeroAttr(elemTy));
+  if (isa<VectorType>(elemTy) && !isa<VectorType>(pred.getType())) {
+    // TODO: we should handle this case in the llLoad lowering
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    const auto numElements = cast<VectorType>(elemTy).getNumElements();
+    VectorType predTy = VectorType::get(numElements, i1_ty);
+    Value vecPred = b.undef(predTy);
+    for (unsigned i = 0; i < numElements; i++) {
+      vecPred = b.insert_element(predTy, vecPred, pred, b.i32_val(i));
+    }
+    pred = vecPred;
+  }
+
   auto load =
       mlir::triton::npu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
                                 /*alignment=*/4);
