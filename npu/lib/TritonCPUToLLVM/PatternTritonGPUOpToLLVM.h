@@ -29,7 +29,12 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        RewritePatternSet &patterns,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit);
-
+#if 1
+void populateMemoryOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                    const TargetInfoBase &targetInfo,
+                                    RewritePatternSet &patterns,
+                                    PatternBenefit benefit);
+#endif
 } // namespace npu
 } // namespace triton
 } // namespace mlir

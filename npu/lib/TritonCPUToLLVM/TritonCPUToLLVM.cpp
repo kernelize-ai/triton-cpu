@@ -70,7 +70,18 @@ struct ConvertTritonCPUToLLVM
     // TODO: consider overloading defaultAllocationAnalysisScratchSizeFn if the
     // barrier is present
     ModuleAllocation allocation(mod);
-    ModuleMembarAnalysis membarPass(&allocation);
+    ModuleMembarAnalysis membarPass(
+        &allocation, [](Operation *op1, Operation *op2) {
+          auto isAsyncLoad = [](Operation *op) {
+            return llvm::isa<triton::gpu::AsyncCopyGlobalToLocalOp>(op);
+          };
+
+          // llvm::errs() << "op1 = " << *op1 << "\n";
+          // llvm::errs() << "op2 = " << *op2 << "\n";
+          // still adding the barrier, argh
+          // all async loads are synchronous right now...
+          return isAsyncLoad(op1) || isAsyncLoad(op2);
+        });
     membarPass.run();
 
     mlir::LowerToLLVMOptions option(context);
@@ -133,6 +144,9 @@ struct ConvertTritonCPUToLLVM
                                                benefit);
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns,
                                                 targetInfo, benefit);
+    // prioritize npu memory op lowerings over upstream
+    mlir::triton::npu::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo,
+                                                      patterns, 2 * benefit);
     mlir::triton::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo,
                                                  patterns, benefit);
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo,
