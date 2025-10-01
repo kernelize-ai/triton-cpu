@@ -1,9 +1,9 @@
-#ifndef TTRITON_CONVERSION_TRITONNPU_TO_LLVM_TARGETINFONPU_H
-#define TTRITON_CONVERSION_TRITONNPU_TO_LLVM_TARGETINFONPU_H
+#ifndef TTRITON_CONVERSION_TRITONCPU_TO_LLVM_TARGETINFOCPU_H
+#define TTRITON_CONVERSION_TRITONCPU_TO_LLVM_TARGETINFOCPU_H
 
 #include "triton/Conversion/TritonGPUToLLVM/TargetInfoBase.h"
 
-namespace mlir::triton::npu {
+namespace mlir::triton::cpu {
 
 class TargetInfo : public mlir::triton::TargetInfoBase {
 public:
@@ -70,6 +70,6 @@ public:
   bool supportVectorizedAtomics() const override;
 };
 
-} // namespace mlir::triton::npu
+} // namespace mlir::triton::cpu
 
 #endif

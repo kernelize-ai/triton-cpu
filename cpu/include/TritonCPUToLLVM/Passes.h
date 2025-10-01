@@ -1,5 +1,5 @@
-#ifndef TRITONNPU_CONVERSION_TRITONCPUTOLLVM_PASSES_H
-#define TRITONNPU_CONVERSION_TRITONCPUTOLLVM_PASSES_H
+#ifndef TRITONCPU_CONVERSION_TRITONCPUTOLLVM_PASSES_H
+#define TRITONCPU_CONVERSION_TRITONCPUTOLLVM_PASSES_H
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -16,7 +16,7 @@ class ModuleOp;
 template <typename T> class OperationPass;
 
 namespace triton {
-namespace npu {
+namespace cpu {
 
 #define GEN_PASS_DECL
 #include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
@@ -29,7 +29,7 @@ createSharedMemoryGlobalConversionPass();
 #define GEN_PASS_REGISTRATION
 #include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
 
-} // namespace npu
+} // namespace cpu
 } // namespace triton
 
 } // namespace mlir

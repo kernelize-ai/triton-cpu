@@ -24,16 +24,16 @@ std::string getDefaultTargerOrProcessTriple() {
 
 void init_triton_cpu_passes(py::module &&m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::npu::createConvertTritonCPUToLLVMPass());
+    pm.addPass(mlir::triton::cpu::createConvertTritonCPUToLLVMPass());
   });
   m.def("add_allocate_shared_memory", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::npu::createAllocateSharedMemoryPass());
+    pm.addPass(mlir::triton::cpu::createAllocateSharedMemoryPass());
   });
   m.def("add_shared_memory_global_conversion", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::npu::createSharedMemoryGlobalConversionPass());
+    pm.addPass(mlir::triton::cpu::createSharedMemoryGlobalConversionPass());
   });
   m.def("add_masked_ops_to_llvm", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::npu::createConvertMaskedOpsToLLVM());
+    pm.addPass(mlir::triton::cpu::createConvertMaskedOpsToLLVM());
   });
 }
 

@@ -140,7 +140,7 @@ private:
 
 } // namespace
 
-void mlir::triton::npu::populateFuncOpConversionPattern(
+void mlir::triton::cpu::populateFuncOpConversionPattern(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const TargetInfoBase &targetInfo, PatternBenefit benefit) {
   patterns.add<FuncOpSPMDParamConversion>(typeConverter, targetInfo, benefit);

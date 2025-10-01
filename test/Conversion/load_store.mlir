@@ -1,5 +1,5 @@
-// RUN: triton-opt %s -split-input-file --allocate-shared-memory-npu --convert-triton-npu-to-llvm | FileCheck %s -check-prefix=MASKED-OP
-// RUN: triton-opt %s -split-input-file --allocate-shared-memory-npu --convert-triton-npu-to-llvm -convert-masked-ops-to-llvm | FileCheck %s -check-prefix=LLVM
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory-cpu --convert-triton-cpu-to-llvm | FileCheck %s -check-prefix=MASKED-OP
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory-cpu --convert-triton-cpu-to-llvm -convert-masked-ops-to-llvm | FileCheck %s -check-prefix=LLVM
 
 // COM: Lowers tt.load and tt.store to TritonCPU masked_load/masked_store ops. Then re-runs the test suite lowering the masked ops to LLVM intrinsics.
 

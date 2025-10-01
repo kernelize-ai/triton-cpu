@@ -28,7 +28,7 @@ Value maybeAnd(RewriterBase &rewriter, Location loc, Value a, Value b) {
 Value emitRedundantThreadPredicate(
     const llvm::MapVector<StringAttr, int32_t> &freeVarMasks,
     ConversionPatternRewriter &rewriter, Location loc,
-    const npu::TargetInfo &targetInfo) {
+    const cpu::TargetInfo &targetInfo) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   auto ctx = rewriter.getContext();
   auto kLane = str_attr("lane");
@@ -59,7 +59,7 @@ unsigned getCanonicalIndex(unsigned index, unsigned freeVarMask) {
 }
 
 struct LoadStoreConversionBase {
-  explicit LoadStoreConversionBase(const npu::TargetInfo &targetInfo,
+  explicit LoadStoreConversionBase(const cpu::TargetInfo &targetInfo,
                                    ModuleAxisInfoAnalysis &axisAnalysisPass)
       : targetInfo(targetInfo), axisAnalysisPass(axisAnalysisPass) {}
 
@@ -128,14 +128,14 @@ struct LoadStoreConversionBase {
   }
 
 protected:
-  const npu::TargetInfo &targetInfo;
+  const cpu::TargetInfo &targetInfo;
   ModuleAxisInfoAnalysis &axisAnalysisPass;
 };
 
 struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                           public LoadStoreConversionBase {
   LoadOpConversion(LLVMTypeConverter &converter,
-                   const npu::TargetInfo &targetInfo,
+                   const cpu::TargetInfo &targetInfo,
                    ModuleAxisInfoAnalysis &axisAnalysisPass,
                    PatternBenefit benefit)
       : ConvertOpToLLVMPattern<triton::LoadOp>(converter, benefit),
@@ -254,7 +254,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
 
       const uint32_t alignment = vec * valueElemNBytes;
       Value loadVec =
-          npu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, alignment);
+          cpu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, alignment);
 
       for (size_t ii = 0; ii < vec; ii++) {
         Value vecIdx = createIndexAttrConstant(
@@ -277,7 +277,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
 struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
                            public LoadStoreConversionBase {
   StoreOpConversion(LLVMTypeConverter &converter,
-                    const npu::TargetInfo &targetInfo,
+                    const cpu::TargetInfo &targetInfo,
                     ModuleAxisInfoAnalysis &axisAnalysisPass,
                     PatternBenefit benefit)
       : ConvertOpToLLVMPattern<triton::StoreOp>(converter, benefit),
@@ -365,7 +365,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
           valueElems, vecStart);
 
       const uint32_t alignment = vec * valueElemNBytes;
-      npu::llStore(rewriter, loc, b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1)),
+      cpu::llStore(rewriter, loc, b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1)),
                    storeVal, pred, alignment);
     }
     rewriter.eraseOp(op);
@@ -375,7 +375,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
 
 } // namespace
 
-void mlir::triton::npu::populateLoadStoreOpToLLVMPatterns(
+void mlir::triton::cpu::populateLoadStoreOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
     RewritePatternSet &patterns, ModuleAxisInfoAnalysis &axisInfoAnalysis,
     PatternBenefit benefit) {

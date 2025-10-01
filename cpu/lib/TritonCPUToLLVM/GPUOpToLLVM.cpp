@@ -31,8 +31,8 @@ public:
       threadIdOp.emitError("unsupported thread id dimension");
     }
 
-    assert(args.size() > 7 && "incorrect npu kernel function signature");
-    auto funcArgIdx = args.size() + npu::kThreadIdOffset;
+    assert(args.size() > 7 && "incorrect cpu kernel function signature");
+    auto funcArgIdx = args.size() + cpu::kThreadIdOffset;
     assert(args[funcArgIdx].getType().isInteger(32) &&
            "Thread ID argument must be i32");
     rewriter.replaceOp(threadIdOp, args[funcArgIdx]);
@@ -57,7 +57,7 @@ public:
     auto programIdDim = blockIdOp.getAxisAsInt();
     assert(programIdDim >= 0 && programIdDim < 3);
 
-    auto funcArgIdx = args.size() + npu::kProgramIdArgsOffset + programIdDim;
+    auto funcArgIdx = args.size() + cpu::kProgramIdArgsOffset + programIdDim;
     assert(funcArgIdx < args.size() && "invalid SPMD program argument index");
     assert(args[funcArgIdx].getType().isInteger(32) &&
            "SPMD program argument must be i32");
@@ -73,7 +73,7 @@ Value getNumPrograms(mlir::FunctionOpInterface funcOp, int axis) {
   assert(axis >= 0 && axis < 3);
 
   // The last three of the args are gridX, gridY, gridZ (bounds) of grid.
-  auto argIdx = args.size() + npu::kProgramIdArgsOffset + 3 + axis;
+  auto argIdx = args.size() + cpu::kProgramIdArgsOffset + 3 + axis;
   assert(argIdx < args.size() && "out-of-bounds arg index");
   assert(args[argIdx].getType().isInteger(32) && "unexpected arg type");
   return args[argIdx];
@@ -101,7 +101,7 @@ public:
 class GpuBarrierOpToLLVM : public ConvertOpToLLVMPattern<mlir::gpu::BarrierOp> {
 public:
   GpuBarrierOpToLLVM(LLVMTypeConverter &typeConverter,
-                     const npu::TargetInfo &targetInfo, PatternBenefit benefit)
+                     const cpu::TargetInfo &targetInfo, PatternBenefit benefit)
       : targetInfo(targetInfo),
         ConvertOpToLLVMPattern<mlir::gpu::BarrierOp>(typeConverter, benefit) {}
 
@@ -246,12 +246,12 @@ public:
   }
 
 protected:
-  const npu::TargetInfo &targetInfo;
+  const cpu::TargetInfo &targetInfo;
 };
 
 } // namespace
 
-void mlir::triton::npu::populateGPUtoLLVMConversionPatterns(
+void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
     LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
     RewritePatternSet &patterns, PatternBenefit benefit) {
   patterns.add<ThreadIdOpToLLVM>(typeConverter, benefit);

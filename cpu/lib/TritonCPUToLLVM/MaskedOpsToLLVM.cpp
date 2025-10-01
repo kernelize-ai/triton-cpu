@@ -137,7 +137,7 @@ public:
 
 namespace mlir {
 namespace triton {
-namespace npu {
+namespace cpu {
 
 #define GEN_PASS_DEF_CONVERTMASKEDOPSTOLLVM
 #include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
@@ -162,6 +162,6 @@ public:
   }
 };
 
-} // namespace npu
+} // namespace cpu
 } // namespace triton
 } // namespace mlir

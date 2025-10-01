@@ -7,10 +7,10 @@
 using namespace mlir;
 using namespace mlir::triton;
 
-namespace mlir::triton::npu {
+namespace mlir::triton::cpu {
 
 Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
-               RewriterBase &rewriter, const npu::TargetInfo &targetInfo,
+               RewriterBase &rewriter, const cpu::TargetInfo &targetInfo,
                int *formatStrByteCount) {
   assert(!msg.empty() && "printf with empty string not supported");
   llvm::SmallString<64> msgNewline(msg);
@@ -37,4 +37,4 @@ void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
   rewriter.create<cpu::MaskedStoreOp>(loc, ptr, val, pred);
 }
 
-} // namespace mlir::triton::npu
+} // namespace mlir::triton::cpu

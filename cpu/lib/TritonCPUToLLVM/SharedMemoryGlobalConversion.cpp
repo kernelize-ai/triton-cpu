@@ -11,22 +11,22 @@ using namespace mlir::triton;
 
 namespace mlir {
 namespace triton {
-namespace npu {
-#define GEN_PASS_DEF_SHAREDMEMORYGLOBALCONVERSIONNPU
+namespace cpu {
+#define GEN_PASS_DEF_SHAREDMEMORYGLOBALCONVERSIONCPU
 #include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
-} // namespace npu
+} // namespace cpu
 } // namespace triton
 } // namespace mlir
 
 namespace {
 
-struct SharedMemoryGlobalConversionNPU
-    : public mlir::triton::npu::impl::SharedMemoryGlobalConversionNPUBase<
-          SharedMemoryGlobalConversionNPU> {
-  using SharedMemoryGlobalConversionNPUBase::
-      SharedMemoryGlobalConversionNPUBase;
+struct SharedMemoryGlobalConversionCPU
+    : public mlir::triton::cpu::impl::SharedMemoryGlobalConversionCPUBase<
+          SharedMemoryGlobalConversionCPU> {
+  using SharedMemoryGlobalConversionCPUBase::
+      SharedMemoryGlobalConversionCPUBase;
 
-  SharedMemoryGlobalConversionNPU() = default;
+  SharedMemoryGlobalConversionCPU() = default;
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
@@ -49,7 +49,7 @@ struct SharedMemoryGlobalConversionNPU
                  "shared memory for non-kernel functions not yet supported on "
                  "CPU");
           auto smemFuncArg = func.getArgument(func.getNumArguments() +
-                                              npu::kSharedMemoryOffset);
+                                              cpu::kSharedMemoryOffset);
           assert(isa<LLVM::LLVMPointerType>(smemFuncArg.getType()) &&
                  "expecting shared memory argument to be a pointer");
 
@@ -66,9 +66,9 @@ struct SharedMemoryGlobalConversionNPU
 
 } // namespace
 
-namespace mlir::triton::npu {
+namespace mlir::triton::cpu {
 std::unique_ptr<OperationPass<ModuleOp>>
 createSharedMemoryGlobalConversionPass() {
-  return std::make_unique<SharedMemoryGlobalConversionNPU>();
+  return std::make_unique<SharedMemoryGlobalConversionCPU>();
 }
-} // namespace mlir::triton::npu
+} // namespace mlir::triton::cpu

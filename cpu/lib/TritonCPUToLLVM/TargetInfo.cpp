@@ -34,7 +34,7 @@ LLVM::LLVMFuncOp getPrintfDeclaration(RewriterBase &rewriter) {
 
 } // namespace
 
-namespace mlir::triton::npu {
+namespace mlir::triton::cpu {
 
 Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
   return rewriter.create<mlir::LLVM::ConstantOp>(
@@ -44,14 +44,14 @@ Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
 
 Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
                          Value cmp) const {
-  llvm::report_fatal_error("ballot not supported on NPU");
+  llvm::report_fatal_error("ballot not supported on CPU");
   return Value();
 }
 
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
                          bool isWarpSync) const {
   if (isWarpSync) {
-    llvm::report_fatal_error("warp sync barrier not supported on NPU");
+    llvm::report_fatal_error("warp sync barrier not supported on CPU");
   }
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   b.barrier();
@@ -62,8 +62,8 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               Value pred) const {
   if (ctaId.has_value())
     llvm::report_fatal_error(
-        "NPU does not support cross-CTA shared memory transfers");
-  mlir::triton::npu::llStore(rewriter, loc, ptr, val, pred, /*alignment=*/4);
+        "CPU does not support cross-CTA shared memory transfers");
+  mlir::triton::cpu::llStore(rewriter, loc, ptr, val, pred, /*alignment=*/4);
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
@@ -71,11 +71,11 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
                               Value pred, Operation *localLoadOp) const {
   if (ctaId.has_value())
     llvm::report_fatal_error(
-        "NPU does not support cross-CTA shared memory transfers");
+        "CPU does not support cross-CTA shared memory transfers");
   Value falseVal = rewriter.create<LLVM::ConstantOp>(
       loc, elemTy, rewriter.getZeroAttr(elemTy));
   auto load =
-      mlir::triton::npu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
+      mlir::triton::cpu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
                                 /*alignment=*/4);
   return load;
 }
@@ -108,7 +108,7 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   Value threadId = getThreadId(rewriter, loc);
 
   unsigned iWarpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
-  assert(iWarpSize == 1 && "only size 1 warps supported for reductions on NPU");
+  assert(iWarpSize == 1 && "only size 1 warps supported for reductions on CPU");
 
   Value warpSize = b.i32_val(iWarpSize);
   Value laneId = b.urem(threadId, warpSize);
@@ -132,25 +132,25 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
 
 Value TargetInfo::shuffleUp(RewriterBase &rewriter, Location loc, Value val,
                             int i) const {
-  llvm::report_fatal_error("shuffleUp not supported on NPU");
+  llvm::report_fatal_error("shuffleUp not supported on CPU");
   return Value();
 }
 
 Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
-  llvm::report_fatal_error("shuffleIdx not supported on NPU");
+  llvm::report_fatal_error("shuffleIdx not supported on CPU");
   return Value();
 }
 
 Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                              Value i) const {
-  llvm::report_fatal_error("shuffleIdx not supported on NPU");
+  llvm::report_fatal_error("shuffleIdx not supported on CPU");
   return Value();
 }
 
 Value TargetInfo::permute(RewriterBase &rewriter, Location loc, Value a,
                           Value b, Value selector) const {
-  llvm::report_fatal_error("permute not supported on NPU");
+  llvm::report_fatal_error("permute not supported on CPU");
   return Value();
 }
 
@@ -171,7 +171,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   if (!reduceOp)
     return false;
 
-  assert(acc.size() == 1 && "only single value reduction supported on NPU");
+  assert(acc.size() == 1 && "only single value reduction supported on CPU");
   auto val = acc[0];
 
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -224,7 +224,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
 }
 
 std::string TargetInfo::getMulhiFuncName(Type resultElementTy) const {
-  llvm::report_fatal_error("getMulhiFuncName not supported on NPU");
+  llvm::report_fatal_error("getMulhiFuncName not supported on CPU");
   return "";
 }
 
@@ -259,7 +259,7 @@ void TargetInfo::printf(RewriterBase &rewriter, StringRef msg, ValueRange args,
 void TargetInfo::assertFail(RewriterBase &rewriter, Location loc,
                             StringRef message, StringRef file, StringRef func,
                             int line) const {
-  llvm::report_fatal_error("assertFail not supported on NPU");
+  llvm::report_fatal_error("assertFail not supported on CPU");
 }
 
 int TargetInfo::getSharedAddressSpace() const { return 0; }
@@ -267,7 +267,7 @@ int TargetInfo::getSharedAddressSpace() const { return 0; }
 int TargetInfo::getAddressSpace(Attribute addressSpace) const { return 0; }
 
 bool TargetInfo::supportVectorizedAtomics() const {
-  return false; // NPU does not support vectorized atomics
+  return false; // CPU does not support vectorized atomics
 }
 
-} // namespace mlir::triton::npu
+} // namespace mlir::triton::cpu

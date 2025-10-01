@@ -10,48 +10,48 @@ using namespace mlir::triton;
 
 namespace mlir {
 namespace triton {
-namespace npu {
-#define GEN_PASS_DEF_ALLOCATESHAREDMEMORYNPU
+namespace cpu {
+#define GEN_PASS_DEF_ALLOCATESHAREDMEMORYCPU
 #include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
-} // namespace npu
+} // namespace cpu
 } // namespace triton
 } // namespace mlir
 
-namespace mlir::triton::npu {
+namespace mlir::triton::cpu {
 
 std::function<unsigned(Operation *)>
-getNPUAllocationAnalysisScratchSize(TargetInfoBase &targetInfo) {
+getCPUAllocationAnalysisScratchSize(TargetInfoBase &targetInfo) {
   auto allocation = [&targetInfo](Operation *op) -> unsigned {
     return mlir::triton::defaultAllocationAnalysisScratchSizeFn(op);
   };
   return allocation;
 }
 
-} // namespace mlir::triton::npu
+} // namespace mlir::triton::cpu
 
 namespace {
 
-struct AllocateSharedMemoryNPU
-    : public mlir::triton::npu::impl::AllocateSharedMemoryNPUBase<
-          AllocateSharedMemoryNPU> {
-  using AllocateSharedMemoryNPUBase::AllocateSharedMemoryNPUBase;
+struct AllocateSharedMemoryCPU
+    : public mlir::triton::cpu::impl::AllocateSharedMemoryCPUBase<
+          AllocateSharedMemoryCPU> {
+  using AllocateSharedMemoryCPUBase::AllocateSharedMemoryCPUBase;
 
-  AllocateSharedMemoryNPU() : AllocateSharedMemoryNPUBase() {}
+  AllocateSharedMemoryCPU() : AllocateSharedMemoryCPUBase() {}
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
-    mlir::triton::npu::TargetInfo targetInfo;
+    mlir::triton::cpu::TargetInfo targetInfo;
     ModuleAllocation allocation(
         mod,
-        mlir::triton::npu::getNPUAllocationAnalysisScratchSize(targetInfo));
+        mlir::triton::cpu::getCPUAllocationAnalysisScratchSize(targetInfo));
     mlir::triton::gpu::attachAllocationSizeAndOffsetAttr(mod, allocation);
   }
 };
 
 } // namespace
 
-namespace mlir::triton::npu {
+namespace mlir::triton::cpu {
 std::unique_ptr<OperationPass<ModuleOp>> createAllocateSharedMemoryPass() {
-  return std::make_unique<AllocateSharedMemoryNPU>();
+  return std::make_unique<AllocateSharedMemoryCPU>();
 }
-} // namespace mlir::triton::npu
+} // namespace mlir::triton::cpu
