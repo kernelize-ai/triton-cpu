@@ -90,7 +90,7 @@ jobs:
         id: set-matrix
         if: env.enable_integration == 'true'
         run: |
-          if [ x"${{ github.repository }}" == x"kernelize-ai/triton-npu" ]; then
+          if [ x"${{ github.repository }}" == x"kernelize-ai/triton-cpu" ]; then
             echo '::set-output name=matrix-CPU::["ubuntu-24.04-32c"]'
             echo '::set-output name=matrix-MACOS::[["macos-latest"]]'
           else
