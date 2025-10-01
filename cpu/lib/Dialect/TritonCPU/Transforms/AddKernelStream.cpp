@@ -1,8 +1,10 @@
-#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h"
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "llvm/Support/Debug.h"
+
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 #define DEBUG_TYPE "tritoncpu-add-kernel-stream"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -13,12 +15,12 @@ namespace triton {
 namespace cpu {
 
 #define GEN_PASS_DEF_ADDKERNELSTREAMPASS
-#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
 
 namespace {
 
-/// Replace `tt.get_program_id x` result with (pid + block_index_offset).
-/// Assumes the cloned kernel has an extra last i32 argument.
+// Replace `tt.get_program_id x` result with (pid + block_index_offset).
+// Get the block index offset from the last function argument
 static LogicalResult offsetPidByBlockIndex(triton::FuncOp funcOp,
                                            unsigned blockIdxArgPos) {
   Block &entry = funcOp.getBody().front();
@@ -132,32 +134,26 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
   OpBuilder b(mod.getBodyRegion());
 
   Type i32Ty = IntegerType::get(ctx, 32);
-  // use the original kernel to avoid pulling in the extra block param (TODO we
-  // should just embed that in the getProgramId op)
+  // use the original kernel to avoid pulling in the extra block param
   SmallVector<Type> wrapInputs(kernel.getArgumentTypes().begin(),
                                kernel.getArgumentTypes().end());
-  wrapInputs.push_back(i32Ty); // bStart
-  wrapInputs.push_back(i32Ty); // bEnd
+  // wrapInputs.push_back(i32Ty); // bStart
+  // wrapInputs.push_back(i32Ty); // bEnd
 
   auto wrapTy = FunctionType::get(ctx, wrapInputs, {});
-  // Copy function-level user attrs from kernel (optional).
+  // Copy function-level user attrs from kernel
   SmallVector<NamedAttribute> userAttrs = collectClonableOpAttrs(kernel);
-
-  // Arg attrs: copy 1:1 for the first original args; add empty for the 3 new
-  // ones.
   SmallVector<DictionaryAttr> argDicts = getArgAttrArray(kernel);
-  argDicts.resize(wrapInputs.size(), DictionaryAttr::get(ctx, {}));
 
-  auto wrap =
-      b.create<triton::FuncOp>(kernel.getLoc(), name, wrapTy,
-                               /*attrs=*/userAttrs, /*argAttrs=*/argDicts);
+  auto wrap = b.create<triton::FuncOp>(kernel.getLoc(), name, wrapTy, userAttrs,
+                                       argDicts);
   wrap.setPublic();
 
   Block *entry = wrap.addEntryBlock();
   OpBuilder wb(entry, entry->end());
 
-  Value bEnd = entry->getArgument(wrap.getNumArguments() - 1);
-  Value bStart = entry->getArgument(wrap.getNumArguments() - 2);
+  Value bEnd = wb.create<triton::cpu::GetBlockEnd>(wrap.getLoc(), i32Ty);
+  Value bStart = wb.create<triton::cpu::GetBlockStart>(wrap.getLoc(), i32Ty);
 
   Value bStartIdx =
       wb.create<arith::IndexCastOp>(wrap.getLoc(), wb.getIndexType(), bStart);
@@ -165,7 +161,7 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
       wb.create<arith::IndexCastOp>(wrap.getLoc(), wb.getIndexType(), bEnd);
 
   Value bStepIdx = wb.create<arith::ConstantIndexOp>(
-      wrap.getLoc(), 1); // TODO: should we make this a param too?
+      wrap.getLoc(), 1); // TODO: should we parameterize this too?
 
   scf::ForOp forOp = wb.create<scf::ForOp>(wrap.getLoc(), bStartIdx, bEndIdx,
                                            bStepIdx, ValueRange{});
@@ -177,7 +173,7 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
                                                forOp.getInductionVar());
 
     SmallVector<Value> callArgs;
-    for (BlockArgument arg : wrap.getArguments().drop_back(2)) {
+    for (BlockArgument arg : wrap.getArguments()) {
       callArgs.push_back(arg);
     }
     callArgs.push_back(bI32); // add the block index offset
@@ -213,61 +209,13 @@ struct AddKernelStreamPass
 
     // 1. Clone the existing kernel, rename to `kernel`_impl, and add an i32
     // parameter which is the block index offset
-#if 1
     StringRef oldName = kernel.getName();
     std::string implName = (oldName + ".impl").str();
     triton::FuncOp implFunc =
         cloneTTFuncWithExtraI32Arg(moduleOp, kernel, implName);
-#else
-    SmallVector<Type> argTys(kernel.getArgumentTypes().begin(),
-                             kernel.getArgumentTypes().end());
-    Type i32Ty = IntegerType::get(ctx, 32);
-    argTys.push_back(i32Ty); // block index
-
-    auto kernelImpl = b.create<triton::FuncOp>(
-        kernel.getLoc(), StringRef(implName),
-        FunctionType::get(ctx, argTys, kernel.getResultTypes()));
-    kernelImpl.setPrivate();
-
-#if 0
-    if (kernel.getArgAttrs())
-        kernelImpl.setArgAttrs(*kernel.getArgAttrs());
-    if (kernel.getResAttrs())
-        kernelImpl.setResAttrs(*kernel.getResAttrs());
-
-    auto argAttrs = kernel.getArgAttrs();
-    if (argAttrs) {
-        for (auto it : *argAttrs) {
-            kernelImpl.setArgAttr(it.first, it.second);
-        }
-    }
-    auto resAttrs = kernel.getResAttrs();
-    if (resAttrs) {
-        for (auto it : *resAttrs) {
-            kernelImpl.setResAttr(it.first, it.second);
-        }
-    }
-#endif
-
-    moduleOp.push_back(kernelImpl);
-
-    // Build entry block and clone the body.
-    kernelImpl.addEntryBlock();
-    IRMapping mapper;
-    // Map original args → new args (excluding the extra last one).
-    for (auto it :
-         llvm::zip(kernel.getArguments(),
-                   kernelImpl.getBody().front().getArguments().take_front(
-                       kernel.getNumArguments())))
-      mapper.map(std::get<0>(it), std::get<1>(it));
-
-    b.setInsertionPointToStart(&kernelImpl.getBody().front());
-    for (Operation &op : kernel.getBody().front())
-      b.clone(op, mapper);
-#endif
 
     // 2. Rewrite the tt.get_program_id operation to add the block index offset
-    // to the return value
+    // to the return value (for the impl kernel)
     unsigned blockIdxOffset = implFunc.getNumArguments() - 1;
     if (failed(offsetPidByBlockIndex(implFunc, blockIdxOffset)))
       return signalPassFailure();

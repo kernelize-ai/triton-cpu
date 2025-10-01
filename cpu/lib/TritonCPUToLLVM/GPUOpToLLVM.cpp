@@ -262,6 +262,32 @@ public:
   }
 };
 
+template <typename OpTy>
+struct BlockIndexOpConversion : public ConvertOpToLLVMPattern<OpTy> {
+  explicit BlockIndexOpConversion(LLVMTypeConverter &typeConverter,
+                                  const int funcArgIndexOffset,
+                                  PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<OpTy>(typeConverter, benefit),
+        funcArgIndexOffset(funcArgIndexOffset) {}
+
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto funcOp = op->template getParentOfType<FunctionOpInterface>();
+    assert(funcOp && "expected LLVM::FuncOp as a parent of GetProgramIdOp");
+    auto arg =
+        funcOp.getArgument(funcOp.getArguments().size() + funcArgIndexOffset);
+    assert(arg.getType().isInteger(32) && "Block index argument must be i32");
+
+    rewriter.replaceOp(op, arg);
+
+    return success();
+  }
+
+private:
+  const int funcArgIndexOffset;
+};
+
 } // namespace
 
 void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
@@ -273,4 +299,8 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
   patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
   patterns.add<GpuLocalBarrierOpToLLVM>(typeConverter, benefit);
+  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockStart>>(
+      typeConverter, /*blockStartIndexOffset*/ -2, benefit);
+  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockEnd>>(
+      typeConverter, /*blockEndIndexOffset*/ -1, benefit);
 }

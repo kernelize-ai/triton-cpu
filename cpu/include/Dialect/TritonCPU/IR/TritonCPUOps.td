@@ -38,6 +38,30 @@ def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
   }];
 }
 
+def TTC_GetBlockStart : TTC_Op<"get_block_start", [Pure]> {
+  let summary = "Get the starting block ID for this warp.";
+
+  let arguments = (ins);
+
+  let results = (outs I32:$blockId);
+
+  let description = [{
+    coming soon
+  }];
+}
+
+def TTC_GetBlockEnd : TTC_Op<"get_block_end", [Pure]> {
+  let summary = "Get the ending block ID for this warp.";
+
+  let arguments = (ins);
+
+  let results = (outs I32:$blockId);
+
+  let description = [{
+    coming soon
+  }];
+}
+
 def TTC_MaskedLoadOp : TTC_Op<"masked_load", [
   TypesMatchWith<"mask size matches false val size", "falseVal", "mask", "mlir::getI1SameShape($_self)">,
   TypesMatchWith<"result type matches false val type", "result", "falseVal", "$_self">,
