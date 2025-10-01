@@ -190,6 +190,10 @@ def make_launcher(constants, signature, shared_mem_size):
     arg_types += ', '
     arg_types += ', '.join(["int32_t*", "int32_t*", "int8_t*", "void*"])
 
+    # tmp: add block start, block end
+    kernel_params.extend(["start", "end"])
+    arg_types += ', int32_t, int32_t'
+
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
