@@ -55,11 +55,11 @@ def library_dirs():
     return lib_dirs
 
 
-class NpuUtils(object):
+class CpuUtils(object):
 
     def __new__(cls):
         if not hasattr(cls, 'instance'):
-            cls.instance = super(NpuUtils, cls).__new__(cls)
+            cls.instance = super(CpuUtils, cls).__new__(cls)
         return cls.instance
 
     def __init__(self):
@@ -306,7 +306,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   PyObject *launch_exit_hook = NULL;
   PyObject *kernel_metadata = NULL;
   PyObject *launch_metadata = NULL;
-  PyObject *global_scratch_obj = NULL; // UNUSED in NPU backend
+  PyObject *global_scratch_obj = NULL; // UNUSED in CPU backend
   {newline.join([f"{_extracted_type(ty)} _arg{i};" for i, ty in signature.items()])}
   if(!PyArg_ParseTuple(args, \"{format}\", &gridX, &gridY, &gridZ,
                                            &_stream, &_function,
@@ -382,7 +382,7 @@ PyMODINIT_FUNC PyInit___triton_launcher(void) {{
     return src
 
 
-class NPULauncher(object):
+class CPULauncher(object):
 
     def __init__(self, src, metadata):
         constants = src.constants if hasattr(src, "constants") else dict()
@@ -453,7 +453,7 @@ class CPUDeviceInterface:
         return CPUDeviceInterface.TimerEvent()
 
 
-class NPUDriver(DriverBase):
+class CPUDriver(DriverBase):
 
     @staticmethod
     def is_active():
@@ -463,10 +463,10 @@ class NPUDriver(DriverBase):
             return False
 
     def __init__(self):
-        self.utils = NpuUtils()
+        self.utils = CpuUtils()
         import torch
         self.get_current_stream = lambda idx: torch.cpu.Stream()
-        self.launcher_cls = NPULauncher
+        self.launcher_cls = CPULauncher
 
     def get_device_interface(self):
         return CPUDeviceInterface()
@@ -478,9 +478,9 @@ class NPUDriver(DriverBase):
         return ty_to_cpp(ty)
 
     def get_current_target(self):
-        capability = "npu"
+        capability = "cpu"
         warp_size = 1
-        return GPUTarget("npu", capability, warp_size)
+        return GPUTarget("cpu", capability, warp_size)
 
     def get_active_torch_device(self):
         import torch

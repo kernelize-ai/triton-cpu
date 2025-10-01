@@ -2,7 +2,7 @@
 
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 using namespace mlir;
 using namespace mlir::triton;

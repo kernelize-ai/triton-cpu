@@ -20,7 +20,7 @@ jobs:
       RUNNER_TYPE: ${{ matrix.runner[0] }}
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
     steps:
-      - name: Checkout NPU Plugin
+      - name: Checkout CPU Plugin
         uses: actions/checkout@v5
       - name: Fetch Triton upstream Commit Hash
         shell: bash
@@ -119,7 +119,7 @@ jobs:
           source ~/.venv/bin/activate
           make test-lit
           export BUILD_DIR="$(cd python; python -c 'from build_helpers import get_cmake_dir; print(get_cmake_dir())')"
-          ninja -C ${BUILD_DIR} check-triton-npu-lit-tests
+          ninja -C ${BUILD_DIR} check-triton-cpu-lit-tests
       - name: Run python tests on CPU
         working-directory: ./triton
         run: |

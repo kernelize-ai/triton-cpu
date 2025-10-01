@@ -1,6 +1,6 @@
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
-#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h"
-#include "npu/include/TritonCPUToLLVM/Passes.h"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
+#include "cpu/include/TritonCPUToLLVM/Passes.h"
 
 #include "mlir/Pass/PassManager.h"
 #include "llvm/IR/Module.h"
@@ -22,7 +22,7 @@ std::string getDefaultTargerOrProcessTriple() {
   return triple;
 }
 
-void init_triton_npu_passes_ttgpuir(py::module &&m) {
+void init_triton_cpu_passes(py::module &&m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::npu::createConvertTritonCPUToLLVMPass());
   });
@@ -37,15 +37,17 @@ void init_triton_npu_passes_ttgpuir(py::module &&m) {
   });
 }
 
-void init_triton_cpu_passes(py::module &&m) {
+void init_triton_cpu_passes_ttgpuir(py::module &&m) {
   m.def("add_coalesce", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce());
   });
 }
 
-void init_triton_npu(py::module &&m) {
+void init_triton_cpu(py::module &&m) {
   auto passes = m.def_submodule("passes");
-  init_triton_npu_passes_ttgpuir(passes.def_submodule("ttnpuir"));
+  // Triton to TritonGPU passes specific to the Triton CPU plugin
+  init_triton_cpu_passes_ttgpuir(passes.def_submodule("ttgpuir"));
+  // TritonGPU to LLVM passes specific to the Triton CPU plugin
   init_triton_cpu_passes(passes.def_submodule("ttcpuir"));
 
   m.def("load_dialects", [](mlir::MLIRContext &context) {

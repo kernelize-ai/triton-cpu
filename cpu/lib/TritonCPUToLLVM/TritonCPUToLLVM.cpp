@@ -10,7 +10,7 @@
 
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
-#include "npu/include/TritonCPUToLLVM/Passes.h"
+#include "cpu/include/TritonCPUToLLVM/Passes.h"
 
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
@@ -19,7 +19,7 @@ namespace mlir {
 namespace triton {
 namespace npu {
 #define GEN_PASS_DEF_CONVERTTRITONCPUTOLLVM
-#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
+#include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
 } // namespace npu
 } // namespace triton
 } // namespace mlir

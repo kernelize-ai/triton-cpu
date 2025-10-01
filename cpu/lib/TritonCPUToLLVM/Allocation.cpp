@@ -1,4 +1,4 @@
-#include "npu/include/TritonCPUToLLVM/Passes.h"
+#include "cpu/include/TritonCPUToLLVM/Passes.h"
 
 #include "triton/Analysis/Allocation.h"
 #include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
@@ -12,7 +12,7 @@ namespace mlir {
 namespace triton {
 namespace npu {
 #define GEN_PASS_DEF_ALLOCATESHAREDMEMORYNPU
-#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
+#include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
 } // namespace npu
 } // namespace triton
 } // namespace mlir

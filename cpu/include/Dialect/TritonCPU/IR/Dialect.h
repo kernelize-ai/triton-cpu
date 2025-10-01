@@ -10,7 +10,7 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
 #define GET_OP_CLASSES
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.h.inc"
-#include "npu/include/Dialect/TritonCPU/IR/Ops.h.inc"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h.inc"
+#include "cpu/include/Dialect/TritonCPU/IR/Ops.h.inc"
 
 #endif // TRITON_DIALECT_TRITONCPU_IR_DIALECT_H_

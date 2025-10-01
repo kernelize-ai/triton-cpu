@@ -6,7 +6,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 #include <memory>
 
@@ -19,7 +19,7 @@ namespace triton {
 namespace npu {
 
 #define GEN_PASS_DECL
-#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
+#include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
 
 std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonCPUToLLVMPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAllocateSharedMemoryPass();
@@ -27,7 +27,7 @@ std::unique_ptr<OperationPass<ModuleOp>>
 createSharedMemoryGlobalConversionPass();
 
 #define GEN_PASS_REGISTRATION
-#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
+#include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
 
 } // namespace npu
 } // namespace triton

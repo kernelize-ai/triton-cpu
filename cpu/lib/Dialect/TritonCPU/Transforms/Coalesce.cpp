@@ -1,7 +1,7 @@
 #include <iterator>
 #include <numeric>
 
-#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h"
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Support/LLVM.h"
@@ -22,7 +22,7 @@ namespace triton {
 namespace cpu {
 
 #define GEN_PASS_DEF_TRITONCPUCOALESCE
-#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
 
 // Note: this pass is mostly identical to TritonGPU::Coalesce except that we aim
 // to increas sizePerThread such that data is not interleaved between warps.

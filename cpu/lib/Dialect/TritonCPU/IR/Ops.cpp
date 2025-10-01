@@ -1,6 +1,6 @@
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 namespace mlir {
 
@@ -27,4 +27,4 @@ void MaskedLoadOp::getEffects(
 } // namespace mlir
 
 #define GET_OP_CLASSES
-#include "npu/include/Dialect/TritonCPU/IR/Ops.cpp.inc"
+#include "cpu/include/Dialect/TritonCPU/IR/Ops.cpp.inc"

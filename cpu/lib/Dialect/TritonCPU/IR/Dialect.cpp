@@ -1,10 +1,10 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/DialectImplementation.h"
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
 
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.cpp.inc"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.cpp.inc"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -28,7 +28,7 @@ void TritonCPUDialect::initialize() {
 
   addOperations<
 #define GET_OP_LIST
-#include "npu/include/Dialect/TritonCPU/IR/Ops.cpp.inc"
-      // #include "npu/include/Dialect/TritonCPU/IR/OpsEnums.cpp.inc"
+#include "cpu/include/Dialect/TritonCPU/IR/Ops.cpp.inc"
+      // #include "cpu/include/Dialect/TritonCPU/IR/OpsEnums.cpp.inc"
       >();
 }

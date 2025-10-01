@@ -11,10 +11,10 @@ namespace triton {
 namespace cpu {
 
 #define GEN_PASS_DECL
-#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
 
 #define GEN_PASS_REGISTRATION
-#include "npu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
 
 } // namespace cpu
 } // namespace triton

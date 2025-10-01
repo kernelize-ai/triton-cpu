@@ -1,10 +1,10 @@
-#include "npu/include/TritonCPUToLLVM/Passes.h"
+#include "cpu/include/TritonCPUToLLVM/Passes.h"
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 #define DEBUG_TYPE "masked-ops-to-llvm"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -140,7 +140,7 @@ namespace triton {
 namespace npu {
 
 #define GEN_PASS_DEF_CONVERTMASKEDOPSTOLLVM
-#include "npu/include/TritonCPUToLLVM/Passes.h.inc"
+#include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
 
 class ConvertMaskedOpsToLLVM
     : public impl::ConvertMaskedOpsToLLVMBase<ConvertMaskedOpsToLLVM> {

@@ -11,5 +11,5 @@ add_triton_library(TritonCPUToLLVM
     Utility.cpp
 
     DEPENDS
-    TritonNPUConversionPassIncGen
+    TritonCPUConversionPassIncGen
 )

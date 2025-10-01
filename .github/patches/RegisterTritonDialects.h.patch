@@ -6,8 +6,8 @@ index 5ca0f2168..75860a618 100644
  #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
  #include "mlir/InitAllPasses.h"
  
-+#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
-+#include "npu/include/TritonCPUToLLVM/Passes.h"
++#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
++#include "cpu/include/TritonCPUToLLVM/Passes.h"
 +
  #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
  #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"

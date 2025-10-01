@@ -4,7 +4,7 @@
 // COM: Lowers tt.load and tt.store to TritonCPU masked_load/masked_store ops. Then re-runs the test suite lowering the masked ops to LLVM intrinsics.
 
 #blocked = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [1], warpsPerCTA = [1], order = [0]}>
-module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "npu", "ttg.threads-per-warp" = 1 : i32} {
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
   tt.func public @kernel(%arg0: !tt.ptr<i32> {tt.divisibility = 8 : i32}, %arg1: !tt.ptr<i32> {tt.divisibility = 8 : i32}) attributes {noinline = false} {
     %0 = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32, #blocked>
     %1 = tt.splat %arg0 : !tt.ptr<i32> -> tensor<64x!tt.ptr<i32>, #blocked>
@@ -29,7 +29,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
 // -----
 
 #blocked = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [1], warpsPerCTA = [1], order = [0]}>
-module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "npu", "ttg.threads-per-warp" = 1 : i32} {
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
     // LLVM-LABEL: masked_load_store
     tt.func @masked_load_store(%x_ptr: !tt.ptr<f32> {tt.divisibility = 8 : i32}, %y_ptr: !tt.ptr<f32> {tt.divisibility = 8 : i32}, %n_elements: i32 {tt.divisibility = 8 : i32}) {
         %offsets = tt.make_range {end = 8 : i32, start = 0 : i32} : tensor<8xi32, #blocked>
