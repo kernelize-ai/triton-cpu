@@ -62,6 +62,8 @@ struct FuncOpSPMDParamConversion
     amendedInputTy.push_back(i32_ty);      // gridY
     amendedInputTy.push_back(i32_ty);      // gridZ
     amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
+    amendedInputTy.push_back(i32_ty);      // block_start
+    amendedInputTy.push_back(i32_ty);      // block_end
 
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
@@ -93,6 +95,8 @@ struct FuncOpSPMDParamConversion
     region.addArgument(i32_ty, loc);      // gridY
     region.addArgument(i32_ty, loc);      // gridZ
     region.addArgument(sharedPtrTy, loc); // shared memory ptr
+    region.addArgument(i32_ty, loc);      // block_start
+    region.addArgument(i32_ty, loc);      // block_end
 
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());

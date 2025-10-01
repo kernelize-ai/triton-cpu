@@ -13,7 +13,8 @@ namespace cpu {
 
 // kernel func calling convention is (kernel_args..., thread_id, block_args...,
 // shared_memory_ptr)
-constexpr int kSharedMemoryOffset = -1;
+constexpr int kSharedMemoryOffset =
+    -1 - 2; // temporarily offset by -2 to add block_start, block_end
 constexpr int kProgramIdArgsOffset = -6 + kSharedMemoryOffset;
 constexpr int kThreadIdOffset = -1 + kProgramIdArgsOffset;
 

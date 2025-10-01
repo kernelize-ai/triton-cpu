@@ -179,10 +179,6 @@ def make_launcher(constants, signature, shared_mem_size):
     # TODO: float_storage_decls?
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
-    # tmp: add block start, block end
-    kernel_params.extend(["start", "end"])
-    arg_types += ', int32_t, int32_t'
-
     # add thread ID, block args, and shared memory ptr
     kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
     arg_types += ', '
@@ -191,6 +187,10 @@ def make_launcher(constants, signature, shared_mem_size):
     # the kernel always has shared mem arguments
     arg_types += ', int8_t*'
     kernel_params.append("shared_mem_ptr")
+
+    # tmp: add block start, block end
+    kernel_params.extend(["start", "end"])
+    arg_types += ', int32_t, int32_t'
 
     src = f"""
 #include <stdbool.h>
@@ -253,6 +253,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
         for(unsigned i = block_start; i < run_end; i++) {{
+            int start = 0;
+            int end = 1;
             GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
