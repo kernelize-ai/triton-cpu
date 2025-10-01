@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout NPU Plugin
+      - name: Checkout CPU Plugin
         uses: actions/checkout@v5
       - name: Fetch Triton upstream Commit Hash
         shell: bash

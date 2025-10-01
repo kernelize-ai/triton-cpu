@@ -1,12 +1,12 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/)
 
-set(triton_npu_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(triton_cpu_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_subdirectory(npu)
+add_subdirectory(cpu)
 if(TRITON_BUILD_PYTHON_MODULE)
-  add_triton_plugin(TritonNPU ${CMAKE_CURRENT_SOURCE_DIR}/triton_npu.cc LINK_LIBS TritonCPUToLLVM)
-  target_link_libraries(TritonNPU PRIVATE Python3::Module pybind11::headers)
+  add_triton_plugin(TritonCPU ${CMAKE_CURRENT_SOURCE_DIR}/triton_cpu.cc LINK_LIBS TritonCPUToLLVM)
+  target_link_libraries(TritonCPU PRIVATE Python3::Module pybind11::headers)
 endif()
 if(TRITON_BUILD_UT)
   add_subdirectory(unittest)

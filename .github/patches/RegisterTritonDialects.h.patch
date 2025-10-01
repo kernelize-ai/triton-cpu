@@ -6,8 +6,8 @@ index 5ca0f2168..75860a618 100644
  #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
  #include "mlir/InitAllPasses.h"
  
-+#include "npu/include/Dialect/TritonCPU/IR/Dialect.h"
-+#include "npu/include/TritonCPUToLLVM/Passes.h"
++#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
++#include "cpu/include/TritonCPUToLLVM/Passes.h"
 +
  #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
  #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -16,10 +16,10 @@ index 5ca0f2168..75860a618 100644
    mlir::triton::proton::gpu::registerScheduleBufferStorePass();
    mlir::triton::proton::gpu::registerAddSchedBarriersPass();
  
-+  // NPU
-+  mlir::triton::npu::registerConvertTritonCPUToLLVM();
-+  mlir::triton::npu::registerAllocateSharedMemoryNPU();
-+  mlir::triton::npu::registerConvertMaskedOpsToLLVM();
++  // CPU
++  mlir::triton::cpu::registerConvertTritonCPUToLLVM();
++  mlir::triton::cpu::registerAllocateSharedMemoryCPU();
++  mlir::triton::cpu::registerConvertMaskedOpsToLLVM();
 +
    registry.insert<
        mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,

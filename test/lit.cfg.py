@@ -12,7 +12,7 @@ from lit.llvm.subst import ToolSubst
 
 # (config is an instance of TestingConfig created when discovering tests)
 # name: The name of this test suite
-config.name = 'TRITONNPU'
+config.name = 'TRITONCPU'
 
 config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
 

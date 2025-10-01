@@ -18,12 +18,12 @@ set(TRITON_TEST_DEPENDS
   triton-llvm-opt
 )
 
-add_lit_testsuite(check-triton-npu-lit-tests "Running the triton regression tests"
+add_lit_testsuite(check-triton-cpu-lit-tests "Running the triton regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   ARGS ${LIT_ARGS}
   DEPENDS ${TRITON_TEST_DEPENDS}
   )
 
-set_target_properties(check-triton-npu-lit-tests PROPERTIES FOLDER "Tests")
+set_target_properties(check-triton-cpu-lit-tests PROPERTIES FOLDER "Tests")
 
-add_lit_testsuites(TRITON-NPU-LIT-TESTS ${CMAKE_CURRENT_BINARY_DIR} DEPENDS ${TRITON_TEST_DEPENDS})
+add_lit_testsuites(TRITON-CPU-LIT-TESTS ${CMAKE_CURRENT_BINARY_DIR} DEPENDS ${TRITON_TEST_DEPENDS})

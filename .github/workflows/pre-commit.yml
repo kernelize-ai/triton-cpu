@@ -8,7 +8,7 @@ jobs:
     name: pre-commit (code formatting)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout NPU Plugin
+      - name: Checkout CPU Plugin
         uses: actions/checkout@v5
       - name: Fetch Triton upstream Commit Hash
         shell: bash
@@ -50,7 +50,7 @@ jobs:
       - name: Check pre-commit
         run: |
           python3 -m pip install --upgrade pre-commit
-          # Skip mypy check as the NPU plugin does not have mypy files with type annotations.
+          # Skip mypy check as the CPU plugin does not have mypy files with type annotations.
           SKIP=mypy python3 -m pre_commit run --all-files --verbose
       - name: Print diff of changes if pre-commit failed
         if: failure()
