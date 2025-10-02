@@ -253,8 +253,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                                               otherElems, vecStart);
 
       const uint32_t alignment = vec * valueElemNBytes;
-      Value loadVec =
-          cpu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, alignment);
+      Value loadVec = cpu::llLoad(rewriter, loc, ptr, vecTy, pred, falseVal);
 
       for (size_t ii = 0; ii < vec; ii++) {
         Value vecIdx = createIndexAttrConstant(
@@ -366,7 +365,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
 
       const uint32_t alignment = vec * valueElemNBytes;
       cpu::llStore(rewriter, loc, b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1)),
-                   storeVal, pred, alignment);
+                   storeVal, pred);
     }
     rewriter.eraseOp(op);
     return success();

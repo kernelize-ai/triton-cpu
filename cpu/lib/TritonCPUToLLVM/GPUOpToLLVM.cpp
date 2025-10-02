@@ -159,7 +159,7 @@ public:
 
     // atomically increment the count
     Value countPtr = func.getArgument(0);
-    auto ordering = LLVM::AtomicOrdering::acq_rel;
+    auto ordering = LLVM::AtomicOrdering::monotonic;
 
     Value old = rewriter.create<LLVM::AtomicRMWOp>(
         loc, LLVM::AtomicBinOp::add, countPtr, b.i32_val(1), ordering);
@@ -177,8 +177,6 @@ public:
       b.store(b.i32_val(0), countPtr, /*align=*/64);
       // increment phase + release
       Value next = b.add(crtPhase, b.i32_val(1));
-      auto release =
-          LLVM::AtomicOrderingAttr::get(context, LLVM::AtomicOrdering::release);
       rewriter.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::xchg, phasePtr,
                                          next, LLVM::AtomicOrdering::release);
       rewriter.create<cf::BranchOp>(loc, exitBlock);
@@ -189,8 +187,9 @@ public:
       rewriter.setInsertionPointToEnd(waitBlock);
       // check to see if the phase changed
       LLVM::LoadOp latest = b.load(i32_ty, phasePtr, /*align=*/64);
-      latest->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
-                                      context, LLVM::AtomicOrdering::acquire));
+      latest->setAttr("ordering",
+                      LLVM::AtomicOrderingAttr::get(
+                          context, LLVM::AtomicOrdering::monotonic));
       Value same = b.icmp_eq(latest, crtPhase);
       rewriter.create<cf::CondBranchOp>(loc, same, waitBlock, afterSpinBlock);
     }

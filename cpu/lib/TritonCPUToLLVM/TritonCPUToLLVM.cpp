@@ -8,6 +8,7 @@
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Membar.h"
 
+#include "Allocation.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
 #include "cpu/include/TritonCPUToLLVM/Passes.h"
@@ -69,7 +70,9 @@ struct ConvertTritonCPUToLLVM
     // Allocate shared memory (uses default allocation scratch size function)
     // TODO: consider overloading defaultAllocationAnalysisScratchSizeFn if the
     // barrier is present
-    ModuleAllocation allocation(mod);
+    ModuleAllocation allocation(
+        mod,
+        mlir::triton::cpu::getCPUAllocationAnalysisScratchSize(targetInfo));
     ModuleMembarAnalysis membarPass(&allocation);
     membarPass.run();
 

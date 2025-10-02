@@ -49,9 +49,21 @@ def TTC_MaskedLoadOp : TTC_Op<"masked_load", [
     Load operation which lowers to a predicated load, scalar load, or masked vector load intrinsic.
   }];
 
-  let arguments = (ins LLVM_AnyPointer:$ptr, AnyTypeOf<[LLVM_VectorOf<I1>, I1]>:$mask, AnyTypeOf<[LLVM_VectorOf<LLVM_Type>, LLVM_Type]>:$falseVal);
+  let arguments = (
+    ins
+    LLVM_AnyPointer:$ptr,
+    AnyTypeOf<[LLVM_VectorOf<I1>, I1]>:$mask,
+    AnyTypeOf<[LLVM_VectorOf<LLVM_Type>, LLVM_Type]>:$falseVal,
+    OptionalAttr<I32Attr>:$alignment
+  );
 
   let results = (outs LLVM_Type:$result);
+
+  let builders = [
+    OpBuilder<(ins "Type":$retType, "Value":$ptr, "Value":$mask, "Value":$falseVal), [{
+      build($_builder, $_state, retType, ptr, mask, falseVal, IntegerAttr());
+    }]>
+  ];
 
   let assemblyFormat = [{
     $ptr `,` $mask `,` $falseVal
@@ -69,9 +81,20 @@ def TTC_MaskedStoreOp : TTC_Op<"masked_store", [
     Store operation which conditionally lowers to the llvm.masked.store intrinsic, a predicated store, or a LLVM store if the mask is provably always true.
   }];
 
-  let arguments = (ins LLVM_AnyPointer:$ptr, LLVM_Type:$value, AnyTypeOf<[LLVM_VectorOf<I1>, I1]>:$mask);
+  let arguments = (
+    ins LLVM_AnyPointer:$ptr,
+    LLVM_Type:$value,
+    AnyTypeOf<[LLVM_VectorOf<I1>, I1]>:$mask,
+    OptionalAttr<I32Attr>:$alignment
+    );
 
   let results = (outs);
+
+  let builders = [
+    OpBuilder<(ins "Value":$ptr, "Value":$value, "Value":$mask), [{
+      build($_builder, $_state, {}, ptr, value, mask, IntegerAttr());
+    }]>
+  ];
 
   let assemblyFormat = [{
     $ptr `,` $value `,` $mask
