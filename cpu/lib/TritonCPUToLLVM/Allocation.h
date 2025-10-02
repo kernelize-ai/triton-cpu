@@ -7,11 +7,12 @@
 
 namespace mlir {
 namespace triton {
-class TargetInfoBase;
 
 namespace cpu {
+class TargetInfo;
+
 std::function<unsigned(Operation *)>
-getCPUAllocationAnalysisScratchSize(TargetInfoBase &targetInfo);
+getCPUAllocationAnalysisScratchSize(TargetInfo &targetInfo);
 
 } // namespace cpu
 } // namespace triton

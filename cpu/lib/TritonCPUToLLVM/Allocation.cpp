@@ -6,6 +6,7 @@
 #include "triton/Analysis/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 
 #include "TargetInfo.h"
 
@@ -24,7 +25,7 @@ namespace cpu {
 namespace mlir::triton::cpu {
 
 std::function<unsigned(Operation *)>
-getCPUAllocationAnalysisScratchSize(TargetInfoBase &targetInfo) {
+getCPUAllocationAnalysisScratchSize(TargetInfo &targetInfo) {
   auto allocation = [&targetInfo](Operation *op) -> unsigned {
     if (auto reduceOp = dyn_cast<ReduceOp>(op)) {
       ReduceOpHelper helper(reduceOp);
