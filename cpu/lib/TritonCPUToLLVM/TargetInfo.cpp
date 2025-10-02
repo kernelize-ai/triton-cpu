@@ -180,31 +180,11 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   Value smemBase = LLVM::getSharedMemoryBase(loc, rewriter, *this, op);
   Value threadId = getThreadId(rewriter, loc);
 
-  // only thread (warp) 0 reduces
-  Value zero = b.i32_val(0);
-  Value isWarp0 = b.icmp_eq(threadId, zero);
-
-  // Split the current block
-  Block *currentBlock = rewriter.getBlock();
-  Block *thenBlock =
-      rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
-  Block *continueBlock = rewriter.splitBlock(thenBlock, thenBlock->begin());
-  continueBlock->addArgument(val.getType(), loc);
-
-  // Create conditional branch
-  rewriter.setInsertionPointToEnd(currentBlock);
-  Value undef = b.undef(val.getType());
-  rewriter.create<cf::CondBranchOp>(loc, isWarp0, thenBlock, ArrayRef<Value>{},
-                                    continueBlock, ArrayRef<Value>{undef});
-
-  // Set insertion point to then block for reduction logic
-  rewriter.setInsertionPointToStart(thenBlock);
-
-  // Thread 0 reduces
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
   Value crtVal = val;
   for (unsigned other = 1; other < numLaneToReduce; ++other) {
-    Value otherThreadId = b.i32_val(other);
+    Value otherThreadId =
+        b.urem(b.add(threadId, b.i32_val(other)), b.i32_val(numLaneToReduce));
     Value otherSlot =
         b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
     Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
@@ -215,11 +195,9 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     mapping.map(reduceOp->getOperand(1), otherVal);
     crtVal = rewriter.clone(*reduceOp, mapping)->getResult(0);
   }
-
-  // write back is handled by the caller
-  rewriter.create<cf::BranchOp>(loc, continueBlock, ValueRange{crtVal});
-  rewriter.setInsertionPointToStart(continueBlock);
-  acc[0] = continueBlock->getArgument(0);
+  acc[0] = crtVal;
+  barrier(loc, rewriter); // barrier before writing back the reduced values to
+                          // shared memory
   return true;
 }
 
