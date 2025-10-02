@@ -7,6 +7,8 @@ namespace mlir::triton::cpu {
 
 class TargetInfo : public mlir::triton::TargetInfoBase {
 public:
+  static constexpr int CacheLineSizeBytes = 64;
+
   TargetInfo() {}
 
   bool supportMaximumMinimum() const override {

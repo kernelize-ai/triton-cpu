@@ -34,7 +34,9 @@ public:
       LDBG("Vector masked load type: " << vecTy);
       auto vecElemTy = vecTy.getElementType();
       auto elemSizeInBytes = vecElemTy.getIntOrFloatBitWidth() / 8;
-      unsigned alignment = elemSizeInBytes * vecTy.getNumElements();
+      unsigned alignment = loadOp.getAlignment()
+                               ? *loadOp.getAlignment()
+                               : elemSizeInBytes * vecTy.getNumElements();
       LDBG("ptrType = " << ptr.getType() << ", maskType = " << mask.getType()
                         << ", otherType = " << other.getType()
                         << ", alignment = " << alignment);
@@ -45,7 +47,11 @@ public:
     }
 
     unsigned alignment =
-        std::max(8u, getElementTypeOrSelf(elemTy).getIntOrFloatBitWidth() / 8u);
+        loadOp.getAlignment()
+            ? *loadOp.getAlignment()
+            : std::max(8u,
+                       getElementTypeOrSelf(elemTy).getIntOrFloatBitWidth() /
+                           8u);
     // direct load
     if (matchPattern(mask, m_One())) {
       LDBG("Constant mask (" << mask << "), direct load type " << elemTy
@@ -98,7 +104,9 @@ public:
       LDBG("Vector masked store type: " << vecTy);
       auto vecElemTy = vecTy.getElementType();
       auto elemSizeInBytes = vecElemTy.getIntOrFloatBitWidth() / 8;
-      unsigned alignment = elemSizeInBytes * vecTy.getNumElements();
+      unsigned alignment = storeOp.getAlignment()
+                               ? *storeOp.getAlignment()
+                               : elemSizeInBytes * vecTy.getNumElements();
       LDBG("ptrType = " << ptr.getType() << ", maskType = " << mask.getType()
                         << ", alignment = " << alignment);
       rewriter.replaceOpWithNewOp<LLVM::MaskedStoreOp>(storeOp, val, ptr, mask,
@@ -107,7 +115,11 @@ public:
     }
 
     unsigned alignment =
-        std::max(8u, getElementTypeOrSelf(elemTy).getIntOrFloatBitWidth() / 8u);
+        storeOp.getAlignment()
+            ? *storeOp.getAlignment()
+            : std::max(8u,
+                       getElementTypeOrSelf(elemTy).getIntOrFloatBitWidth() /
+                           8u);
     // direct store
     if (matchPattern(mask, m_One())) {
       LDBG("Constant mask (" << mask << "), direct load type " << elemTy

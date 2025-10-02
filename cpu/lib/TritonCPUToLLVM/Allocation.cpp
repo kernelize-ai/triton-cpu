@@ -1,7 +1,12 @@
+#include "Allocation.h"
+
 #include "cpu/include/TritonCPUToLLVM/Passes.h"
 
 #include "triton/Analysis/Allocation.h"
+#include "triton/Analysis/Utility.h"
 #include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 
 #include "TargetInfo.h"
 
@@ -20,8 +25,16 @@ namespace cpu {
 namespace mlir::triton::cpu {
 
 std::function<unsigned(Operation *)>
-getCPUAllocationAnalysisScratchSize(TargetInfoBase &targetInfo) {
+getCPUAllocationAnalysisScratchSize(TargetInfo &targetInfo) {
   auto allocation = [&targetInfo](Operation *op) -> unsigned {
+    if (auto reduceOp = dyn_cast<ReduceOp>(op)) {
+      ReduceOpHelper helper(reduceOp);
+      auto smemShape = helper.getScratchRepShape();
+      auto elems = product<unsigned>(smemShape);
+
+      unsigned bytesPerElem = targetInfo.CacheLineSizeBytes;
+      return bytesPerElem * elems;
+    }
     return mlir::triton::defaultAllocationAnalysisScratchSizeFn(op);
   };
   return allocation;

@@ -24,10 +24,11 @@ Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
                int *formatStrByteCount = nullptr);
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal, unsigned alignment);
+             Value pred, Value falseVal,
+             std::optional<unsigned> alignment = std::nullopt);
 
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
-             Value pred, unsigned alignment);
+             Value pred, std::optional<unsigned> alignment = std::nullopt);
 
 } // namespace cpu
 } // namespace triton
