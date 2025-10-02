@@ -4,6 +4,8 @@
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
+#include "Utility.h"
+
 namespace {
 
 using namespace mlir;
@@ -38,10 +40,13 @@ struct FuncOpSPMDParamConversion
 
   triton::FuncOp amendFuncOp(triton::FuncOp funcOp,
                              ConversionPatternRewriter &rewriter) const {
-    // Push back SPMD program args - (x,y,z) grid index and (gridX, gridY,
-    // gridZ) grid sizes.
+    // Push back SPMD program args
+    //  - launch size: &{ grid_x, grid_y, grid_z, block_x, block_y, block_z }
+    //  - launch id: &{ grid_x, grid_y, grid_z, block_x, block_y, block_z }
+    //  - shared memory ptr
     auto loc = funcOp.getLoc();
     auto ctx = funcOp->getContext();
+    auto idxPtrTy = LLVM::LLVMPointerType::get(ctx);
     auto sharedPtrTy =
         LLVM::LLVMPointerType::get(ctx, targetInfo.getSharedAddressSpace());
 
@@ -52,13 +57,8 @@ struct FuncOpSPMDParamConversion
     if (!isKernel)
       return funcOp; // TODO: pass shared memory to child functions
 
-    amendedInputTy.push_back(i32_ty);      // thread_id
-    amendedInputTy.push_back(i32_ty);      // x
-    amendedInputTy.push_back(i32_ty);      // y
-    amendedInputTy.push_back(i32_ty);      // z
-    amendedInputTy.push_back(i32_ty);      // gridX
-    amendedInputTy.push_back(i32_ty);      // gridY
-    amendedInputTy.push_back(i32_ty);      // gridZ
+    amendedInputTy.push_back(idxPtrTy);    // launch size
+    amendedInputTy.push_back(idxPtrTy);    // launch id
     amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
 
     auto amendedFuncTy =
@@ -71,7 +71,11 @@ struct FuncOpSPMDParamConversion
       llvm::SmallVector<mlir::Attribute> amendedArgAttrs(argAttrs.begin(),
                                                          argAttrs.end());
       while (amendedArgAttrs.size() < amendedInputTy.size()) {
-        amendedArgAttrs.emplace_back(DictionaryAttr::get(ctx));
+        auto dict = DictionaryAttr::get(ctx, {
+            rewriter.getNamedAttr("llvm.nonnull", rewriter.getUnitAttr()),
+            rewriter.getNamedAttr("llvm.noalias", rewriter.getUnitAttr())
+          });
+        amendedArgAttrs.emplace_back(dict);
       }
       amendedAttrs.push_back(
           rewriter.getNamedAttr(funcOp.getArgAttrsAttrName(),
@@ -83,17 +87,21 @@ struct FuncOpSPMDParamConversion
         funcOp.getLoc(), funcOp.getName(), amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
 
-    region.addArgument(i32_ty, loc);      // thread_id
-    region.addArgument(i32_ty, loc);      // x
-    region.addArgument(i32_ty, loc);      // y
-    region.addArgument(i32_ty, loc);      // z
-    region.addArgument(i32_ty, loc);      // gridX
-    region.addArgument(i32_ty, loc);      // gridY
-    region.addArgument(i32_ty, loc);      // gridZ
-    region.addArgument(sharedPtrTy, loc); // shared memory ptr
+    auto nameLoc = [&](const char *name) {
+      return NameLoc::get(rewriter.getStringAttr(name));
+    };
+    region.addArgument(idxPtrTy, nameLoc("launch_sz"));
+    region.addArgument(idxPtrTy, nameLoc("launch_id"));
+    region.addArgument(sharedPtrTy, nameLoc("shared_memory_ptr"));
 
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());
+
+    // Set the alignment attribute for the shared memory pointer
+    auto idx = amendedFuncOp.getNumArguments() + cpu::kSharedMemoryOffset;
+    amendedFuncOp.setArgAttr(idx, "llvm.align",
+                    rewriter.getIntegerAttr(rewriter.getIntegerType(64), 64));
+
     return amendedFuncOp;
   }
 

@@ -180,9 +180,9 @@ def make_launcher(constants, signature, shared_mem_size):
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
     # add thread ID, block args, and shared memory ptr
-    kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+    kernel_params.extend(["launch_sz", "launch_id"])
     arg_types += ', '
-    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+    arg_types += ', '.join(["int32_t*", "int32_t*"])
 
     # the kernel always has shared mem arguments
     arg_types += ', int8_t*'
@@ -196,20 +196,6 @@ def make_launcher(constants, signature, shared_mem_size):
 #include <stdalign.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
-
-typedef struct _GridCoordinate {{
-    int x;
-    int y;
-    int z;
-}} GridCoordinate;
-
-static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gridZ) {{
-    GridCoordinate coord;
-    coord.z = idx / (gridX * gridY);
-    coord.y = (idx % (gridX * gridY)) / gridX;
-    coord.x = (idx % gridX);
-    return coord;
-}}
 
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
@@ -226,7 +212,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         unsigned shared_memory_plus_barrier = shared_memory + 128;
         shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
         unsigned shared_memory_aligned = shared_memory_aligned_per_team * num_teams;
-        global_smem = aligned_alloc(64, shared_memory_aligned);
+        global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned);
         assert(global_smem);
         memset(global_smem, 0, shared_memory_aligned);
     }}
@@ -235,20 +221,24 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     omp_set_dynamic(0);
 
+    int32_t launch_sz[6] = {{gridX, gridY, gridZ, num_warps, 1, 1}};
 
     #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
     {{
         int worker_id = omp_get_thread_num();
         const int warp_id = worker_id % num_warps;
-        const int thread_id = warp_id;
         const int team_id = worker_id / num_warps;
         const unsigned block_start = consecutive_blocks * team_id;
 
         int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
-        for(unsigned i = block_start; i < run_end; i++) {{
-            GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+        for(int32_t i = block_start; i < run_end; i++) {{
+            int32_t launch_id[6] = {{
+                (i % gridX),
+                (i % (gridX * gridY)) / gridX,
+                i / (gridX * gridY),
+                warp_id, 0, 0}};
             (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
         }}
     }}

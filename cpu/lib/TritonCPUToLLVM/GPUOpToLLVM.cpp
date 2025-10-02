@@ -25,17 +25,20 @@ public:
     auto funcOp = threadIdOp->getParentOfType<FunctionOpInterface>();
     assert(funcOp && "expected LLVM::FuncOp as a parent of ThreadIdOp");
     auto args = funcOp.getArguments();
+    auto b = TritonLLVMOpBuilder(threadIdOp.getLoc(), rewriter);
 
     auto threadIdDim = threadIdOp.getDimension();
     if (threadIdDim != mlir::gpu::Dimension::x) {
       threadIdOp.emitError("unsupported thread id dimension");
     }
-
-    assert(args.size() > 7 && "incorrect cpu kernel function signature");
-    auto funcArgIdx = args.size() + cpu::kThreadIdOffset;
-    assert(args[funcArgIdx].getType().isInteger(32) &&
-           "Thread ID argument must be i32");
-    rewriter.replaceOp(threadIdOp, args[funcArgIdx]);
+    auto funcArgIdx = args.size() + cpu::kLaunchIdsOffset;
+    assert(funcArgIdx >= 0 && "incorrect npu kernel function signature");
+    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto idxTy = typeConverter->convertType(threadIdOp.getType());
+    auto axisVal = b.i32_val((int)threadIdDim + 3);
+    auto gep = b.gep(ptrTy, idxTy, args[funcArgIdx], axisVal);
+    auto threadId = b.load(idxTy, gep);
+    rewriter.replaceOp(threadIdOp, threadId);
     return success();
   }
 };
@@ -53,31 +56,23 @@ public:
     auto funcOp = blockIdOp->getParentOfType<FunctionOpInterface>();
     assert(funcOp && "expected LLVM::FuncOp as a parent of GetProgramIdOp");
     auto args = funcOp.getArguments();
+    auto b = TritonLLVMOpBuilder(blockIdOp.getLoc(), rewriter);
 
     auto programIdDim = blockIdOp.getAxisAsInt();
     assert(programIdDim >= 0 && programIdDim < 3);
 
-    auto funcArgIdx = args.size() + cpu::kProgramIdArgsOffset + programIdDim;
-    assert(funcArgIdx < args.size() && "invalid SPMD program argument index");
-    assert(args[funcArgIdx].getType().isInteger(32) &&
-           "SPMD program argument must be i32");
+    auto funcArgIdx = args.size() + cpu::kLaunchIdsOffset;
+    assert(funcArgIdx >= 0 && "invalid SPMD program argument index");
+    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto idxTy = typeConverter->convertType(blockIdOp.getType());
+    auto axisVal = b.i32_val(programIdDim);
+    auto gep = b.gep(ptrTy, idxTy, args[funcArgIdx], axisVal);
+    auto blockId = b.load(idxTy, gep);
+    rewriter.replaceOp(blockIdOp, blockId);
 
-    rewriter.replaceOp(blockIdOp, args[funcArgIdx]);
     return success();
   }
 };
-
-Value getNumPrograms(mlir::FunctionOpInterface funcOp, int axis) {
-  auto args = funcOp.getArguments();
-  assert(funcOp && args.size() >= 6);
-  assert(axis >= 0 && axis < 3);
-
-  // The last three of the args are gridX, gridY, gridZ (bounds) of grid.
-  auto argIdx = args.size() + cpu::kProgramIdArgsOffset + 3 + axis;
-  assert(argIdx < args.size() && "out-of-bounds arg index");
-  assert(args[argIdx].getType().isInteger(32) && "unexpected arg type");
-  return args[argIdx];
-}
 
 class GetNumProgramsOpToLLVM
     : public ConvertOpToLLVMPattern<triton::GetNumProgramsOp> {
@@ -93,7 +88,20 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     auto funcOp = op->getParentOfType<FunctionOpInterface>();
     assert(funcOp && "expected LLVM::FuncOp as a parent of GetNumProgramsOp");
-    rewriter.replaceOp(op, getNumPrograms(funcOp, op.getAxisAsInt()));
+    auto args = funcOp.getArguments();
+    int axis = op.getAxisAsInt();
+    auto b = TritonLLVMOpBuilder(op.getLoc(), rewriter);
+    assert(axis >= 0 && axis < 3);
+
+    // The last three of the args are gridX, gridY, gridZ (bounds) of grid.
+    auto funcArgIdx = args.size() + cpu::kLaunchSizeOffset;
+    assert(funcArgIdx >= 0 && "invalid SPMD program argument index");
+    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto idxTy = typeConverter->convertType(op.getType());
+    auto axisVal = b.i32_val(axis);
+    auto gep = b.gep(ptrTy, idxTy, args[funcArgIdx], axisVal);
+    auto numPrograms = b.load(idxTy, gep);
+    rewriter.replaceOp(op, numPrograms);
     return success();
   }
 };
