@@ -131,8 +131,8 @@ class CPUBackend(BaseBackend):
         passes.ttgpuir.add_fuse_nested_loops(pm)
 
         cpu.passes.ttgpuir.add_kernel_stream(pm)
-        passes.common.add_canonicalizer(pm)
         passes.common.add_inliner(pm)
+        passes.common.add_canonicalizer(pm)
 
         passes.common.add_canonicalizer(pm)
         passes.ttir.add_loop_aware_cse(pm)

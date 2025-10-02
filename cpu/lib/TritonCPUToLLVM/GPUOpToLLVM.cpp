@@ -300,7 +300,7 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
   patterns.add<GpuLocalBarrierOpToLLVM>(typeConverter, benefit);
   patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockStart>>(
-      typeConverter, /*blockStartIndexOffset*/ -2, benefit);
+      typeConverter, kProgramIdArgsOffset, benefit);
   patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockEnd>>(
-      typeConverter, /*blockEndIndexOffset*/ -1, benefit);
+      typeConverter, kProgramIdArgsOffset + 1, benefit);
 }
