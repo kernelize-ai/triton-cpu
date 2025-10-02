@@ -19,6 +19,27 @@ namespace cpu {
 
 namespace {
 
+// Replace `tt.get_program_id x` with `ttc.block_id_op x, block_index_offset`
+// TODO: remove ctx
+static LogicalResult replacePidOp(triton::FuncOp funcOp,
+                                  unsigned blockIdxArgPos, MLIRContext *ctx) {
+  Block &entry = funcOp.getBody().front();
+  Value blockIdx = entry.getArgument(blockIdxArgPos);
+
+  auto programIdOps = llvm::to_vector(funcOp.getOps<triton::GetProgramIdOp>());
+  assert(programIdOps.size() == 1 &&
+         "expected exactly one tt.get_program_id op");
+  triton::GetProgramIdOp programIdOp = programIdOps.front();
+
+  OpBuilder b(programIdOp->getNextNode());
+  Value blockIdOp = b.create<mlir::triton::cpu::BlockIdOp>(
+      programIdOp.getLoc(), programIdOp.getType(), programIdOp.getAxis(),
+      blockIdx);
+  programIdOp.getResult().replaceAllUsesWith(blockIdOp);
+  programIdOp->erase();
+  return success();
+}
+
 // Replace `tt.get_program_id x` result with (pid + block_index_offset).
 // Get the block index offset from the last function argument
 static LogicalResult offsetPidByBlockIndex(triton::FuncOp funcOp,
@@ -152,6 +173,8 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
   Block *entry = wrap.addEntryBlock();
   OpBuilder wb(entry, entry->end());
 
+  // TODO: fix this op definition to just return a value (and not take any
+  // params)
   Value bEnd = wb.create<triton::cpu::GetBlockEnd>(wrap.getLoc(), i32Ty);
   Value bStart = wb.create<triton::cpu::GetBlockStart>(wrap.getLoc(), i32Ty);
 
@@ -160,23 +183,25 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
   Value bEndIdx =
       wb.create<arith::IndexCastOp>(wrap.getLoc(), wb.getIndexType(), bEnd);
 
+  Value bStep = wb.create<arith::ConstantOp>(wrap.getLoc(), i32Ty,
+                                             wb.getIntegerAttr(i32Ty, 1));
   Value bStepIdx = wb.create<arith::ConstantIndexOp>(
       wrap.getLoc(), 1); // TODO: should we parameterize this too?
 
-  scf::ForOp forOp = wb.create<scf::ForOp>(wrap.getLoc(), bStartIdx, bEndIdx,
-                                           bStepIdx, ValueRange{});
+  scf::ForOp forOp =
+      wb.create<scf::ForOp>(wrap.getLoc(), bStart, bEnd, bStep, ValueRange{});
   {
     Block *body = forOp.getBody();
     OpBuilder fb(body, body->begin());
 
-    Value bI32 = fb.create<arith::IndexCastOp>(wrap.getLoc(), i32Ty,
-                                               forOp.getInductionVar());
+    // Value bI32 = fb.create<arith::IndexCastOp>(wrap.getLoc(), i32Ty,
+    //  forOp.getInductionVar());
 
     SmallVector<Value> callArgs;
     for (BlockArgument arg : wrap.getArguments()) {
       callArgs.push_back(arg);
     }
-    callArgs.push_back(bI32); // add the block index offset
+    callArgs.push_back(forOp.getInductionVar()); // add the block index offset
 
     // tt::CallOp can call tt.func by symbol (has FunctionType).
     fb.create<triton::CallOp>(wrap.getLoc(), impl.getSymName(), TypeRange{},
@@ -217,9 +242,13 @@ struct AddKernelStreamPass
     // 2. Rewrite the tt.get_program_id operation to add the block index offset
     // to the return value (for the impl kernel)
     unsigned blockIdxOffset = implFunc.getNumArguments() - 1;
+#if 1
+    if (failed(replacePidOp(implFunc, blockIdxOffset, ctx)))
+      return signalPassFailure();
+#else
     if (failed(offsetPidByBlockIndex(implFunc, blockIdxOffset)))
       return signalPassFailure();
-
+#endif
     // 3. Add the wrapper function calling kernel_impl in a loop over
     // block_start to block_end offsets (kernel function parameters)
     buildWrapper(moduleOp, kernel, implFunc, oldName);
