@@ -71,10 +71,10 @@ struct FuncOpSPMDParamConversion
       llvm::SmallVector<mlir::Attribute> amendedArgAttrs(argAttrs.begin(),
                                                          argAttrs.end());
       while (amendedArgAttrs.size() < amendedInputTy.size()) {
-        auto dict = DictionaryAttr::get(ctx, {
-            rewriter.getNamedAttr("llvm.nonnull", rewriter.getUnitAttr()),
-            rewriter.getNamedAttr("llvm.noalias", rewriter.getUnitAttr())
-          });
+        auto dict = DictionaryAttr::get(
+            ctx,
+            {rewriter.getNamedAttr("llvm.nonnull", rewriter.getUnitAttr()),
+             rewriter.getNamedAttr("llvm.noalias", rewriter.getUnitAttr())});
         amendedArgAttrs.emplace_back(dict);
       }
       amendedAttrs.push_back(
@@ -99,8 +99,9 @@ struct FuncOpSPMDParamConversion
 
     // Set the alignment attribute for the shared memory pointer
     auto idx = amendedFuncOp.getNumArguments() + cpu::kSharedMemoryOffset;
-    amendedFuncOp.setArgAttr(idx, "llvm.align",
-                    rewriter.getIntegerAttr(rewriter.getIntegerType(64), 64));
+    amendedFuncOp.setArgAttr(
+        idx, "llvm.align",
+        rewriter.getIntegerAttr(rewriter.getIntegerType(64), 64));
 
     return amendedFuncOp;
   }
