@@ -80,8 +80,8 @@ class CpuUtils(object):
 
     def get_device_properties(self, *args):
         return {
-            "max_num_regs": os.cpu_count() * 4, "max_shared_mem": 256, "multiprocessor_count": os.cpu_count(),
-            "warpSize": 1
+            "max_num_regs": os.cpu_count() * 4, "max_shared_mem": 1024 * 1024 * 1024, "multiprocessor_count":
+            os.cpu_count(), "warpSize": 1
         }
 
 
