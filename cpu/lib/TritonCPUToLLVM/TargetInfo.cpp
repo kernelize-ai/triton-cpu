@@ -198,6 +198,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   acc[0] = crtVal;
   barrier(loc, rewriter); // barrier before writing back the reduced values to
                           // shared memory
+
   return true;
 }
 
