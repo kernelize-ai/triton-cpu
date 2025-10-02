@@ -63,7 +63,8 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
   if (ctaId.has_value())
     llvm::report_fatal_error(
         "CPU does not support cross-CTA shared memory transfers");
-  mlir::triton::cpu::llStore(rewriter, loc, ptr, val, pred, /*alignment=*/64);
+  mlir::triton::cpu::llStore(rewriter, loc, ptr, val, pred,
+                             /*alignment=*/CacheLineSizeBytes);
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
@@ -76,7 +77,7 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
       loc, elemTy, rewriter.getZeroAttr(elemTy));
   auto load =
       mlir::triton::cpu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
-                                /*alignment=*/64);
+                                /*alignment=*/CacheLineSizeBytes);
   return load;
 }
 

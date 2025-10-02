@@ -32,8 +32,7 @@ getCPUAllocationAnalysisScratchSize(TargetInfo &targetInfo) {
       auto smemShape = helper.getScratchRepShape();
       auto elems = product<unsigned>(smemShape);
 
-      unsigned bytesPerElem = 64;
-
+      unsigned bytesPerElem = targetInfo.CacheLineSizeBytes;
       return bytesPerElem * elems;
     }
     return mlir::triton::defaultAllocationAnalysisScratchSizeFn(op);

@@ -131,7 +131,8 @@ public:
         moduleOp.getLoc(), kName, funcTy, LLVM::Linkage::Internal);
     auto setBarrierPtrAttrs = [&](unsigned idx) {
       func.setArgAttr(idx, "llvm.align",
-                      rewriter.getIntegerAttr(rewriter.getIntegerType(64), 64));
+                      rewriter.getIntegerAttr(rewriter.getIntegerType(64),
+                                              targetInfo.CacheLineSizeBytes));
       func.setArgAttr(idx, "llvm.nonnull", rewriter.getUnitAttr());
       func.setArgAttr(idx, "llvm.nocapture", rewriter.getUnitAttr());
       func.setArgAttr(idx, "llvm.noalias", rewriter.getUnitAttr());
@@ -155,7 +156,8 @@ public:
 
     // get the current phase
     Value phasePtr = func.getArgument(1);
-    Value crtPhase = b.load(i32_ty, phasePtr, /*align=*/64);
+    Value crtPhase =
+        b.load(i32_ty, phasePtr, /*align=*/targetInfo.CacheLineSizeBytes);
 
     // atomically increment the count
     Value countPtr = func.getArgument(0);
@@ -174,7 +176,7 @@ public:
     {
       rewriter.setInsertionPointToEnd(lastBlock);
       // reset count
-      b.store(b.i32_val(0), countPtr, /*align=*/64);
+      b.store(b.i32_val(0), countPtr, /*align=*/targetInfo.CacheLineSizeBytes);
       // increment phase + release
       Value next = b.add(crtPhase, b.i32_val(1));
       rewriter.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::xchg, phasePtr,
@@ -186,7 +188,8 @@ public:
     {
       rewriter.setInsertionPointToEnd(waitBlock);
       // check to see if the phase changed
-      LLVM::LoadOp latest = b.load(i32_ty, phasePtr, /*align=*/64);
+      LLVM::LoadOp latest =
+          b.load(i32_ty, phasePtr, /*align=*/targetInfo.CacheLineSizeBytes);
       latest->setAttr("ordering",
                       LLVM::AtomicOrderingAttr::get(
                           context, LLVM::AtomicOrdering::monotonic));
