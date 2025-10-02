@@ -249,6 +249,22 @@ protected:
   const cpu::TargetInfo &targetInfo;
 };
 
+class GpuLocalBarrierOpToLLVM
+    : public ConvertOpToLLVMPattern<triton::gpu::LocalBarrierOp> {
+public:
+  GpuLocalBarrierOpToLLVM(LLVMTypeConverter &typeConverter,
+                          PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::gpu::LocalBarrierOp>(typeConverter,
+                                                            benefit) {}
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::LocalBarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<mlir::gpu::BarrierOp>(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
@@ -258,4 +274,5 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
   patterns.add<BlockIdOpToLLVM>(typeConverter, benefit);
   patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
+  patterns.add<GpuLocalBarrierOpToLLVM>(typeConverter, benefit);
 }
