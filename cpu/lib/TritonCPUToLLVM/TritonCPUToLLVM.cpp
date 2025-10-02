@@ -98,6 +98,9 @@ struct ConvertTritonCPUToLLVM
 
     RewritePatternSet patterns(context);
     int benefit = patternBenefitPrioritizeOverLLVMConversions;
+    cpu::populateConvertLayoutOpToLLVMPatterns(
+        typeConverter, targetInfo, patterns,
+        patternBenefitConvertLayoutOptimizedPattern);
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
 
