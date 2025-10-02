@@ -24,7 +24,11 @@ def AddKernelStreamPass : Pass<"add-kernel-stream", "mlir::ModuleOp"> {
         coming soon
     }];
 
-    let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect", "mlir::scf::SCFDialect",];
+    let dependentDialects = [
+      "mlir::triton::gpu::TritonGPUDialect",
+      "mlir::scf::SCFDialect",
+      "mlir::triton::cpu::TritonCPUDialect"
+    ];
 }
 
 #endif
