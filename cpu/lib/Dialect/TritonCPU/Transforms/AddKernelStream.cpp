@@ -27,6 +27,8 @@ static LogicalResult replacePidOp(triton::FuncOp funcOp,
   Value blockIdx = entry.getArgument(blockIdxArgPos);
 
   auto programIdOps = llvm::to_vector(funcOp.getOps<triton::GetProgramIdOp>());
+  if (programIdOps.size() == 0)
+    return success(); // nothing to do
   assert(programIdOps.size() == 1 &&
          "expected exactly one tt.get_program_id op");
   triton::GetProgramIdOp programIdOp = programIdOps.front();
