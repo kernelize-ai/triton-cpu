@@ -55,15 +55,12 @@ struct FuncOpSPMDParamConversion
       return funcOp; // TODO: pass shared memory to child functions
 
     amendedInputTy.push_back(i32_ty);      // thread_id
-    amendedInputTy.push_back(i32_ty);      // x
-    amendedInputTy.push_back(i32_ty);      // y
-    amendedInputTy.push_back(i32_ty);      // z
+    amendedInputTy.push_back(i32_ty);      // start
+    amendedInputTy.push_back(i32_ty);      // end
     amendedInputTy.push_back(i32_ty);      // gridX
     amendedInputTy.push_back(i32_ty);      // gridY
     amendedInputTy.push_back(i32_ty);      // gridZ
     amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
-    amendedInputTy.push_back(i32_ty);      // block_start
-    amendedInputTy.push_back(i32_ty);      // block_end
 
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
@@ -88,15 +85,12 @@ struct FuncOpSPMDParamConversion
     auto &region = funcOp.getBody();
 
     region.addArgument(i32_ty, loc);      // thread_id
-    region.addArgument(i32_ty, loc);      // x
-    region.addArgument(i32_ty, loc);      // y
-    region.addArgument(i32_ty, loc);      // z
+    region.addArgument(i32_ty, loc);      // start
+    region.addArgument(i32_ty, loc);      // end
     region.addArgument(i32_ty, loc);      // gridX
     region.addArgument(i32_ty, loc);      // gridY
     region.addArgument(i32_ty, loc);      // gridZ
     region.addArgument(sharedPtrTy, loc); // shared memory ptr
-    region.addArgument(i32_ty, loc);      // block_start
-    region.addArgument(i32_ty, loc);      // block_end
 
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());

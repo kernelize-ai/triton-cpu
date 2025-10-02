@@ -3,6 +3,7 @@
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "triton/Dialect/Triton/IR/Interfaces.h"
 
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.cpp.inc"
 
@@ -29,6 +30,6 @@ void TritonCPUDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "cpu/include/Dialect/TritonCPU/IR/Ops.cpp.inc"
-      // #include "cpu/include/Dialect/TritonCPU/IR/OpsEnums.cpp.inc"
       >();
+  addInterfaces<TritonInlinerInterface>();
 }

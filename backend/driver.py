@@ -180,17 +180,13 @@ def make_launcher(constants, signature, shared_mem_size):
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
     # add thread ID, block args, and shared memory ptr
-    kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+    kernel_params.extend(["thread_id", "block_start", "block_end", "gridX", "gridY", "gridZ"])
     arg_types += ', '
-    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
+    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
     # the kernel always has shared mem arguments
     arg_types += ', int8_t*'
     kernel_params.append("shared_mem_ptr")
-
-    # tmp: add block start, block end
-    kernel_params.extend(["start", "end"])
-    arg_types += ', int32_t, int32_t'
 
     src = f"""
 #include <stdbool.h>
@@ -247,17 +243,14 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         const int warp_id = worker_id % num_warps;
         const int thread_id = warp_id;
         const int team_id = worker_id / num_warps;
-        const unsigned block_start = consecutive_blocks * team_id;
-
+        const int32_t block_start = consecutive_blocks * team_id;
+        // TODO: cleanup these vars
         int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
-        for(unsigned i = block_start; i < run_end; i++) {{
-            int start = 0;
-            int end = 1;
-            GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
-            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-        }}
+
+        int32_t block_end = (int32_t)run_end;
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
 
     if (global_smem) free(global_smem);

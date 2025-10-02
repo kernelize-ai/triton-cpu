@@ -31,14 +31,54 @@ public:
       threadIdOp.emitError("unsupported thread id dimension");
     }
 
-    assert(args.size() > 7 && "incorrect cpu kernel function signature");
-    auto funcArgIdx = args.size() + cpu::kThreadIdOffset;
+    int funcArgIdx = args.size() + cpu::kThreadIdOffset;
+    assert(funcArgIdx >= 0 && "incorrect cpu kerne function signature");
     assert(args[funcArgIdx].getType().isInteger(32) &&
            "Thread ID argument must be i32");
     rewriter.replaceOp(threadIdOp, args[funcArgIdx]);
     return success();
   }
 };
+
+Value getNumPrograms(mlir::FunctionOpInterface funcOp, int axis) {
+  auto args = funcOp.getArguments();
+  assert(funcOp);
+  assert(axis >= 0 && axis < 3);
+
+  // offset program ID args offset by start,end, then by desired axis
+  auto argIdx = args.size() + cpu::kProgramIdArgsOffset + 2 + axis;
+  assert(argIdx < args.size() && "out-of-bounds arg index");
+  assert(args[argIdx].getType().isInteger(32) && "unexpected arg type");
+  return args[argIdx];
+}
+
+// x = blockIdx % gridX
+Value convertBlockIndexToDimX(ConversionPatternRewriter &rewriter,
+                              Value blockIdx, FunctionOpInterface funcOp) {
+  auto loc = blockIdx.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  return rewriter.create<LLVM::SRemOp>(loc, blockIdx,
+                                       getNumPrograms(funcOp, 0));
+}
+
+// y = (idx % (gridX * gridY)) / gridX
+Value convertBlockIndexToDimY(ConversionPatternRewriter &rewriter,
+                              Value blockIdx, FunctionOpInterface funcOp) {
+  auto loc = blockIdx.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  Value gridXY = b.mul(getNumPrograms(funcOp, 0), getNumPrograms(funcOp, 1));
+  Value idxModXY = rewriter.create<LLVM::SRemOp>(loc, blockIdx, gridXY);
+  return b.sdiv(idxModXY, getNumPrograms(funcOp, 0));
+}
+
+// z = idx / (gridX * gridY)
+Value convertBlockIndexToDimZ(ConversionPatternRewriter &rewriter,
+                              Value blockIdx, FunctionOpInterface funcOp) {
+  auto loc = blockIdx.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  Value gridXY = b.mul(getNumPrograms(funcOp, 0), getNumPrograms(funcOp, 1));
+  return b.sdiv(blockIdx, gridXY);
+}
 
 class BlockIdOpToLLVM
     : public ConvertOpToLLVMPattern<mlir::triton::cpu::BlockIdOp> {
@@ -54,30 +94,34 @@ public:
     assert(funcOp && "expected LLVM::FuncOp as a parent of GetProgramIdOp");
     auto args = funcOp.getArguments();
 
-    auto programIdDim = blockIdOp.getAxisAsInt();
-    assert(programIdDim >= 0 && programIdDim < 3);
+    auto programIdDim = blockIdOp.getAxis();
 
-    auto funcArgIdx = args.size() + cpu::kProgramIdArgsOffset + programIdDim;
-    assert(funcArgIdx < args.size() && "invalid SPMD program argument index");
-    assert(args[funcArgIdx].getType().isInteger(32) &&
-           "SPMD program argument must be i32");
+    // convert the 1D program index to an index in the appropriate dimension
+    // using the provided gridX, gridY, and gridZ function arguments
+    switch (programIdDim) {
+    case ProgramIDDim::X: {
+      rewriter.replaceOp(blockIdOp,
+                         convertBlockIndexToDimX(
+                             rewriter, blockIdOp.getLinearBlockId(), funcOp));
+      break;
+    }
+    case ProgramIDDim::Y: {
+      rewriter.replaceOp(blockIdOp,
+                         convertBlockIndexToDimY(
+                             rewriter, blockIdOp.getLinearBlockId(), funcOp));
+      break;
+    }
+    case ProgramIDDim::Z: {
+      rewriter.replaceOp(blockIdOp,
+                         convertBlockIndexToDimZ(
+                             rewriter, blockIdOp.getLinearBlockId(), funcOp));
+      break;
+    }
+    }
 
-    rewriter.replaceOp(blockIdOp, args[funcArgIdx]);
     return success();
   }
 };
-
-Value getNumPrograms(mlir::FunctionOpInterface funcOp, int axis) {
-  auto args = funcOp.getArguments();
-  assert(funcOp && args.size() >= 6);
-  assert(axis >= 0 && axis < 3);
-
-  // The last three of the args are gridX, gridY, gridZ (bounds) of grid.
-  auto argIdx = args.size() + cpu::kProgramIdArgsOffset + 3 + axis;
-  assert(argIdx < args.size() && "out-of-bounds arg index");
-  assert(args[argIdx].getType().isInteger(32) && "unexpected arg type");
-  return args[argIdx];
-}
 
 class GetNumProgramsOpToLLVM
     : public ConvertOpToLLVMPattern<triton::GetNumProgramsOp> {
@@ -311,7 +355,7 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
   patterns.add<GpuLocalBarrierOpToLLVM>(typeConverter, benefit);
   patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockStart>>(
-      typeConverter, /*blockStartIndexOffset*/ -2, benefit);
+      typeConverter, kProgramIdArgsOffset, benefit);
   patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockEnd>>(
-      typeConverter, /*blockEndIndexOffset*/ -1, benefit);
+      typeConverter, kProgramIdArgsOffset + 1, benefit);
 }
