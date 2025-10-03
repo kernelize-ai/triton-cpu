@@ -4,6 +4,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
+#include "triton/Tools/LayoutUtils.h"
 
 namespace {
 
@@ -95,6 +96,19 @@ struct ConvertLayoutOpConversion
     }
   }
 
+  SmallVector<unsigned> getShapePerCTATile(RankedTensorType tensorTy) const {
+    auto llEnc = triton::gpu::toLinearEncoding(tensorTy);
+    auto sizePerThread = llEnc.getSizePerThread();
+    auto threadsPerWarp = llEnc.getThreadsPerWarp();
+    auto warpsPerCTA = llEnc.getWarpsPerCTA();
+    SmallVector<unsigned> shape;
+    for (auto [size, thread, warp] :
+         llvm::zip(sizePerThread, threadsPerWarp, warpsPerCTA)) {
+      shape.push_back(size * thread * warp);
+    }
+    return shape;
+  }
+
   Value transferWithinBlock(triton::gpu::ConvertLayoutOp op, Value src,
                             ConversionPatternRewriter &rewriter) const {
     MLIRContext *ctx = op.getContext();
@@ -103,31 +117,116 @@ struct ConvertLayoutOpConversion
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto srcTy = op.getSrc().getType();
     auto dstTy = op.getType();
+    llvm::errs() << "srcTy: " << srcTy << "\n";
+    llvm::errs() << "dstTy: " << dstTy << "\n";
 
     auto [inVec, outVec] = getScratchCvtInOutVecLengths(srcTy, dstTy);
     llvm::errs() << "inVec: " << inVec << ", outVec: " << outVec << "\n";
 
     auto srcShapePerCTA = triton::gpu::getShapePerCTA(srcTy);
+    llvm::errs() << "srcShapePerCTA: ";
+    for (auto s : srcShapePerCTA)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
     auto dstShapePerCTA = triton::gpu::getShapePerCTA(dstTy);
+    llvm::errs() << "dstShapePerCTA: ";
+    for (auto s : dstShapePerCTA)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+
+    auto srcShapePerCTATile = getShapePerCTATile(srcTy);
+    llvm::errs() << "srcShapePerCTATile: ";
+    for (auto s : srcShapePerCTATile)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+    auto dstShapePerCTATile = getShapePerCTATile(dstTy);
+    llvm::errs() << "dstShapePerCTATile: ";
+    for (auto s : dstShapePerCTATile)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+
     unsigned rank = dstTy.getRank();
     SmallVector<unsigned> repShape(rank);
     for (unsigned d = 0; d < rank; ++d) {
-      repShape[d] = std::max(srcShapePerCTA[d], dstShapePerCTA[d]);
+      repShape[d] = std::max(
+          std::min<unsigned>(srcShapePerCTA[d], srcShapePerCTATile[d]),
+          std::min<unsigned>(dstShapePerCTA[d], dstShapePerCTATile[d]));
     }
+    llvm::errs() << "repShape: ";
+    for (auto s : repShape)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+    auto order = triton::gpu::getOrder(dstTy);
+
+    auto srcLayout = triton::gpu::toLinearLayout(srcTy);
+    auto dstLayout = triton::gpu::toLinearLayout(dstTy);
+
+    // Pretty sure this is the identity function ATM
+    // It'd be better to simply call `quotient({kBlock})` and
+    // remove kBlock from transferWithinBlockImpl
+    auto srcLayoutWithinBlock = triton::gpu::getLayoutWithinBlock(srcLayout);
+    auto dstLayoutWithinBlock = triton::gpu::getLayoutWithinBlock(dstLayout);
+
+    SmallVector<Value> inVals = unpackLLElements(loc, src, rewriter);
+    assert(!inVals.empty());
+
+    SmallVector<Value> outVals = transferWithinBlockImpl(
+        inVals, op, srcLayoutWithinBlock, dstLayoutWithinBlock, repShape, order,
+        inVec, outVec, rewriter);
+
+    Value result =
+        packLLElements(loc, typeConverter, outVals, rewriter, op.getType());
+    return result;
+  }
+
+  // Determine which registers are read/written in which iteration of the shmem
+  // transfer specified by `layout`.
+  SmallVector<SmallVector<int> /*registers*/>
+  collectRegsForIter(MLIRContext *ctx, const LinearLayout &layout) const {
+    StringAttr kRegister = str_attr("register");
+    StringAttr kLane = str_attr("lane");
+    StringAttr kWarp = str_attr("warp");
+    StringAttr kBlock = str_attr("block");
+    StringAttr kIteration = str_attr("iteration");
+
+    // The choice of iteration should be determined only by the register.  That
+    // is, it should be correct to split the register dimension into iterations.
+    assert(layout.sublayoutIsZero({kLane, kWarp, kBlock}, {kIteration}));
+
+    LinearLayout sublayout = layout.sublayout({kRegister}, {kIteration});
+    SmallVector<SmallVector<int>> ret(sublayout.getOutDimSize(kIteration));
+    for (int reg = 0; reg < sublayout.getInDimSize(kRegister); reg++) {
+      auto idx = sublayout.apply({{kRegister, reg}});
+      ret[idx.begin()->second].push_back(reg);
+    }
+    return ret;
+  }
+
+  SmallVector<Value> transferWithinBlockImpl(
+      ArrayRef<Value> inVals, triton::gpu::ConvertLayoutOp op,
+      const LinearLayout &srcLayout, const LinearLayout &dstLayout,
+      const SmallVector<unsigned> &repShape, const SmallVector<unsigned> &order,
+      const unsigned inVec, const unsigned outVec,
+      RewriterBase &rewriter) const {
+    MLIRContext *ctx = op.getContext();
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+    StringAttr kRegister = str_attr("register");
+    StringAttr kLane = str_attr("lane");
+    StringAttr kWarp = str_attr("warp");
+    StringAttr kBlock = str_attr("block");
+    StringAttr kOffset = str_attr("offset");
+    StringAttr kIteration = str_attr("iteration");
 
     auto tensorShapePerCTA =
         convertType<unsigned, int64_t>(triton::gpu::getShapePerCTA(
             op.getSrc().getType().getEncoding(), op.getType().getShape()));
 
-    auto order = triton::gpu::getOrder(dstTy);
     LinearLayout sharedLayout =
         triton::gpu::chooseShemLayoutForRegToRegConversion(
             ctx, tensorShapePerCTA, repShape, order);
     llvm::errs() << "sharedLayout: " << sharedLayout << "\n";
-
-    // TODO: move this code into the impl function
-    auto srcLayout = triton::gpu::toLinearLayout(srcTy);
-    auto dstLayout = triton::gpu::toLinearLayout(dstTy);
 
     // Layout for the store from registers to shared memory.
     //
@@ -144,6 +243,7 @@ struct ConvertLayoutOpConversion
 
     /// Layout for the load from shmem to registers.
     LinearLayout shmemLoadLayout = dstLayout.invertAndCompose(sharedLayout);
+    llvm::errs() << "shmemLoadLayout: " << shmemLoadLayout << "\n";
 
     // Check that the `register` fully determines the `iteration`.  That is,
     // each thread does exactly the same reads and writes to shmem on each
@@ -153,44 +253,97 @@ struct ConvertLayoutOpConversion
     assert(
         shmemLoadLayout.sublayoutIsZero({kLane, kWarp, kBlock}, {kIteration}));
 
-    SmallVector<Value> inVals = unpackLLElements(loc, src, rewriter);
-    assert(!inVals.empty());
-
-    // Pretty sure this is the identity function ATM
-    // It'd be better to simply call `quotient({kBlock})` and
-    // remove kBlock from transferWithinBlockImpl
-    auto srcLayoutWithinBlock = triton::gpu::getLayoutWithinBlock(srcLayout);
-    auto dstLayoutWithinBlock = triton::gpu::getLayoutWithinBlock(dstLayout);
-
-    SmallVector<Value> outVals = transferWithinBlockImpl(
-        inVals, op, srcLayoutWithinBlock, dstLayoutWithinBlock, rewriter);
-
-    Value result =
-        packLLElements(loc, typeConverter, outVals, rewriter, op.getType());
-    return result;
-  }
-
-  SmallVector<Value> transferWithinBlockImpl(ArrayRef<Value> inVals,
-                                             triton::gpu::ConvertLayoutOp op,
-                                             const LinearLayout &srcLayout,
-                                             const LinearLayout &dstLayout,
-                                             RewriterBase &rewriter) const {
-    MLIRContext *ctx = op.getContext();
-    auto loc = op.getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-
-    StringAttr kRegister = str_attr("register");
-    StringAttr kLane = str_attr("lane");
-    StringAttr kWarp = str_attr("warp");
-    StringAttr kBlock = str_attr("block");
-    StringAttr kOffset = str_attr("offset");
-    StringAttr kIteration = str_attr("iteration");
-
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
 
-    assert(false);
+    // iteration -> registers
+    SmallVector<SmallVector<int>> inRegsForIter =
+        collectRegsForIter(ctx, shmemStoreLayout);
+    SmallVector<SmallVector<int>> outRegsForIter =
+        collectRegsForIter(ctx, shmemLoadLayout);
 
-    return {};
+    Value smemBase =
+        LLVM::getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
+    auto sharedPtrTy = smemBase.getType();
+    Type elemTy = inVals[0].getType();
+    auto outSize = shmemLoadLayout.getInDimSize(kRegister);
+    auto iterations = sharedLayout.getInDimSize(kIteration);
+    assert(inVec * iterations <= inVals.size());
+    assert(outVec * iterations <= outSize);
+
+    llvm::errs() << "outSize = " << outSize << ", iterations = " << iterations
+                 << ", inVals.size() = " << inVals.size() << "\n";
+
+    auto getVecAddr = [&](LinearLayout &layout, Value &regBase, int regSlice,
+                          Value _laneId, Value _warpId) -> Value {
+
+#if 1
+      Value offset = applyLinearLayout(loc, rewriter, layout,
+                                       {{kRegister, b.i32_val(regSlice)},
+                                        {kLane, _laneId},
+                                        {kWarp, _warpId},
+                                        { kBlock,
+                                          b.i32_val(0) }})[0]
+                         .second;
+#else
+      auto regIdx = layout
+                        .apply({{kRegister, regSlice},
+                                {kLane, _laneId},
+                                {kWarp, _warpId},
+                                {kBlock, 0}})[0]
+                        .second;
+      Value offset = b.i32_val(
+          regIdx); // b.xor_(regBase, b.i32_val(regIdx)); // remove regBase arg?
+#endif
+      auto vecAddr = b.gep(sharedPtrTy, elemTy, smemBase, offset,
+                           LLVM::GEPNoWrapFlags::inbounds);
+      return vecAddr;
+    };
+
+    // register idx -> Value
+    llvm::MapVector<int, Value> outVals;
+    for (int i = 0; i < iterations; i++) {
+      llvm::errs() << "Iteration " << i << " of " << iterations << "\n";
+      if (i != 0)
+        b.barrier();
+
+      auto &inRegs = inRegsForIter[i];
+      auto &outRegs = outRegsForIter[i];
+
+      for (int j = 0; j < inVals.size() / iterations; j += inVec) {
+        auto inRegSlice = inRegs[j];
+        llvm::errs() << "Storing slice " << inRegSlice << " at location " << j
+                     << " with " << inVec << " number of values.\n";
+
+        Value vecAddr =
+            getVecAddr(shmemStoreLayout, smemBase, inRegSlice, laneId, warpId);
+        SmallVector<Value> inValsVec;
+        for (int k = 0; k < inVec; k++)
+          inValsVec.push_back(inVals[inRegSlice + k]);
+        Value valsVec = packLLVector(loc, inValsVec, rewriter);
+        targetInfo.storeDShared(rewriter, loc, vecAddr, std::nullopt, valsVec,
+                                /*pred=*/b.true_val());
+      }
+
+      b.barrier();
+
+      for (int j = 0; j < outSize / iterations; j += outVec) {
+        auto outRegSlice = outRegs[j];
+        llvm::errs() << "loading slice " << outRegSlice << " at location " << j
+                     << " with " << outVec << " number of values.\n";
+        auto vecAddr =
+            getVecAddr(shmemLoadLayout, smemBase, outRegSlice, laneId, warpId);
+        Value valsVec = targetInfo.loadDShared(
+            rewriter, loc, vecAddr, std::nullopt, vec_ty(elemTy, outVec),
+            /*pred=*/b.true_val());
+        for (Value v : unpackLLVector(loc, valsVec, rewriter))
+          outVals[outRegSlice++] = v;
+      }
+    }
+
+    SmallVector<Value> outValsVec;
+    for (size_t i = 0; i < outVals.size(); i++)
+      outValsVec.push_back(outVals[i]);
+    return outValsVec;
   }
 
   LogicalResult

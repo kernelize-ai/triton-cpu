@@ -63,7 +63,6 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
   if (ctaId.has_value())
     llvm::report_fatal_error(
         "CPU does not support cross-CTA shared memory transfers");
-
   Type elemTy = val.getType();
   if (isa<VectorType>(elemTy) && !isa<VectorType>(pred.getType())) {
     // TODO: we should handle this case in the llLoad lowering

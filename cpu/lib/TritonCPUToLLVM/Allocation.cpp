@@ -30,7 +30,26 @@ getCPUAllocationAnalysisScratchSize(TargetInfo &targetInfo) {
   auto allocation = [&targetInfo](Operation *op) -> unsigned {
     // NOTE: these allocations are 128-bit aligned by default
     // see AllocationAnalysis::getScratchValueSize
+  if (auto cvtLayout = dyn_cast<gpu::ConvertLayoutOp>(op)) {
+      auto srcTy = cvtLayout.getSrc().getType();
+      auto dstTy = cvtLayout.getType();
+      if (!cvtNeedsSharedMemory(srcTy, dstTy))
+        return 0;
 
+      auto *ctx = srcTy.getContext();
+      auto srcLayout = triton::gpu::toLinearLayout(srcTy);
+      auto dstLayout = triton::gpu::toLinearLayout(dstTy);
+      srcLayout = actionRemoveBroadcastedRegs(srcLayout).apply(srcLayout);
+      dstLayout = actionRemoveBroadcastedRegs(dstLayout).apply(dstLayout);
+      llvm::errs() << "srcLayout: " << srcLayout << "\n";
+      llvm::errs() << "dstLayout: " << dstLayout << "\n";
+      auto srcToDestMapping = dstLayout.invertAndCompose(srcLayout);
+      llvm::errs() << "srcToDestMapping: " << srcToDestMapping << "\n";
+      llvm::errs() << "total out dim size: "
+                   << srcToDestMapping.getTotalOutDimSize() << "\n";
+      auto elems = srcToDestMapping.getTotalOutDimSize();
+      return elems * getBitwidth(srcTy) / 8;
+    }
     // pad all per-op shared memory allocations to 64-byte alignment so the
     // barrier synchronization buffers are properly aligned
     return llvm::alignTo(
