@@ -5,6 +5,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Tools/LayoutUtils.h"
+#include "triton/Analysis/Utility.h"
 
 namespace {
 
@@ -15,6 +16,7 @@ std::pair<unsigned, unsigned>
 getScratchCvtInOutVecLengths(RankedTensorType srcTy, RankedTensorType dstTy) {
   Attribute srcLayout = srcTy.getEncoding();
   Attribute dstLayout = dstTy.getEncoding();
+  assert(!shouldUseDistSmem(srcLayout, dstLayout));
 
   auto srcLinAttr = triton::gpu::toLinearEncoding(srcTy);
   auto dstLinAttr = triton::gpu::toLinearEncoding(dstTy);
@@ -101,6 +103,10 @@ struct ConvertLayoutOpConversion
     auto sizePerThread = llEnc.getSizePerThread();
     auto threadsPerWarp = llEnc.getThreadsPerWarp();
     auto warpsPerCTA = llEnc.getWarpsPerCTA();
+    llvm::errs() << "warpsPerCTA: ";
+    for (size_t i = 0; i < warpsPerCTA.size(); i++)
+      llvm::errs() << warpsPerCTA[i] << " ";
+    llvm::errs() << "\n";
     SmallVector<unsigned> shape;
     for (auto [size, thread, warp] :
          llvm::zip(sizePerThread, threadsPerWarp, warpsPerCTA)) {
@@ -121,6 +127,7 @@ struct ConvertLayoutOpConversion
     llvm::errs() << "dstTy: " << dstTy << "\n";
 
     auto [inVec, outVec] = getScratchCvtInOutVecLengths(srcTy, dstTy);
+    // TODO: these might be too big, but the problem right now is they're too small?
     llvm::errs() << "inVec: " << inVec << ", outVec: " << outVec << "\n";
 
     auto srcShapePerCTA = triton::gpu::getShapePerCTA(srcTy);
@@ -219,9 +226,22 @@ struct ConvertLayoutOpConversion
     StringAttr kOffset = str_attr("offset");
     StringAttr kIteration = str_attr("iteration");
 
+    llvm::errs() << "repShape: ";
+    for (auto s : repShape)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+    llvm::errs() << "order: ";
+    for (auto s : order)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+
     auto tensorShapePerCTA =
         convertType<unsigned, int64_t>(triton::gpu::getShapePerCTA(
             op.getSrc().getType().getEncoding(), op.getType().getShape()));
+    llvm::errs() << "tensorShapePerCTA: ";
+    for (auto s : tensorShapePerCTA)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
 
     LinearLayout sharedLayout =
         triton::gpu::chooseShemLayoutForRegToRegConversion(
@@ -253,7 +273,12 @@ struct ConvertLayoutOpConversion
     assert(
         shmemLoadLayout.sublayoutIsZero({kLane, kWarp, kBlock}, {kIteration}));
 
+#if 1
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+#else
+    Value laneId = b.i32_val(0);
+    Value warpId = getThreadId(rewriter, loc);
+#endif 
 
     // iteration -> registers
     SmallVector<SmallVector<int>> inRegsForIter =
@@ -265,6 +290,7 @@ struct ConvertLayoutOpConversion
         LLVM::getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
     auto sharedPtrTy = smemBase.getType();
     Type elemTy = inVals[0].getType();
+    llvm::errs() << "elemTy: " << elemTy << "\n";
     auto outSize = shmemLoadLayout.getInDimSize(kRegister);
     auto iterations = sharedLayout.getInDimSize(kIteration);
     assert(inVec * iterations <= inVals.size());
@@ -294,8 +320,7 @@ struct ConvertLayoutOpConversion
       Value offset = b.i32_val(
           regIdx); // b.xor_(regBase, b.i32_val(regIdx)); // remove regBase arg?
 #endif
-      auto vecAddr = b.gep(sharedPtrTy, elemTy, smemBase, offset,
-                           LLVM::GEPNoWrapFlags::inbounds);
+      auto vecAddr = b.gep(sharedPtrTy, i64_ty, smemBase, offset);
       return vecAddr;
     };
 
@@ -312,7 +337,7 @@ struct ConvertLayoutOpConversion
       for (int j = 0; j < inVals.size() / iterations; j += inVec) {
         auto inRegSlice = inRegs[j];
         llvm::errs() << "Storing slice " << inRegSlice << " at location " << j
-                     << " with " << inVec << " number of values.\n";
+                     << " with inVec = " << inVec << ".\n";
 
         Value vecAddr =
             getVecAddr(shmemStoreLayout, smemBase, inRegSlice, laneId, warpId);
@@ -329,7 +354,7 @@ struct ConvertLayoutOpConversion
       for (int j = 0; j < outSize / iterations; j += outVec) {
         auto outRegSlice = outRegs[j];
         llvm::errs() << "loading slice " << outRegSlice << " at location " << j
-                     << " with " << outVec << " number of values.\n";
+                     << " with outVec = " << outVec << ".\n";
         auto vecAddr =
             getVecAddr(shmemLoadLayout, smemBase, outRegSlice, laneId, warpId);
         Value valsVec = targetInfo.loadDShared(
