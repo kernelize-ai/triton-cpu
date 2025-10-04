@@ -49,7 +49,7 @@ public:
     unsigned alignment =
         loadOp.getAlignment()
             ? *loadOp.getAlignment()
-            : std::max(8u,
+            : std::min(8u,
                        getElementTypeOrSelf(elemTy).getIntOrFloatBitWidth() /
                            8u);
     // direct load
@@ -117,7 +117,7 @@ public:
     unsigned alignment =
         storeOp.getAlignment()
             ? *storeOp.getAlignment()
-            : std::max(8u,
+            : std::min(8u,
                        getElementTypeOrSelf(elemTy).getIntOrFloatBitWidth() /
                            8u);
     // direct store

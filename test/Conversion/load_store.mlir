@@ -72,7 +72,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, "ttg.thr
 
     // LLVM-NOT: llvm.intr.masked
     // LLVM: llvm.call @barrier
-    // LLVM: llvm.load {{.*}} {alignment = 8 : i64} : !llvm.ptr -> f32
+    // LLVM: llvm.load {{.*}} {alignment = 4 : i64} : !llvm.ptr -> f32
     tt.return
   }
 }
