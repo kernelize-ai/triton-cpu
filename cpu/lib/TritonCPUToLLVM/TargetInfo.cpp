@@ -76,8 +76,7 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
     }
     pred = vecPred;
   }
-  mlir::triton::cpu::llStore(rewriter, loc, ptr, val, pred,
-                             /*alignment=*/CacheLineSizeBytes);
+  mlir::triton::cpu::llStore(rewriter, loc, ptr, val, pred);
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
@@ -89,8 +88,7 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
   Value falseVal = rewriter.create<LLVM::ConstantOp>(
       loc, elemTy, rewriter.getZeroAttr(elemTy));
   auto load =
-      mlir::triton::cpu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal,
-                                /*alignment=*/CacheLineSizeBytes);
+      mlir::triton::cpu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal);
   return load;
 }
 

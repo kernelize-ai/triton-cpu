@@ -7,6 +7,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/AllocateSharedMemoryUtility.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Tools/LayoutUtils.h"
+#include "llvm/Support/Alignment.h"
 
 #include "TargetInfo.h"
 
@@ -27,16 +28,15 @@ namespace mlir::triton::cpu {
 std::function<unsigned(Operation *)>
 getCPUAllocationAnalysisScratchSize(TargetInfo &targetInfo) {
   auto allocation = [&targetInfo](Operation *op) -> unsigned {
-    if (auto reduceOp = dyn_cast<ReduceOp>(op)) {
-      ReduceOpHelper helper(reduceOp);
-      auto smemShape = helper.getScratchRepShape();
-      auto elems = product<unsigned>(smemShape);
+    // NOTE: these allocations are 128-bit aligned by default
+    // see AllocationAnalysis::getScratchValueSize
 
-      unsigned bytesPerElem = targetInfo.CacheLineSizeBytes;
-      return bytesPerElem * elems;
-    }
-    return mlir::triton::defaultAllocationAnalysisScratchSizeFn(op);
+    // pad all per-op shared memory allocations to 64-byte alignment so the
+    // barrier synchronization buffers are properly aligned
+    return llvm::alignTo(
+        mlir::triton::defaultAllocationAnalysisScratchSizeFn(op), 64);
   };
+
   return allocation;
 }
 
