@@ -220,14 +220,9 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
     return coord;
 }}
 
-extern "C" void _cpu_barrier(void *b) {{
-    boost::fibers::barrier *barrier = (boost::fibers::barrier *)b;
-    barrier->wait();
-}}
-
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
-    const int ompMaxThreads = omp_get_max_threads() * 2;
+    const int ompMaxThreads = omp_get_max_threads(); // * 2;
     const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
 
     // TODO: only add the plus barrier when we have a barrier
