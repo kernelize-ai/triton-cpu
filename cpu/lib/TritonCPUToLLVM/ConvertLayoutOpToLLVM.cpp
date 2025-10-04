@@ -274,7 +274,9 @@ struct ConvertLayoutOpConversion
         shmemLoadLayout.sublayoutIsZero({kLane, kWarp, kBlock}, {kIteration}));
 
 #if 1
-    auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
+    Value laneId;
+    Value warpId;
+    std::tie(laneId, warpId) = getLaneAndWarpId(rewriter, loc); // C++20 required for capturing structured bindings in lambda
 #else
     Value laneId = b.i32_val(0);
     Value warpId = getThreadId(rewriter, loc);
@@ -283,8 +285,22 @@ struct ConvertLayoutOpConversion
     // iteration -> registers
     SmallVector<SmallVector<int>> inRegsForIter =
         collectRegsForIter(ctx, shmemStoreLayout);
+    llvm::errs() << "inRegsForIter: \n";
+    for (size_t i = 0; i < inRegsForIter.size(); i++) {
+      llvm::errs() << "  Iteration " << i << ": ";
+      for (auto r : inRegsForIter[i])
+        llvm::errs() << r << " ";
+      llvm::errs() << "\n";
+    }
     SmallVector<SmallVector<int>> outRegsForIter =
         collectRegsForIter(ctx, shmemLoadLayout);
+    llvm::errs() << "outRegsForIter: \n";
+    for (size_t i = 0; i < outRegsForIter.size(); i++) {
+      llvm::errs() << "  Iteration " << i << ": ";
+      for (auto r : outRegsForIter[i])
+        llvm::errs() << r << " ";
+      llvm::errs() << "\n";
+    }
 
     Value smemBase =
         LLVM::getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
@@ -299,6 +315,19 @@ struct ConvertLayoutOpConversion
     llvm::errs() << "outSize = " << outSize << ", iterations = " << iterations
                  << ", inVals.size() = " << inVals.size() << "\n";
 
+#if 1
+    auto getPtrAddr = [&](LinearLayout &layout, Value &smemBase,
+                          int regIdx) -> Value {
+      Value offset = applyLinearLayout(loc, rewriter, layout,
+                                       {{kRegister, b.i32_val(regIdx)},
+                                        {kLane, laneId},
+                                        {kWarp, warpId},
+                                        { kBlock,
+                                          b.i32_val(0) }})[0]
+                         .second;
+      return b.gep(sharedPtrTy, i64_ty, smemBase, offset);
+    };
+#else
     auto getVecAddr = [&](LinearLayout &layout, Value &regBase, int regSlice,
                           Value _laneId, Value _warpId) -> Value {
 
@@ -323,6 +352,7 @@ struct ConvertLayoutOpConversion
       auto vecAddr = b.gep(sharedPtrTy, i64_ty, smemBase, offset);
       return vecAddr;
     };
+#endif 
 
     // register idx -> Value
     llvm::MapVector<int, Value> outVals;
@@ -339,14 +369,11 @@ struct ConvertLayoutOpConversion
         llvm::errs() << "Storing slice " << inRegSlice << " at location " << j
                      << " with inVec = " << inVec << ".\n";
 
-        Value vecAddr =
-            getVecAddr(shmemStoreLayout, smemBase, inRegSlice, laneId, warpId);
-        SmallVector<Value> inValsVec;
-        for (int k = 0; k < inVec; k++)
-          inValsVec.push_back(inVals[inRegSlice + k]);
-        Value valsVec = packLLVector(loc, inValsVec, rewriter);
-        targetInfo.storeDShared(rewriter, loc, vecAddr, std::nullopt, valsVec,
+        for (int k = 0; k < inVec; k++) {
+          Value ptrAddr = getPtrAddr(shmemStoreLayout, smemBase, inRegSlice + k);
+          targetInfo.storeDShared(rewriter, loc, ptrAddr, std::nullopt, inVals[inRegSlice + k],
                                 /*pred=*/b.true_val());
+        }
       }
 
       b.barrier();
@@ -355,13 +382,14 @@ struct ConvertLayoutOpConversion
         auto outRegSlice = outRegs[j];
         llvm::errs() << "loading slice " << outRegSlice << " at location " << j
                      << " with outVec = " << outVec << ".\n";
-        auto vecAddr =
-            getVecAddr(shmemLoadLayout, smemBase, outRegSlice, laneId, warpId);
-        Value valsVec = targetInfo.loadDShared(
-            rewriter, loc, vecAddr, std::nullopt, vec_ty(elemTy, outVec),
-            /*pred=*/b.true_val());
-        for (Value v : unpackLLVector(loc, valsVec, rewriter))
-          outVals[outRegSlice++] = v;
+        
+        for (int k = 0; k < outVec; k++) {
+          Value ptrAddr = getPtrAddr(shmemLoadLayout, smemBase, outRegSlice + k);
+          Value val = targetInfo.loadDShared(
+              rewriter, loc, ptrAddr, std::nullopt, elemTy,
+              /*pred=*/b.true_val());
+          outVals[outRegSlice + k] = val;
+        }
       }
     }
 
