@@ -4,6 +4,8 @@
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
+#include "TargetInfo.h"
+
 namespace {
 
 using namespace mlir;
@@ -16,7 +18,7 @@ using namespace mlir::triton;
 struct FuncOpSPMDParamConversion
     : public ConvertOpToLLVMPattern<triton::FuncOp> {
   FuncOpSPMDParamConversion(LLVMTypeConverter &converter,
-                            const TargetInfoBase &targetInfo,
+                            const cpu::TargetInfo &targetInfo,
                             PatternBenefit benefit)
       : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
 
@@ -131,17 +133,31 @@ struct FuncOpSPMDParamConversion
     rewriter.eraseOp(funcOp);
     rewriter.eraseOp(amendedFuncOp);
 
+    // set the alignment on the shared memory pointer argument
+    if (triton::isKernel(funcOp)) {
+      const int sharedMemoryPtrArgIndex = newFuncOp.getNumArguments() - 1;
+      assert(sharedMemoryPtrArgIndex >= 0 &&
+             "expected at least one function argument");
+      auto sharedMemoryPtrArg = newFuncOp.getArgument(sharedMemoryPtrArgIndex);
+      assert(isa<LLVM::LLVMPointerType>(sharedMemoryPtrArg.getType()) &&
+             "expected the shared memory function argument to be a pointer");
+      const auto i32_type = mlir::IntegerType::get(newFuncOp.getContext(), 32);
+      newFuncOp.setArgAttr(
+          sharedMemoryPtrArgIndex, LLVM::LLVMDialect::getAlignAttrName(),
+          mlir::IntegerAttr::get(i32_type, targetInfo.CacheLineSizeBytes));
+    }
+
     return success();
   }
 
 private:
-  const TargetInfoBase &targetInfo;
+  const cpu::TargetInfo &targetInfo;
 };
 
 } // namespace
 
 void mlir::triton::cpu::populateFuncOpConversionPattern(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
-    const TargetInfoBase &targetInfo, PatternBenefit benefit) {
+    const TargetInfo &targetInfo, PatternBenefit benefit) {
   patterns.add<FuncOpSPMDParamConversion>(typeConverter, targetInfo, benefit);
 }

@@ -16,7 +16,7 @@ void populateElementwiseOpToLLVMPatterns(
 
 void populateFuncOpConversionPattern(LLVMTypeConverter &typeConverter,
                                      RewritePatternSet &patterns,
-                                     const TargetInfoBase &targetInfo,
+                                     const TargetInfo &targetInfo,
                                      PatternBenefit benefit);
 
 void populateGPUtoLLVMConversionPatterns(LLVMTypeConverter &converter,
