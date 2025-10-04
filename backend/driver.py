@@ -223,12 +223,12 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     alignas(64) unsigned char* global_smem = NULL;
     unsigned shared_memory_aligned_per_team = 0;
     if (shared_memory > 0) {{
-        unsigned shared_memory_plus_barrier = shared_memory + 128;
-        shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
-        unsigned shared_memory_aligned = shared_memory_aligned_per_team * num_teams;
-        global_smem = aligned_alloc(64, shared_memory_aligned);
+        unsigned shared_memory_aligned = (shared_memory + 63) & ~63u;
+        shared_memory_aligned_per_team = shared_memory_aligned + 128;
+        unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * num_teams;
+        global_smem = aligned_alloc(64, shared_memory_aligned_total);
         assert(global_smem);
-        memset(global_smem, 0, shared_memory_aligned);
+        memset(global_smem, 0, shared_memory_aligned_total);
     }}
 
     unsigned consecutive_blocks = ceil((float)N / (num_teams));
