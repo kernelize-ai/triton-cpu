@@ -235,6 +235,9 @@ public:
 
     unsigned int sharedMemSizeInBytes =
         mlir::cast<mlir::IntegerAttr>(moduleOp->getAttr("ttg.shared")).getInt();
+    unsigned int sharedMemBarrierOffsetBytes =
+        sharedMemSizeInBytes +
+        numWarps * 64; // offset by scratch size for syncing between warps
 
     // barrier shared memory allocation is implicit, so the ptrs we want are
     // offVal and offVal + 64
@@ -242,9 +245,9 @@ public:
                                             targetInfo.getSharedAddressSpace());
     auto smemPtr = LLVM::getStackPointer(rewriter, funcOp);
     Value countPtr =
-        b.gep(ptrTy, i8_ty, smemPtr, b.i32_val(sharedMemSizeInBytes));
-    Value phasePtr =
-        b.gep(ptrTy, i8_ty, smemPtr, b.i32_val(sharedMemSizeInBytes + 64));
+        b.gep(ptrTy, i8_ty, smemPtr, b.i32_val(sharedMemBarrierOffsetBytes));
+    Value phasePtr = b.gep(ptrTy, i8_ty, smemPtr,
+                           b.i32_val(sharedMemBarrierOffsetBytes + 64));
 
     SmallVector<Value> args{countPtr, phasePtr, numThreads};
     rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, barrierFunc, args);

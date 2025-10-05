@@ -224,7 +224,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     unsigned shared_memory_aligned_per_team = 0;
     if (shared_memory > 0) {{
         unsigned shared_memory_aligned = (shared_memory + 63) & ~63u;
-        shared_memory_aligned_per_team = shared_memory_aligned + 128;
+        const unsigned warp_sync_smem_size = num_warps * 64 + 128; // 64 B per warp plus 128 bytes for the barrier
+        shared_memory_aligned_per_team = shared_memory_aligned + warp_sync_smem_size;
         unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * num_teams;
         global_smem = aligned_alloc(64, shared_memory_aligned_total);
         assert(global_smem);

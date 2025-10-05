@@ -105,39 +105,42 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   assert(shared > 0 &&
          "shared memory allocation is required for shuffle XOR operation");
 
-  // Unfortunately we do not have access to the original reduction op here.
-  // However, because we are inside a reduction, the total shared memory should
-  // be enough for this op due to shared memory being used to store other values
-  // during the reductions. And the barrier prevents any other users of the
-  // shared memory from interfering with this particular shuffle. If triton were
-  // to buffer data in shared memory this could be a problem, though - something
-  // to keep an eye on.
+  // Warps have their own shared memory buffer for synchronization after shared
+  // memory allocations for the kernel. The warp shared memory buffer alocates
+  // 64 bytes per warp, making it 64-byte aligned and large enough for all
+  // scalar reductions. The barrier shared memory buffer consists of two 64-byte
+  // allocations after the warp synchronization shared memory buffer.
   auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
                                           getSharedAddressSpace());
   auto funcOp = val.getParentRegion()->getParentOfType<FunctionOpInterface>();
-  Value smemBase = LLVM::getStackPointer(rewriter, funcOp);
+  // warp synchronization buffer is after per-op shared memory allocations
+  Value smemBase = b.gep(ptrTy, i8_ty, LLVM::getStackPointer(rewriter, funcOp),
+                         b.i32_val(shared));
 
   Value threadId = getThreadId(rewriter, loc);
 
   unsigned iWarpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
   assert(iWarpSize == 1 && "only size 1 warps supported for reductions on CPU");
+  unsigned int numWarps =
+      mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
 
-  Value warpSize = b.i32_val(iWarpSize);
-  Value laneId = b.urem(threadId, warpSize);
-
-  // write to our slot
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
+
+  // store our value to smem
   Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
   storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
 
   barrier(loc, rewriter);
 
-  // read from our neighbor
-  Value neighbor = b.xor_(threadId, b.i32_val(i));
-  Value neighborSlot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, neighbor);
-  Value loaded = loadDShared(rewriter, loc, neighborSlot, std::nullopt,
-                             val.getType(), b.true_val());
-
+  // compute target lane id
+  Value targetThreadId = b.xor_(threadId, b.i32_val(i));
+  Value targetPtr =
+      b.gep(ptrTy, int_ty(elemSizeBits), smemBase, targetThreadId);
+  // load from target lane (note we could use 64B alignments here since we're in
+  // the sync region)
+  Value loaded = mlir::triton::cpu::llLoad(
+      rewriter, loc, targetPtr, val.getType(),
+      b.icmp_slt(targetThreadId, b.i32_val(numWarps)), val);
   barrier(loc, rewriter);
   return loaded;
 }
