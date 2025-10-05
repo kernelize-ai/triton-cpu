@@ -1,0 +1,13 @@
+diff --git a/third_party/amd/lib/TritonAMDGPUTransforms/ScheduleLoops.cpp b/third_party/amd/lib/TritonAMDGPUTransforms/ScheduleLoops.cpp
+index bacd65b3e..1c575abfd 100644
+--- a/third_party/amd/lib/TritonAMDGPUTransforms/ScheduleLoops.cpp
++++ b/third_party/amd/lib/TritonAMDGPUTransforms/ScheduleLoops.cpp
+@@ -300,7 +300,7 @@ static Operation *bypassLDS(Operation *load, Operation *use) {
+ 
+   // Finally, rewrite the load to use the inferred (better) encoding.
+   auto newOp = convertDistributedOpEncoding(srcEnc, load);
+-  newOp->setAttr(AttrBypassLDS, BoolAttr::get(load->getContext(), true));
++  newOp->setAttr(AttrBypassLDS, BoolAttr::get(loadType.getContext(), true));
+   return newOp;
+ };
+ 
