@@ -156,15 +156,16 @@ public:
 
     // get the current phase
     Value phasePtr = func.getArgument(1);
-    Value crtPhase =
+    LLVM::LoadOp crtPhase =
         b.load(i32_ty, phasePtr, /*align=*/targetInfo.CacheLineSizeBytes);
+    crtPhase->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
+                                      context, LLVM::AtomicOrdering::acquire));
 
     // atomically increment the count
     Value countPtr = func.getArgument(0);
-    auto ordering = LLVM::AtomicOrdering::monotonic;
-
     Value old = rewriter.create<LLVM::AtomicRMWOp>(
-        loc, LLVM::AtomicBinOp::add, countPtr, b.i32_val(1), ordering);
+        loc, LLVM::AtomicBinOp::add, countPtr, b.i32_val(1),
+        LLVM::AtomicOrdering::acq_rel);
 
     // check to see if we are the last thread to hit the barrier
     Value numWorkers = func.getArgument(2);
@@ -176,11 +177,15 @@ public:
     {
       rewriter.setInsertionPointToEnd(lastBlock);
       // reset count
-      b.store(b.i32_val(0), countPtr, /*align=*/targetInfo.CacheLineSizeBytes);
+      LLVM::StoreOp store = b.store(b.i32_val(0), countPtr,
+                                    /*align=*/targetInfo.CacheLineSizeBytes);
+      store->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
+                                     context, LLVM::AtomicOrdering::release));
+
       // increment phase + release
       Value next = b.add(crtPhase, b.i32_val(1));
       rewriter.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::xchg, phasePtr,
-                                         next, LLVM::AtomicOrdering::release);
+                                         next, LLVM::AtomicOrdering::acq_rel);
       rewriter.create<cf::BranchOp>(loc, exitBlock);
     }
 
@@ -190,9 +195,8 @@ public:
       // check to see if the phase changed
       LLVM::LoadOp latest =
           b.load(i32_ty, phasePtr, /*align=*/targetInfo.CacheLineSizeBytes);
-      latest->setAttr("ordering",
-                      LLVM::AtomicOrderingAttr::get(
-                          context, LLVM::AtomicOrdering::monotonic));
+      latest->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
+                                      context, LLVM::AtomicOrdering::acquire));
       Value same = b.icmp_eq(latest, crtPhase);
       rewriter.create<cf::CondBranchOp>(loc, same, waitBlock, afterSpinBlock);
     }
