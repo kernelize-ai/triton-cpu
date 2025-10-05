@@ -296,13 +296,11 @@ struct ConvertLayoutOpConversion
     assert(inVec * iterations <= inVals.size());
     assert(outVec * iterations <= outSize);
 
-    llvm::errs() << "outSize = " << outSize << ", iterations = " << iterations
+    llvm::errs() << "outSize = " << outSize << ", outVec = " << outVec << ", iterations = " << iterations
                  << ", inVals.size() = " << inVals.size() << "\n";
 
     auto getVecAddr = [&](LinearLayout &layout, Value &regBase, int regSlice,
                           Value _laneId, Value _warpId) -> Value {
-
-#if 1
       Value offset = applyLinearLayout(loc, rewriter, layout,
                                        {{kRegister, b.i32_val(regSlice)},
                                         {kLane, _laneId},
@@ -310,17 +308,7 @@ struct ConvertLayoutOpConversion
                                         { kBlock,
                                           b.i32_val(0) }})[0]
                          .second;
-#else
-      auto regIdx = layout
-                        .apply({{kRegister, regSlice},
-                                {kLane, _laneId},
-                                {kWarp, _warpId},
-                                {kBlock, 0}})[0]
-                        .second;
-      Value offset = b.i32_val(
-          regIdx); // b.xor_(regBase, b.i32_val(regIdx)); // remove regBase arg?
-#endif
-      auto vecAddr = b.gep(sharedPtrTy, i64_ty, smemBase, offset);
+      auto vecAddr = b.gep(sharedPtrTy, elemTy, smemBase, offset);
       return vecAddr;
     };
 

@@ -48,7 +48,10 @@ getCPUAllocationAnalysisScratchSize(TargetInfo &targetInfo) {
       llvm::errs() << "total out dim size: "
                    << srcToDestMapping.getTotalOutDimSize() << "\n";
       auto elems = srcToDestMapping.getTotalOutDimSize();
-      return elems * getBitwidth(srcTy) / 8;
+      llvm::errs() << "elems: " << elems << "\n";
+      auto bytes = elems * getBitwidth(srcTy) / 8;
+      llvm::errs() << "bytes: " << bytes << "\n";
+      return llvm::alignTo(bytes, 64);
     }
     // pad all per-op shared memory allocations to 64-byte alignment so the
     // barrier synchronization buffers are properly aligned
