@@ -189,9 +189,9 @@ class CPUBackend(BaseBackend):
             libs = ["sleef", "cpu_utils"]  # TODO: conditionally include?
             include_dirs = []
             ccflags = []
+            for lib_dir in lib_dirs:
+                ccflags.extend(["-Xlinker", "-rpath", "-Xlinker", lib_dir])
             if cpu_driver.is_macos():
-                for lib_dir in lib_dirs:
-                    ccflags.extend(["-Xlinker", "-rpath", "-Xlinker", lib_dir])
                 ccflags.extend(["-undefined", "dynamic_lookup"])
             so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, ccflags)
             with open(so, "rb") as f:
