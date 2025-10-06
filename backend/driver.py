@@ -6,7 +6,6 @@ import tempfile
 import time
 import platform
 import importlib
-import nexus
 from pathlib import Path
 
 from triton.runtime.build import compile_module_from_src
