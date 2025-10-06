@@ -40,14 +40,14 @@ include_dirs = [os.path.join(dirname, "include")
                 ] + [os.path.join(external_openmp_path(), "include") if is_macos() else []
                 ] + [os.path.join(external_boost_path(), "include")]
 libdevice_dir = os.path.join(dirname, "lib")
-libraries = []
+libraries = ["boost_fiber", "boost_context"]
 
 
 @functools.lru_cache()
 def system_ccflags():
-    ccflags = []
+    ccflags = ["-std=c++17"]
     if is_macos():
-        ccflags.extend(["-undefined", "dynamic_lookup", "-std=c++17", "-lboost_fiber", "-lboost_context", "-Xclang"])
+        ccflags.extend(["-undefined", "dynamic_lookup", "-Xclang"])
     ccflags.extend(["-fopenmp"])
     return ccflags
 
@@ -222,22 +222,21 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
-    const int ompMaxThreads = omp_get_max_threads(); // * 2;
+    const int ompMaxThreads = omp_get_max_threads();
     const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
 
     // TODO: only add the plus barrier when we have a barrier
     alignas(64) unsigned char* global_smem = NULL;
     unsigned shared_memory_aligned_per_team = 0;
     if (shared_memory > 0) {{
-        unsigned shared_memory_plus_barrier = shared_memory;
-        shared_memory_aligned_per_team = (shared_memory_plus_barrier + 63) & ~63u;
-        unsigned shared_memory_aligned = shared_memory_aligned_per_team * max_threads;
-        global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned);
+        shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
+        unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * max_threads;
+        global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
         assert(global_smem);
         memset(global_smem, 0, shared_memory_aligned_total);
     }}
 
-    unsigned consecutive_blocks = ceil((float)N / max_threads);
+    unsigned consecutive_blocks = (N + max_threads - 1) / max_threads;
 
     boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
 
