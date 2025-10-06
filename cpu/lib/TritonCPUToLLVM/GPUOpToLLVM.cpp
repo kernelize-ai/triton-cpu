@@ -118,10 +118,9 @@ public:
     auto *context = rewriter.getContext();
 
     // void barrier(int* count, int* phase, int32_t num_workers)
-    auto funcTy =
-        LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(context),
-                                    {ptr_ty(context)},
-                                    /*vararg=*/false);
+    auto funcTy = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(context),
+                                              {ptr_ty(context)},
+                                              /*vararg=*/false);
 
     RewriterBase::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(moduleOp.getBody());
