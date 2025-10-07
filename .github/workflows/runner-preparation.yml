@@ -15,18 +15,6 @@ jobs:
       matrix-CPU: ${{ steps.set-matrix.outputs.matrix-CPU }}
       matrix-MACOS: ${{ steps.set-matrix.outputs.matrix-MACOS }}
     steps:
-      - name: Install boost-fiber-dev (Linux)
-        # For Linux (ubuntu-latest), add an apt-get install step.
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libboost-fiber-dev
-      - name: Install boost-fiber (macOS)
-        # For macOS, add a brew install step.
-        if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew install boost
       - name: Decide pre-submit integration test enablement
         # Always enable integration tests for pre-submit pull requests.
         if: github.event_name == 'pull_request'
