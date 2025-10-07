@@ -17,25 +17,55 @@ class TTC_Op<string mnemonic, list<Trait> traits = []> :
 def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
   let summary = "Get the block ID.";
 
-  let arguments = (ins TT_ProgramDim:$axis);
+  let arguments = (ins TT_ProgramDim:$axis, I32:$linearBlockId);
 
   let results = (outs I32:$blockId);
 
   let description = [{
-    Get the ID of the current block.
+    Convert a linear block ID to a 3D block index.
   }];
 
   let builders = [
-    OpBuilder<(ins "ProgramIDDim":$axis), [{
-      build($_builder, $_state, $_builder.getI32Type(), ProgramIDDimAttr::get($_builder.getContext(), axis));
+    OpBuilder<(ins "ProgramIDDim":$axis, "Value":$linearBlockId), [{
+      build($_builder, $_state, $_builder.getI32Type(), ProgramIDDimAttr::get($_builder.getContext(), axis), linearBlockId);
     }]>
   ];
+
+  let assemblyFormat = "$axis `,` $linearBlockId attr-dict `:` type($linearBlockId)";
 
   let extraClassDeclaration = [{
     int32_t getAxisAsInt() {
       return static_cast<int32_t>(getAxis());
     }
   }];
+}
+
+def TTC_GetBlockStart : TTC_Op<"get_block_start", [Pure]> {
+  let summary = "Get the starting block ID for this warp.";
+
+  let arguments = (ins);
+
+  let results = (outs I32:$blockId);
+
+  let description = [{
+    coming soon
+  }];
+
+  let assemblyFormat = "attr-dict";
+}
+
+def TTC_GetBlockEnd : TTC_Op<"get_block_end", [Pure]> {
+  let summary = "Get the ending block ID for this warp.";
+
+  let arguments = (ins);
+
+  let results = (outs I32:$blockId);
+
+  let description = [{
+    coming soon
+  }];
+
+  let assemblyFormat = "attr-dict";
 }
 
 def TTC_MaskedLoadOp : TTC_Op<"masked_load", [
