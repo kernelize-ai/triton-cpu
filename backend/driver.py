@@ -29,15 +29,16 @@ def is_macos():
 def external_openmp_path():
     return os.environ.get("TRITON_LOCAL_LIBOMP_PATH", "/opt/homebrew/opt/libomp/")
 
+
 @functools.lru_cache()
 def external_boost_path():
     return os.environ.get("TRITON_LOCAL_BOOST_PATH", "/opt/homebrew")
 
 
 dirname = os.path.dirname(os.path.realpath(__file__))
-include_dirs = [os.path.join(dirname, "include")
-                ] + [os.path.join(external_openmp_path(), "include") if is_macos() else []
-                ] + [os.path.join(external_boost_path(), "include")]
+include_dirs = [os.path.join(dirname, "include")] + [
+    os.path.join(external_openmp_path(), "include") if is_macos() else []
+] + [os.path.join(external_boost_path(), "include")]
 libdevice_dir = os.path.join(dirname, "lib")
 libraries = ["boost_fiber", "boost_context"]
 
