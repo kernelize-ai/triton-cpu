@@ -182,6 +182,14 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   if (numLaneToReduce == 1)
     return true;
 
+  auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
+  unsigned int numWarps =
+      mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
+  // Fallback to shuffleXOR (TODO: implement masked warpReduce if performance is
+  // better)
+  if (numLaneToReduce < numWarps)
+    return false;
+
   Operation *reduceOp = op.getSingleCombiner();
   if (!reduceOp)
     return false;
