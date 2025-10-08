@@ -230,6 +230,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     unsigned shared_memory_aligned_per_team = 0;
     if (shared_memory > 0) {{
         shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
+        // allocate scratch for reductions
+        shared_memory_aligned_per_team += 64 * num_warps;
         unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * max_threads;
         global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
         assert(global_smem);
@@ -240,12 +242,9 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
 
-    omp_set_dynamic(0);
-
     #pragma omp parallel num_threads(max_threads) proc_bind(close)
     {{
-        int worker_id = omp_get_thread_num();
-        const int team_id = worker_id;
+        const int team_id = omp_get_thread_num();
         const unsigned block_start = consecutive_blocks * team_id;
         int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
 
