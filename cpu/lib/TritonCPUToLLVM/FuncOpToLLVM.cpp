@@ -46,6 +46,7 @@ struct FuncOpSPMDParamConversion
     auto ctx = funcOp->getContext();
     auto sharedPtrTy =
         LLVM::LLVMPointerType::get(ctx, targetInfo.getSharedAddressSpace());
+    auto voidPtrTy = LLVM::LLVMPointerType::get(ctx);
 
     // 1. Modify the function type to add the new arguments.
     auto funcTy = funcOp.getFunctionType();
@@ -62,6 +63,7 @@ struct FuncOpSPMDParamConversion
     amendedInputTy.push_back(i32_ty);      // gridY
     amendedInputTy.push_back(i32_ty);      // gridZ
     amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
+    amendedInputTy.push_back(voidPtrTy);   // cpu barrier
 
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
@@ -85,14 +87,19 @@ struct FuncOpSPMDParamConversion
         funcOp.getLoc(), funcOp.getName(), amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
 
-    region.addArgument(i32_ty, loc);      // thread_id
-    region.addArgument(i32_ty, loc);      // x
-    region.addArgument(i32_ty, loc);      // y
-    region.addArgument(i32_ty, loc);      // z
-    region.addArgument(i32_ty, loc);      // gridX
-    region.addArgument(i32_ty, loc);      // gridY
-    region.addArgument(i32_ty, loc);      // gridZ
-    region.addArgument(sharedPtrTy, loc); // shared memory ptr
+    auto nameLoc = [&](const char *name) {
+      return NameLoc::get(rewriter.getStringAttr(name));
+    };
+
+    region.addArgument(i32_ty, nameLoc("thread_id"));
+    region.addArgument(i32_ty, nameLoc("x"));
+    region.addArgument(i32_ty, nameLoc("y"));
+    region.addArgument(i32_ty, nameLoc("z"));
+    region.addArgument(i32_ty, nameLoc("gridX"));
+    region.addArgument(i32_ty, nameLoc("gridY"));
+    region.addArgument(i32_ty, nameLoc("gridZ"));
+    region.addArgument(sharedPtrTy, nameLoc("shared_mem_ptr"));
+    region.addArgument(voidPtrTy, nameLoc("cpu_barrier"));
 
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());
@@ -135,7 +142,7 @@ struct FuncOpSPMDParamConversion
 
     // set the alignment on the shared memory pointer argument
     if (triton::isKernel(funcOp)) {
-      const int sharedMemoryPtrArgIndex = newFuncOp.getNumArguments() - 1;
+      const int sharedMemoryPtrArgIndex = newFuncOp.getNumArguments() - 2;
       assert(sharedMemoryPtrArgIndex >= 0 &&
              "expected at least one function argument");
       auto sharedMemoryPtrArg = newFuncOp.getArgument(sharedMemoryPtrArgIndex);

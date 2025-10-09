@@ -30,20 +30,25 @@ def external_openmp_path():
     return os.environ.get("TRITON_LOCAL_LIBOMP_PATH", "/opt/homebrew/opt/libomp/")
 
 
+@functools.lru_cache()
+def external_boost_path():
+    return os.environ.get("TRITON_LOCAL_BOOST_PATH", "/opt/homebrew")
+
+
 dirname = os.path.dirname(os.path.realpath(__file__))
-include_dirs = [os.path.join(dirname, "include")
-                ] + [os.path.join(external_openmp_path(), "include") if is_macos() else []]
+include_dirs = [os.path.join(dirname, "include")] + [
+    os.path.join(external_openmp_path(), "include") if is_macos() else []
+] + [os.path.join(external_boost_path(), "include")]
 libdevice_dir = os.path.join(dirname, "lib")
-libraries = []
+libraries = ["boost_fiber", "boost_context"]
 
 
 @functools.lru_cache()
 def system_ccflags():
-    ccflags = []
+    ccflags = ["-std=c++17"]
     if is_macos():
-        ccflags.extend(["-undefined", "dynamic_lookup", "-Xclang", "-fopenmp"])
-    else:
-        ccflags.extend(["-fopenmp"])
+        ccflags.extend(["-undefined", "dynamic_lookup", "-Xclang"])
+    ccflags.extend(["-fopenmp"])
     return ccflags
 
 
@@ -52,6 +57,7 @@ def library_dirs():
     lib_dirs = [_triton_C_dir]
     if is_macos():
         lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
+        lib_dirs.extend([os.path.join(external_boost_path(), "lib")])
     return lib_dirs
 
 
@@ -180,7 +186,7 @@ def make_launcher(constants, signature, shared_mem_size):
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
     # add thread ID, block args, and shared memory ptr
-    kernel_params.extend(["thread_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+    kernel_params.extend(["warp_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
     arg_types += ', '
     arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
 
@@ -188,15 +194,18 @@ def make_launcher(constants, signature, shared_mem_size):
     arg_types += ', int8_t*'
     kernel_params.append("shared_mem_ptr")
 
+    arg_types += ', void*'
+    kernel_params.append("cpu_barrier")
+
     src = f"""
 #include <stdbool.h>
 #include <Python.h>
 #include <omp.h>
+#include <boost/fiber/all.hpp>
 
 #include <stdalign.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
-
 typedef struct _GridCoordinate {{
     int x;
     int y;
@@ -213,44 +222,50 @@ static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, 
 
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
-
     const int ompMaxThreads = omp_get_max_threads();
-    const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
-
-    int num_teams = max_threads > num_warps ? max_threads / num_warps : 1;
+    const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
 
     // TODO: only add the plus barrier when we have a barrier
     alignas(64) unsigned char* global_smem = NULL;
     unsigned shared_memory_aligned_per_team = 0;
     if (shared_memory > 0) {{
-        unsigned shared_memory_aligned = (shared_memory + 63) & ~63u;
-        const unsigned warp_sync_smem_size = num_warps * 64 + 128; // 64 B per warp plus 128 bytes for the barrier
-        shared_memory_aligned_per_team = shared_memory_aligned + warp_sync_smem_size;
-        unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * num_teams;
-        global_smem = aligned_alloc(64, shared_memory_aligned_total);
+        shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
+        // allocate scratch for reductions
+        shared_memory_aligned_per_team += 64 * num_warps;
+        unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * max_threads;
+        global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
         assert(global_smem);
         memset(global_smem, 0, shared_memory_aligned_total);
     }}
 
-    unsigned consecutive_blocks = ceil((float)N / (num_teams));
+    unsigned consecutive_blocks = (N + max_threads - 1) / max_threads;
 
-    omp_set_dynamic(0);
+    boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
 
-
-    #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
+    #pragma omp parallel num_threads(max_threads) proc_bind(close)
     {{
-        int worker_id = omp_get_thread_num();
-        const int warp_id = worker_id % num_warps;
-        const int thread_id = warp_id;
-        const int team_id = worker_id / num_warps;
+        const int team_id = omp_get_thread_num();
         const unsigned block_start = consecutive_blocks * team_id;
-
         int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
-        for(unsigned i = block_start; i < run_end; i++) {{
-            GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
-            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+        std::vector<boost::fibers::fiber> fibers;
+        fibers.reserve(num_warps);
+
+        boost::fibers::barrier barrier(num_warps);
+        void *cpu_barrier = &barrier;
+
+        for (int warp_id = 0; warp_id < num_warps; warp_id++) {{
+            fibers.emplace_back([&, block_start, run_end, warp_id]() {{
+                for(int32_t i = block_start; i < run_end; i++) {{
+                    GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+                    (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+                }}
+            }});
+        }}
+
+        for (auto& fiber : fibers) {{
+            fiber.join();
         }}
     }}
 
@@ -391,8 +406,10 @@ class CPULauncher(object):
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
         src = make_launcher(constants, signature, metadata.shared)
+        os.environ["CC"] = "g++"
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
+        os.environ.pop("CC")
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):

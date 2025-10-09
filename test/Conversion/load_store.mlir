@@ -68,10 +68,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, "ttg.thr
     }) : (tensor<8xf32, #blocked4>) -> f32
     // MASKED-OP: ttc.masked_load {{.*}} -> f32
     // MASKED-OP: ttc.masked_store {{.*}} : (!llvm.ptr, f32, i1) -> ()
-    // MASKED-OP: @barrier
+    // MASKED-OP: @_cpu_barrier
 
     // LLVM-NOT: llvm.intr.masked
-    // LLVM: llvm.call @barrier
+    // LLVM: llvm.call @_cpu_barrier
     // LLVM: llvm.load {{.*}} {alignment = 4 : i64} : !llvm.ptr -> f32
     tt.return
   }

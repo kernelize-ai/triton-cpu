@@ -3,6 +3,8 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR}/)
 
 set(triton_cpu_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_subdirectory(utils)
+
 add_subdirectory(cpu)
 if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonCPU ${CMAKE_CURRENT_SOURCE_DIR}/triton_cpu.cc LINK_LIBS TritonCPUToLLVM)

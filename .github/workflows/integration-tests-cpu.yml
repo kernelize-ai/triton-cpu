@@ -24,8 +24,8 @@ jobs:
       PYTHON: "python3"
       CCACHE_COMPRESS: "true"
     steps:
-      - name: Install ccache
-        run: sudo apt-get update && sudo apt-get install -y ccache
+      - name: Install ccache and boost
+        run: sudo apt-get update && sudo apt-get install -y ccache libboost-fiber-dev
       - name: Checkout CPU Plugin
         uses: actions/checkout@v5
       - name: Fetch Triton upstream Commit Hash

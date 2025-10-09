@@ -61,7 +61,6 @@ public:
     assert(funcArgIdx < args.size() && "invalid SPMD program argument index");
     assert(args[funcArgIdx].getType().isInteger(32) &&
            "SPMD program argument must be i32");
-
     rewriter.replaceOp(blockIdOp, args[funcArgIdx]);
     return success();
   }
@@ -112,107 +111,22 @@ public:
                         ConversionPatternRewriter &rewriter) const {
     auto moduleOp =
         rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
-    constexpr StringLiteral kName = "barrier";
+    constexpr StringLiteral kName = "_cpu_barrier";
     if (auto f = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>(kName))
       return f;
 
     auto *context = rewriter.getContext();
 
     // void barrier(int* count, int* phase, int32_t num_workers)
-    auto funcTy =
-        LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(context),
-                                    {ptr_ty(context), ptr_ty(context), i32_ty},
-                                    /*vararg=*/false);
+    auto funcTy = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(context),
+                                              {ptr_ty(context)},
+                                              /*vararg=*/false);
 
     RewriterBase::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(moduleOp.getBody());
 
     auto func = rewriter.create<LLVM::LLVMFuncOp>(
-        moduleOp.getLoc(), kName, funcTy, LLVM::Linkage::Internal);
-    auto setBarrierPtrAttrs = [&](unsigned idx) {
-      func.setArgAttr(idx, "llvm.align",
-                      rewriter.getIntegerAttr(rewriter.getIntegerType(64),
-                                              targetInfo.CacheLineSizeBytes));
-      func.setArgAttr(idx, "llvm.nonnull", rewriter.getUnitAttr());
-      func.setArgAttr(idx, "llvm.nocapture", rewriter.getUnitAttr());
-      func.setArgAttr(idx, "llvm.noalias", rewriter.getUnitAttr());
-    };
-    setBarrierPtrAttrs(0);
-    setBarrierPtrAttrs(1);
-
-    func->setAttr("llvm.nounwind", rewriter.getUnitAttr());
-
-    Block *entryBlock = func.addEntryBlock(rewriter);
-    Block *lastBlock = new Block(), *waitBlock = new Block(),
-          *afterSpinBlock = new Block(), *exitBlock = new Block();
-    func.getBody().push_back(lastBlock);
-    func.getBody().push_back(waitBlock);
-    func.getBody().push_back(afterSpinBlock);
-    func.getBody().push_back(exitBlock);
-
-    // TODO: use TritonLLVMIRRewriter?
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    rewriter.setInsertionPointToEnd(entryBlock);
-
-    // get the current phase
-    Value phasePtr = func.getArgument(1);
-    LLVM::LoadOp crtPhase =
-        b.load(i32_ty, phasePtr, /*align=*/targetInfo.CacheLineSizeBytes);
-    crtPhase->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
-                                      context, LLVM::AtomicOrdering::acquire));
-
-    // atomically increment the count
-    Value countPtr = func.getArgument(0);
-    Value old = rewriter.create<LLVM::AtomicRMWOp>(
-        loc, LLVM::AtomicBinOp::add, countPtr, b.i32_val(1),
-        LLVM::AtomicOrdering::acq_rel);
-
-    // check to see if we are the last thread to hit the barrier
-    Value numWorkers = func.getArgument(2);
-    Value arrived = b.add(old, b.i32_val(1));
-    Value amLast = b.icmp_eq(arrived, numWorkers);
-    rewriter.create<cf::CondBranchOp>(loc, amLast, lastBlock, waitBlock);
-
-    // last block
-    {
-      rewriter.setInsertionPointToEnd(lastBlock);
-      // reset count
-      LLVM::StoreOp store = b.store(b.i32_val(0), countPtr,
-                                    /*align=*/targetInfo.CacheLineSizeBytes);
-      store->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
-                                     context, LLVM::AtomicOrdering::release));
-
-      // increment phase + release
-      Value next = b.add(crtPhase, b.i32_val(1));
-      rewriter.create<LLVM::AtomicRMWOp>(loc, LLVM::AtomicBinOp::xchg, phasePtr,
-                                         next, LLVM::AtomicOrdering::acq_rel);
-      rewriter.create<cf::BranchOp>(loc, exitBlock);
-    }
-
-    // spin block
-    {
-      rewriter.setInsertionPointToEnd(waitBlock);
-      // check to see if the phase changed
-      LLVM::LoadOp latest =
-          b.load(i32_ty, phasePtr, /*align=*/targetInfo.CacheLineSizeBytes);
-      latest->setAttr("ordering", LLVM::AtomicOrderingAttr::get(
-                                      context, LLVM::AtomicOrdering::acquire));
-      Value same = b.icmp_eq(latest, crtPhase);
-      rewriter.create<cf::CondBranchOp>(loc, same, waitBlock, afterSpinBlock);
-    }
-
-    // after spin block
-    {
-      rewriter.setInsertionPointToEnd(afterSpinBlock);
-      rewriter.create<cf::BranchOp>(loc, exitBlock);
-    }
-
-    // exit block
-    {
-      rewriter.setInsertionPointToEnd(exitBlock);
-      rewriter.create<LLVM::ReturnOp>(loc, ValueRange());
-    }
-
+        moduleOp.getLoc(), kName, funcTy, LLVM::Linkage::External);
     return func;
   }
 
@@ -222,35 +136,16 @@ public:
     // TODO: delete the barrier if num warps is 1
     auto barrierFunc = getOrCreateCpuBarrier(op.getLoc(), rewriter);
 
-    auto b = TritonLLVMOpBuilder(op.getLoc(), rewriter);
-
     auto moduleOp =
         rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
-    unsigned int numWarps =
-        mlir::cast<mlir::IntegerAttr>(moduleOp->getAttr("ttg.num-warps"))
-            .getInt();
-    Value numThreads = b.i32_val(numWarps);
 
     auto funcOp = op->getParentOfType<FunctionOpInterface>();
+    auto args = funcOp.getArguments();
+    auto funcArgIdx = args.size() + cpu::kCpuBarrierOffset;
+    assert(funcArgIdx >= 0 && "invalid SPMD program argument index");
 
-    unsigned int sharedMemSizeInBytes =
-        mlir::cast<mlir::IntegerAttr>(moduleOp->getAttr("ttg.shared")).getInt();
-    unsigned int sharedMemBarrierOffsetBytes =
-        sharedMemSizeInBytes +
-        numWarps * 64; // offset by scratch size for syncing between warps
-
-    // barrier shared memory allocation is implicit, so the ptrs we want are
-    // offVal and offVal + 64
-    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
-                                            targetInfo.getSharedAddressSpace());
-    auto smemPtr = LLVM::getStackPointer(rewriter, funcOp);
-    Value countPtr =
-        b.gep(ptrTy, i8_ty, smemPtr, b.i32_val(sharedMemBarrierOffsetBytes));
-    Value phasePtr = b.gep(ptrTy, i8_ty, smemPtr,
-                           b.i32_val(sharedMemBarrierOffsetBytes + 64));
-
-    SmallVector<Value> args{countPtr, phasePtr, numThreads};
-    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, barrierFunc, args);
+    SmallVector<Value> call_args{args[funcArgIdx]};
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, barrierFunc, call_args);
     return success();
   }
 
