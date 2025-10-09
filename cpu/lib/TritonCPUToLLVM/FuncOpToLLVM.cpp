@@ -142,7 +142,7 @@ struct FuncOpSPMDParamConversion
 
     // set the alignment on the shared memory pointer argument
     if (triton::isKernel(funcOp)) {
-      const int sharedMemoryPtrArgIndex = newFuncOp.getNumArguments() - 1;
+      const int sharedMemoryPtrArgIndex = newFuncOp.getNumArguments() - 2;
       assert(sharedMemoryPtrArgIndex >= 0 &&
              "expected at least one function argument");
       auto sharedMemoryPtrArg = newFuncOp.getArgument(sharedMemoryPtrArgIndex);

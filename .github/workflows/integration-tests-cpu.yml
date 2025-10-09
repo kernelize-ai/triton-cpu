@@ -106,7 +106,7 @@ jobs:
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
         run: |
-          CC=g++ python python/tutorials/01-vector-add.py
+          python python/tutorials/01-vector-add.py
       - name: Run interpreter tests
         working-directory: ./triton
         if: false

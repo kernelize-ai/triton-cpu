@@ -130,7 +130,7 @@ jobs:
         run: |
           source ~/.venv/bin/activate
           # MPLBackend disables matplotlib from popping up the graph and hanging
-          MPLBACKEND=Agg CC=g++ python python/tutorials/01-vector-add.py
+          MPLBACKEND=Agg python python/tutorials/01-vector-add.py
       - name: Run C++ unittests
         working-directory: ./triton
         run: |
