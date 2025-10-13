@@ -11,12 +11,12 @@ namespace mlir {
 namespace triton {
 namespace cpu {
 
-// kernel func calling convention is (kernel_args..., thread_id, block_args...,
-// shared_memory_ptr)
+// kernel func calling convention is (kernel_args..., launch_sz, launch_id,
+// shared_memory_ptr, cpu_barrier)
 constexpr int kCpuBarrierOffset = -1;
 constexpr int kSharedMemoryOffset = -2;
-constexpr int kProgramIdArgsOffset = -6 + kSharedMemoryOffset;
-constexpr int kThreadIdOffset = -1 + kProgramIdArgsOffset;
+constexpr int kLaunchIdOffset = -3;
+constexpr int kLaunchSzOffset = -4;
 
 // Returns a Value for the format string, which you can reuse. Writes the byte
 // count for the string to |formatStrByteCount| if not null.
