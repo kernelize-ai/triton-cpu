@@ -185,17 +185,10 @@ def make_launcher(constants, signature, shared_mem_size):
     # TODO: float_storage_decls?
     kernel_params = [f"arg{i}" for i, ty in signature.items() if ty != "constexpr"]
 
-    # add thread ID, block args, and shared memory ptr
-    kernel_params.extend(["warp_id", "coord.x", "coord.y", "coord.z", "gridX", "gridY", "gridZ"])
+    # add launch size, launch id, shared memory ptr, and cpu barrier
+    kernel_params.extend(["launch_sz", "launch_id", "shared_mem_ptr", "cpu_barrier"])
     arg_types += ', '
-    arg_types += ', '.join(["int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t", "int32_t"])
-
-    # the kernel always has shared mem arguments
-    arg_types += ', int8_t*'
-    kernel_params.append("shared_mem_ptr")
-
-    arg_types += ', void*'
-    kernel_params.append("cpu_barrier")
+    arg_types += ', '.join(["int32_t*", "int32_t*", "int8_t*", "void*"])
 
     src = f"""
 #include <stdbool.h>
@@ -206,19 +199,6 @@ def make_launcher(constants, signature, shared_mem_size):
 #include <stdalign.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
-typedef struct _GridCoordinate {{
-    int x;
-    int y;
-    int z;
-}} GridCoordinate;
-
-static inline GridCoordinate get_grid_coordinate(int idx, int gridX, int gridY, int gridZ) {{
-    GridCoordinate coord;
-    coord.z = idx / (gridX * gridY);
-    coord.y = (idx % (gridX * gridY)) / gridX;
-    coord.x = (idx % gridX);
-    return coord;
-}}
 
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
@@ -240,6 +220,8 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     unsigned consecutive_blocks = (N + max_threads - 1) / max_threads;
 
+    int32_t launch_sz[] = {{gridX, gridY, gridZ, num_warps, 1, 1}};
+
     boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
 
     #pragma omp parallel num_threads(max_threads) proc_bind(close)
@@ -258,7 +240,12 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         for (int warp_id = 0; warp_id < num_warps; warp_id++) {{
             fibers.emplace_back([&, block_start, run_end, warp_id]() {{
                 for(int32_t i = block_start; i < run_end; i++) {{
-                    GridCoordinate coord = get_grid_coordinate(i, gridX, gridY, gridZ);
+                    int32_t launch_id[] = {{
+                        (i % gridX),
+                        (i % (gridX * gridY)) / gridX,
+                        i / (gridX * gridY),
+                        warp_id, 0, 0
+                    }};
                     (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
                 }}
             }});
