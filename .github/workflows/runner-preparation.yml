@@ -91,9 +91,9 @@ jobs:
         if: env.enable_integration == 'true'
         run: |
           if [ x"${{ github.repository }}" == x"kernelize-ai/triton-cpu" ]; then
-            echo 'matrix-CPU=["ubuntu-latest"]' >> $GITHUB_OUTPUT
-            echo 'matrix-MACOS=["macos-latest"]' >> $GITHUB_OUTPUT
+            echo 'matrix-CPU=[["ubuntu-latest"]]' >> $GITHUB_OUTPUT
+            echo 'matrix-MACOS=[["macos-latest"]]' >> $GITHUB_OUTPUT
           else
-            echo 'matrix-CPU=["ubuntu-latest"]' >> $GITHUB_OUTPUT
-            echo 'matrix-MACOS=["macos-latest"]' >> $GITHUB_OUTPUT
+            echo 'matrix-CPU=[["ubuntu-latest"]]' >> $GITHUB_OUTPUT
+            echo 'matrix-MACOS=[["macos-latest"]]' >> $GITHUB_OUTPUT
           fi
