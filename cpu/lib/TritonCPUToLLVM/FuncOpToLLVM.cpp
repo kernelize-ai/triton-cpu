@@ -41,6 +41,10 @@ struct FuncOpSPMDParamConversion
 
   triton::FuncOp amendFuncOp(triton::FuncOp funcOp,
                              ConversionPatternRewriter &rewriter) const {
+    bool isKernel = triton::isKernel(funcOp);
+    if (!isKernel)
+      return funcOp; // TODO: pass shared memory to child functions
+
     // Push back SPMD program args
     //  - launch size: &{ grid_x, grid_y, grid_z, block_x, block_y, block_z }
     //  - launch id: &{ grid_x, grid_y, grid_z, block_x, block_y, block_z }
@@ -52,13 +56,19 @@ struct FuncOpSPMDParamConversion
         LLVM::LLVMPointerType::get(ctx, targetInfo.getSharedAddressSpace());
     auto voidPtrTy = LLVM::LLVMPointerType::get(ctx);
 
-    // 1. Modify the function type to add the new arguments.
     auto funcTy = funcOp.getFunctionType();
-    auto amendedInputTy = llvm::to_vector<4>(funcTy.getInputs());
-    bool isKernel = triton::isKernel(funcOp);
-    if (!isKernel)
-      return funcOp; // TODO: pass shared memory to child functions
+    SmallVector<Type> amendedInputTy;
+    // 0. Make all user arguments void*
+    for (auto paramTy : funcTy.getInputs()) {
+      if (isa<triton::PointerType>(paramTy)) {
+        amendedInputTy.push_back(paramTy);
+      } else {
+        amendedInputTy.push_back(voidPtrTy);
+      }
+    }
+    int userArgSize = amendedInputTy.size();
 
+    // 1. Append launch arguments to the function type.
     amendedInputTy.push_back(voidPtrTy);   // launch sz
     amendedInputTy.push_back(voidPtrTy);   // launch id
     amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
@@ -66,39 +76,74 @@ struct FuncOpSPMDParamConversion
 
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
-
-    // 2. Modify the argument attributes to add the new argument.
+    // 2. Modify the user argument attributes to add noalias
     SmallVector<NamedAttribute> amendedAttrs;
     filterFuncAttributes(funcOp, /*filterArgAttrs=*/true, amendedAttrs);
-    int sharedMemoryOffset = amendedInputTy.size() + cpu::kSharedMemoryOffset;
-    if (auto argAttrs = funcOp.getAllArgAttrs()) {
-      llvm::SmallVector<mlir::Attribute> amendedArgAttrs(argAttrs.begin(),
-                                                         argAttrs.end());
-      while (amendedArgAttrs.size() < amendedInputTy.size()) {
-        SmallVector<NamedAttribute> attrs{
-            rewriter.getNamedAttr("llvm.nonnull", rewriter.getUnitAttr())};
-        // add alignment attribute for the shared memory pointer
-        if (amendedArgAttrs.size() == sharedMemoryOffset) {
-          attrs.push_back(rewriter.getNamedAttr(
-              "llvm.align",
-              rewriter.getIntegerAttr(rewriter.getIntegerType(64), 64)));
-        } else {
-          attrs.push_back(
-              rewriter.getNamedAttr("llvm.noalias", rewriter.getUnitAttr()));
-        }
-        amendedArgAttrs.emplace_back(DictionaryAttr::get(ctx, attrs));
+    int sharedMemoryOffset = userArgSize + cpu::kSharedMemoryOffset;
+    llvm::SmallVector<mlir::Attribute> amendedArgAttrs;
+    SmallVector<mlir::DictionaryAttr> userArgAttrs;
+    funcOp.getAllArgAttrs(userArgAttrs);
+    for (auto attr : userArgAttrs) {
+      SmallVector<NamedAttribute> newArgAttrs{attr.begin(), attr.end()};
+      if (!attr.contains("llvm.noalias")) {
+        newArgAttrs.push_back(rewriter.getNamedAttr(
+          "llvm.noalias", rewriter.getUnitAttr()));
+        newArgAttrs.push_back(rewriter.getNamedAttr(
+          "llvm.nonnull", rewriter.getUnitAttr()));
       }
-      amendedAttrs.push_back(
-          rewriter.getNamedAttr(funcOp.getArgAttrsAttrName(),
-                                rewriter.getArrayAttr(amendedArgAttrs)));
+      amendedArgAttrs.push_back(DictionaryAttr::get(ctx, newArgAttrs));
+    }
+    while (amendedArgAttrs.size() < userArgSize) {
+      amendedArgAttrs.push_back(DictionaryAttr::get(ctx, {
+          rewriter.getNamedAttr("llvm.nonnull", rewriter.getUnitAttr()),
+          rewriter.getNamedAttr("llvm.noalias", rewriter.getUnitAttr())
+      }));
     }
 
-    // 3. Add the new arguments to the region
-    auto amendedFuncOp =
-        triton::FuncOp::create(rewriter, funcOp.getLoc(), funcOp.getName(),
-                               amendedFuncTy, amendedAttrs);
+    // Add attributes for the launch arguments
+    while (amendedArgAttrs.size() < amendedInputTy.size()) {
+      SmallVector<NamedAttribute> attrs{
+          rewriter.getNamedAttr("llvm.nonnull", rewriter.getUnitAttr())};
+      // add alignment attribute for the shared memory pointer
+      if (amendedArgAttrs.size() == sharedMemoryOffset) {
+        attrs.push_back(rewriter.getNamedAttr(
+            "llvm.align",
+            rewriter.getIntegerAttr(rewriter.getIntegerType(64), 64)));
+      } else {
+        attrs.push_back(
+            rewriter.getNamedAttr("llvm.noalias", rewriter.getUnitAttr()));
+      }
+      amendedArgAttrs.emplace_back(DictionaryAttr::get(ctx, attrs));
+    }
+    amendedAttrs.push_back(
+        rewriter.getNamedAttr(funcOp.getArgAttrsAttrName(),
+                              rewriter.getArrayAttr(amendedArgAttrs)));
+    // 3. Create the amended function op
+    auto amendedFuncOp = rewriter.create<triton::FuncOp>(
+        funcOp.getLoc(), funcOp.getName(), amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
 
+    // 4. Update the user params to be pointers
+    OpBuilder argBuilder(region);
+    for (int i = 0; i < userArgSize; i++) {
+      auto arg = region.getArgument(i);
+      auto argType = arg.getType();
+      if (!isa<triton::PointerType>(argType)) {
+        auto argUsers = arg.getUsers();
+        arg.setType(voidPtrTy);
+        auto b = TritonLLVMOpBuilder(arg.getLoc(), argBuilder);
+        auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+        auto idxTy = typeConverter->convertType(argType);
+        auto gep = b.gep(ptrTy, idxTy, arg, b.i32_val(0));
+        auto newArgValue = b.load(idxTy, gep).getResult();
+        auto newArgConvValue = argBuilder.create<UnrealizedConversionCastOp>(arg.getLoc(), argType, newArgValue).getResult(0);
+        for (auto user : argUsers) {
+          user->replaceUsesOfWith(arg, newArgConvValue);
+        }
+      }
+    }
+
+    // 5. Add the launch arguments to the region
     auto nameLoc = [&](const char *name) {
       return NameLoc::get(rewriter.getStringAttr(name));
     };
