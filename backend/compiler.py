@@ -22,6 +22,7 @@ from types import ModuleType
 class CPUOptions:
     num_warps: int = int(os.environ.get('TRITON_CPU_NUM_WARPS', 1))
     num_ctas: int = 1
+    num_stages: int = 1
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
     arch: str = None
