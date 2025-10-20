@@ -13,6 +13,13 @@ using namespace mlir::triton;
 
 namespace {
 
+// launch_id = [blockId, threadId, 0, 0]
+namespace LaunchIDOffsets {
+constexpr int kBlockId = 0;
+constexpr int kThreadId = 1;
+
+} // namespace LaunchIDOffsets
+
 class ThreadIdOpToLLVM : public ConvertOpToLLVMPattern<mlir::gpu::ThreadIdOp> {
 
 public:
@@ -34,16 +41,63 @@ public:
     auto funcArgIdx = args.size() + cpu::kLaunchIdOffset;
     assert(funcArgIdx >= 0 && "Launch id argument must be a pointer");
     auto b = TritonLLVMOpBuilder(threadIdOp.getLoc(), rewriter);
-    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
     auto idxTy = typeConverter->convertType(threadIdOp.getType());
-    auto axisVal = b.i32_val((int)threadIdDim + 3);
-    auto gep = b.gep(ptrTy, idxTy, args[funcArgIdx], axisVal);
+    auto axisVal =
+        b.i32_val(static_cast<int>(threadIdDim) + LaunchIDOffsets::kThreadId);
+    auto gep =
+        b.gep(ptr_ty(rewriter.getContext()), idxTy, args[funcArgIdx], axisVal);
     auto threadId = b.load(idxTy, gep);
     rewriter.replaceOp(threadIdOp, threadId);
 
     return success();
   }
 };
+
+Value getNumPrograms(Location loc, ConversionPatternRewriter &rewriter,
+                     mlir::FunctionOpInterface funcOp, int axis) {
+  assert(funcOp);
+  assert(axis >= 0 && axis < 3);
+
+  auto args = funcOp.getArguments();
+  auto funcArgIdx = args.size() + cpu::kLaunchSzOffset;
+  assert(funcArgIdx >= 0 && "Launch sz argument out of range");
+
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto axisVal = b.i32_val(axis);
+  auto gep =
+      b.gep(ptr_ty(rewriter.getContext()), i32_ty, args[funcArgIdx], axisVal);
+  return b.load(i32_ty, gep);
+}
+
+// x = blockIdx % gridX
+Value convertBlockIndexToDimX(ConversionPatternRewriter &rewriter,
+                              Value blockIdx, FunctionOpInterface funcOp) {
+  auto loc = blockIdx.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  return rewriter.create<LLVM::SRemOp>(
+      loc, blockIdx, getNumPrograms(loc, rewriter, funcOp, 0));
+}
+
+// y = (idx % (gridX * gridY)) / gridX
+Value convertBlockIndexToDimY(ConversionPatternRewriter &rewriter,
+                              Value blockIdx, FunctionOpInterface funcOp) {
+  auto loc = blockIdx.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  Value gridXY = b.mul(getNumPrograms(loc, rewriter, funcOp, 0),
+                       getNumPrograms(loc, rewriter, funcOp, 1));
+  Value idxModXY = rewriter.create<LLVM::SRemOp>(loc, blockIdx, gridXY);
+  return b.sdiv(idxModXY, getNumPrograms(loc, rewriter, funcOp, 0));
+}
+
+// z = idx / (gridX * gridY)
+Value convertBlockIndexToDimZ(ConversionPatternRewriter &rewriter,
+                              Value blockIdx, FunctionOpInterface funcOp) {
+  auto loc = blockIdx.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  Value gridXY = b.mul(getNumPrograms(loc, rewriter, funcOp, 0),
+                       getNumPrograms(loc, rewriter, funcOp, 1));
+  return b.sdiv(blockIdx, gridXY);
+}
 
 class BlockIdOpToLLVM
     : public ConvertOpToLLVMPattern<mlir::triton::cpu::BlockIdOp> {
@@ -60,16 +114,34 @@ public:
     assert(funcOp && "expected LLVM::FuncOp as a parent of GetProgramIdOp");
     auto args = funcOp.getArguments();
 
-    auto programIdDim = blockIdOp.getAxisAsInt();
-    assert(programIdDim >= 0 && programIdDim < 3);
-
     auto funcArgIdx = args.size() + cpu::kLaunchIdOffset;
     assert(funcArgIdx >= 0 && "Launch id argument must be a pointer");
-    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
     auto idxTy = typeConverter->convertType(blockIdOp.getType());
-    auto gep = b.gep(ptrTy, idxTy, args[funcArgIdx], b.i32_val(programIdDim));
+    // the linear grid id is the first elememt in the launch params pointer
+    auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, args[funcArgIdx],
+                     b.i32_val(LaunchIDOffsets::kBlockId));
     auto blockId = b.load(idxTy, gep);
-    rewriter.replaceOp(blockIdOp, blockId);
+
+    auto programIdDim = blockIdOp.getAxis();
+    switch (programIdDim) {
+    case ProgramIDDim::X: {
+      rewriter.replaceOp(blockIdOp,
+                         convertBlockIndexToDimX(rewriter, blockId, funcOp));
+      break;
+    }
+    case ProgramIDDim::Y: {
+      rewriter.replaceOp(blockIdOp,
+                         convertBlockIndexToDimY(rewriter, blockId, funcOp));
+      break;
+    }
+    case ProgramIDDim::Z: {
+      rewriter.replaceOp(blockIdOp,
+                         convertBlockIndexToDimZ(rewriter, blockId, funcOp));
+      break;
+    }
+    default:
+      assert(false && "invalid program id dimension");
+    }
     return success();
   }
 };
@@ -88,15 +160,9 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     auto funcOp = op->getParentOfType<FunctionOpInterface>();
     assert(funcOp && "expected LLVM::FuncOp as a parent of GetNumProgramsOp");
-    auto args = funcOp.getArguments();
-    auto funcArgIdx = args.size() + cpu::kLaunchSzOffset;
-    assert(funcArgIdx >= 0 && "Launch sz argument must be a pointer");
-    auto b = TritonLLVMOpBuilder(op.getLoc(), rewriter);
-    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
-    auto idxTy = typeConverter->convertType(op.getType());
-    auto axisVal = b.i32_val(op.getAxisAsInt());
-    auto gep = b.gep(ptrTy, idxTy, args[funcArgIdx], axisVal);
-    auto numPrograms = b.load(idxTy, gep);
+
+    auto numPrograms =
+        getNumPrograms(op.getLoc(), rewriter, funcOp, op.getAxisAsInt());
     rewriter.replaceOp(op, numPrograms);
     return success();
   }
