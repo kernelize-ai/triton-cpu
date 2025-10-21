@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from typing import Dict
 from types import ModuleType
 
+def get_min_dot_size(target: GPUTarget):
+    # We fallback to use FMA and cast arguments if certain configurations is
+    # not supported natively by matrix core units.
+    return lambda lhs_type, rhs_type: (1, 1, 1)
 
 @dataclass(frozen=True)
 class CPUOptions:
@@ -30,6 +34,7 @@ class CPUOptions:
     backend_name: str = 'cpu'
     sanitize_overflow: bool = True
     instrumentation_mode: str = ""
+    default_dot_input_precision: str = "ieee"
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
     matrix_instr_nonkdim: int = 16
     warp_size: int = 1
@@ -77,7 +82,7 @@ class CPUBackend(BaseBackend):
         )
 
     def get_codegen_implementation(self, options):
-        return dict()
+        return {"min_dot_size": get_min_dot_size(self.target)}
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         # TODO
