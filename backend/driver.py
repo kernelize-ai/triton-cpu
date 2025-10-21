@@ -6,6 +6,7 @@ import tempfile
 import time
 import platform
 import importlib
+import nexus
 from pathlib import Path
 
 from triton.runtime.build import compile_module_from_src
@@ -62,6 +63,8 @@ def library_dirs():
 
 
 class CpuUtils(object):
+    runtime = nexus.get_runtime("cpu")
+    device = runtime.get_device(0)
 
     def __new__(cls):
         if not hasattr(cls, 'instance'):
@@ -77,12 +80,10 @@ class CpuUtils(object):
             f.flush()
             os.fsync(f.fileno())
             os.stat(f.name)
-            import ctypes
-            lib = ctypes.cdll.LoadLibrary(f.name)
-            fn_ptr = getattr(lib, name)
-            fn_ptr_as_void_p = ctypes.cast(fn_ptr, ctypes.c_void_p).value
+            lib = self.device.load_library(f.name)
+            kernel = lib.get_kernel(name)
             # TODO: properly handle num registers / max number threads
-            return (lib, fn_ptr_as_void_p, 1, 0, 2**12)
+            return (lib, kernel, 1, shared_mem, 2**12)
 
     def get_device_properties(self, *args):
         return {
@@ -383,21 +384,50 @@ PyMODINIT_FUNC PyInit___triton_launcher(void) {{
 
 
 class CPULauncher(object):
+    runtime = nexus.get_runtime("cpu")
+    device = runtime.get_device(0)
 
     def __init__(self, src, metadata):
         constants = src.constants if hasattr(src, "constants") else dict()
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
-        src = make_launcher(constants, signature, metadata.shared)
-        os.environ["CC"] = "g++"
-        mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
-        os.environ.pop("CC")
-        self.launch = mod.launch
+        #src = make_launcher(constants, signature, metadata.shared)
+        #os.environ["CC"] = "g++"
+        #mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
+        #                              include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
+        #os.environ.pop("CC")
+
+        #self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
-        self.launch(gridX, gridY, gridZ, stream, function, *args)
+        #print(f"launching kernel {function} with args {args}")
+        # &gridX, &gridY, &gridZ,
+        # &_stream, &_function,
+        # &kernel_metadata, &launch_metadata,
+        # &launch_enter_hook, &launch_exit_hook{args_list}))
+        kernel_metadata = args[0]
+        num_warps = kernel_metadata[0]
+        # num_ctas = kernel_metadata[1] # should be 1
+        shared_memory = kernel_metadata[2]
+        # clusterDimX = kernel_metadata[3] # should be 1
+        # clusterDimY = kernel_metadata[4] # should be 1
+        # clusterDimZ = kernel_metadata[5] # should be 1
+        launch_metadata = args[1]
+        launch_enter_hook = args[2]
+        launch_exit_hook = args[3]
+
+        #self.device.run_command(function, args[4:], [gridX, gridY, gridZ], [num_warps, 1, 1], shared_memory)
+        #schedule = self.device.create_schedule()
+        #command = schedule.create_command(function, args[4:])
+        #command.finalize([gridX, gridY, gridZ], [num_warps, 1, 1], shared_memory)
+        #del schedule
+        if launch_enter_hook is not None:
+            launch_enter_hook(launch_metadata)
+        #schedule.run()
+        if launch_exit_hook is not None:
+            launch_exit_hook(launch_metadata)
+        #self.launch(gridX, gridY, gridZ, stream, function, *args)
 
 
 class CPUDeviceInterface:
@@ -456,11 +486,13 @@ class CPUDeviceInterface:
 
 
 class CPUDriver(DriverBase):
+    runtime = nexus.get_runtime("cpu")
+    device = runtime.get_device(0)
 
     @staticmethod
     def is_active():
         try:
-            return True
+            return CPUDriver.device
         except ImportError:
             return False
 
