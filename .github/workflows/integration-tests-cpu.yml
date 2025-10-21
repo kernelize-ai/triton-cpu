@@ -108,6 +108,10 @@ jobs:
         working-directory: ./triton
         run: |
           python python/tutorials/01-vector-add.py
+      - name: Run gluon tutorials
+        working-directory: ${GITHUB_WORKSPACE}
+        run: |
+          python python/tutorials/gluon/01-intro.py
       - name: Run interpreter tests
         working-directory: ./triton
         if: false
