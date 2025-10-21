@@ -48,6 +48,9 @@ class CPUBackend(BaseBackend):
     def supports_target(target: GPUTarget):
         return target.backend == "cpu"
 
+    def get_target_name(self, options) -> str:
+        return "cpu"
+
     def __init__(self, target: GPUTarget) -> None:
         super().__init__(target)
         self.binary_ext = "so"
@@ -131,6 +134,22 @@ class CPUBackend(BaseBackend):
 
         return mod
 
+    def gluon_to_ttgir(self, src, metadata, options):
+        mod = src
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+
+        passes.gluon.add_inliner(pm)
+        passes.gluon.add_resolve_auto_encodings(pm)
+        passes.gluon.add_canonicalizer(pm)
+        passes.common.add_sccp(pm)
+        passes.ttir.add_loop_aware_cse(pm)
+        passes.gluon.add_canonicalizer(pm)
+        passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+
+        pm.run(mod, 'gluon_to_ttgir')
+        return mod
+
     @staticmethod
     def make_llir(src, metadata, options):
         mod = src
@@ -203,7 +222,7 @@ class CPUBackend(BaseBackend):
             stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
             stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options)
         elif language == Language.GLUON:
-            raise NotImplementedError("Gluon language support is not implemented for CPU backend")
+            stages["ttgir"] = lambda src, metadata: self.gluon_to_ttgir(src, metadata, options)
         stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options)
         stages["asm"] = lambda src, metadata: self.make_asm(src, metadata, options)
         stages["so"] = lambda src, metadata: self.make_library(src, metadata, options)
