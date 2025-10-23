@@ -83,10 +83,10 @@ Value convertBlockIndexToDimY(ConversionPatternRewriter &rewriter,
                               Value blockIdx, FunctionOpInterface funcOp) {
   auto loc = blockIdx.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  Value gridXY = b.mul(getNumPrograms(loc, rewriter, funcOp, 0),
-                       getNumPrograms(loc, rewriter, funcOp, 1));
+  Value gridX = getNumPrograms(loc, rewriter, funcOp, 0);
+  Value gridXY = b.mul(gridX, getNumPrograms(loc, rewriter, funcOp, 1));
   Value idxModXY = rewriter.create<LLVM::SRemOp>(loc, blockIdx, gridXY);
-  return b.sdiv(idxModXY, getNumPrograms(loc, rewriter, funcOp, 0));
+  return b.sdiv(idxModXY, gridX);
 }
 
 // z = idx / (gridX * gridY)
@@ -117,7 +117,7 @@ public:
     auto funcArgIdx = args.size() + cpu::kLaunchIdOffset;
     assert(funcArgIdx >= 0 && "Launch id argument must be a pointer");
     auto idxTy = typeConverter->convertType(blockIdOp.getType());
-    // the linear grid id is the first elememt in the launch params pointer
+    // the linear grid id is the first element in the launch params pointer
     auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, args[funcArgIdx],
                      b.i32_val(LaunchIDOffsets::kBlockId));
     auto blockId = b.load(idxTy, gep);
