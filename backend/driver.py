@@ -241,10 +241,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
             fibers.emplace_back([&, block_start, run_end, warp_id]() {{
                 for(int32_t i = block_start; i < run_end; i++) {{
                     int32_t launch_id[] = {{
-                        (i % gridX),
-                        (i % (gridX * gridY)) / gridX,
-                        i / (gridX * gridY),
-                        warp_id, 0, 0
+                        i, warp_id, 0, 0
                     }};
                     (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
                 }}
