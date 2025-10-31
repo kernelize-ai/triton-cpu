@@ -129,7 +129,7 @@ struct CoalescePass : public impl::TritonCPUCoalesceBase<CoalescePass> {
     llvm::SmallSetVector<Operation *, 32> memAccessesSameOrder;
     memAccessesSameOrder.insert(op);
     if (ptr.getDefiningOp()) {
-      for (Operation *use : mlir::multiRootGetSlice(op)) {
+      for (Operation *use : mlir::getSlice(op)) {
         Value val = getMemAccessPtr(use);
         if (!val || !matchesShape(val) || memAccessesSameOrder.contains(use))
           continue;
