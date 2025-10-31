@@ -17,8 +17,8 @@ struct FDivOpConversion
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
 
-    return {rewriter.create<LLVM::FDivOp>(loc, elemTy, operands[0][0],
-                                          operands[0][1])};
+    return {LLVM::FDivOp::create(rewriter, loc, elemTy, operands[0][0],
+                                 operands[0][1])};
   }
 };
 

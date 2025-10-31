@@ -74,8 +74,8 @@ Value convertBlockIndexToDimX(ConversionPatternRewriter &rewriter,
                               Value blockIdx, FunctionOpInterface funcOp) {
   auto loc = blockIdx.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  return rewriter.create<LLVM::SRemOp>(
-      loc, blockIdx, getNumPrograms(loc, rewriter, funcOp, 0));
+  return LLVM::SRemOp::create(rewriter, loc, blockIdx,
+                              getNumPrograms(loc, rewriter, funcOp, 0));
 }
 
 // y = (idx % (gridX * gridY)) / gridX
@@ -85,7 +85,7 @@ Value convertBlockIndexToDimY(ConversionPatternRewriter &rewriter,
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   Value gridX = getNumPrograms(loc, rewriter, funcOp, 0);
   Value gridXY = b.mul(gridX, getNumPrograms(loc, rewriter, funcOp, 1));
-  Value idxModXY = rewriter.create<LLVM::SRemOp>(loc, blockIdx, gridXY);
+  Value idxModXY = LLVM::SRemOp::create(rewriter, loc, blockIdx, gridXY);
   return b.sdiv(idxModXY, gridX);
 }
 
@@ -196,8 +196,8 @@ public:
     RewriterBase::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(moduleOp.getBody());
 
-    auto func = rewriter.create<LLVM::LLVMFuncOp>(
-        moduleOp.getLoc(), kName, funcTy, LLVM::Linkage::External);
+    auto func = LLVM::LLVMFuncOp::create(rewriter, moduleOp.getLoc(), kName,
+                                         funcTy, LLVM::Linkage::External);
     return func;
   }
 

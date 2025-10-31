@@ -28,8 +28,8 @@ LLVM::LLVMFuncOp getPrintfDeclaration(RewriterBase &rewriter) {
   RewriterBase::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToStart(moduleOp.getBody());
 
-  return rewriter.create<LLVM::LLVMFuncOp>(UnknownLoc::get(context), funcName,
-                                           funcType);
+  return LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(context), funcName,
+                                  funcType);
 }
 
 } // namespace
@@ -37,8 +37,8 @@ LLVM::LLVMFuncOp getPrintfDeclaration(RewriterBase &rewriter) {
 namespace mlir::triton::cpu {
 
 Value TargetInfo::getClusterCTAId(RewriterBase &rewriter, Location loc) const {
-  return rewriter.create<mlir::LLVM::ConstantOp>(
-      loc, rewriter.getI32Type(),
+  return mlir::LLVM::ConstantOp::create(
+      rewriter, loc, rewriter.getI32Type(),
       rewriter.getIntegerAttr(rewriter.getI32Type(), 0));
 }
 
@@ -85,8 +85,8 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
   if (ctaId.has_value())
     llvm::report_fatal_error(
         "CPU does not support cross-CTA shared memory transfers");
-  Value falseVal = rewriter.create<LLVM::ConstantOp>(
-      loc, elemTy, rewriter.getZeroAttr(elemTy));
+  Value falseVal = LLVM::ConstantOp::create(rewriter, loc, elemTy,
+                                            rewriter.getZeroAttr(elemTy));
   auto load =
       mlir::triton::cpu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal);
   return load;
@@ -171,7 +171,7 @@ Value TargetInfo::permute(RewriterBase &rewriter, Location loc, Value a,
 
 Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
                             ModuleOp moduleOp, ProgramIDDim axis) const {
-  return rewriter.create<mlir::triton::cpu::BlockIdOp>(loc, axis);
+  return mlir::triton::cpu::BlockIdOp::create(rewriter, loc, axis);
 }
 
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
@@ -242,7 +242,7 @@ void TargetInfo::printf(RewriterBase &rewriter, Value formatStrStart,
   SmallVector<Value, 16> newArgs;
   newArgs.push_back(formatStrStart);
   newArgs.append(args.begin(), args.end());
-  rewriter.create<LLVM::CallOp>(loc, funcOp, newArgs);
+  LLVM::CallOp::create(rewriter, loc, funcOp, newArgs);
 }
 
 void TargetInfo::printf(RewriterBase &rewriter, StringRef msg, ValueRange args,
