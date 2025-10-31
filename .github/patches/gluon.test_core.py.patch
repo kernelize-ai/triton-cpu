@@ -1,0 +1,13 @@
+diff --git a/python/test/gluon/test_core.py b/python/test/gluon/test_core.py
+index 0584d1465..36799fddf 100644
+--- a/python/test/gluon/test_core.py
++++ b/python/test/gluon/test_core.py
+@@ -61,7 +61,7 @@ def copy_kernel(Out, In, numel, XBLOCK: ttgl.constexpr, layout: ttgl.constexpr):
+ ])
+ @pytest.mark.parametrize("XBLOCK", [128, 256, 512, 1024, 2048])
+ def test_copy_kernel(layout, XBLOCK):
+-    inp = torch.randn(XBLOCK * 4 - 7, device="cuda")
++    inp = torch.randn(XBLOCK * 4 - 7, device="cpu")
+     out = torch.empty_like(inp)
+ 
+     copy_kernel[(4, )](out, inp, inp.numel(), XBLOCK, layout, num_warps=layout.warps_per_cta[0])

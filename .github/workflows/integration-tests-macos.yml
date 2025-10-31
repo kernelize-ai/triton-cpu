@@ -136,6 +136,11 @@ jobs:
           source ~/.venv/bin/activate
           # MPLBackend disables matplotlib from popping up the graph and hanging
           MPLBACKEND=Agg python python/tutorials/01-vector-add.py
+      - name: Run gluon tests
+        working-directory: ./triton
+        run: |
+          source ~/.venv/bin/activate
+          TRITON_CPU_NUM_WARPS=4 python -m pytest --device "cpu" python/test/gluon/test_core.py -k "test_copy_kernel"
       - name: Run C++ unittests
         working-directory: ./triton
         run: |
