@@ -28,18 +28,17 @@ Value llPrintf(StringRef msg, ValueRange args, ArrayRef<bool> isSigned,
 
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
              Value pred, Value falseVal, std::optional<unsigned> alignment) {
-  return rewriter
-      .create<cpu::MaskedLoadOp>(
-          loc, elemTy, ptr, pred, falseVal,
-          alignment ? IntegerAttr::get(rewriter.getI32Type(), *alignment)
-                    : IntegerAttr())
+  return cpu::MaskedLoadOp::create(
+             rewriter, loc, elemTy, ptr, pred, falseVal,
+             alignment ? IntegerAttr::get(rewriter.getI32Type(), *alignment)
+                       : IntegerAttr())
       .getResult();
 }
 
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
              Value pred, std::optional<unsigned> alignment) {
-  rewriter.create<cpu::MaskedStoreOp>(
-      loc, ptr, val, pred,
+  cpu::MaskedStoreOp::create(
+      rewriter, loc, ptr, val, pred,
       alignment ? IntegerAttr::get(rewriter.getI32Type(), *alignment)
                 : IntegerAttr());
 }

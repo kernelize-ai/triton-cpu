@@ -40,8 +40,8 @@ public:
       LDBG("ptrType = " << ptr.getType() << ", maskType = " << mask.getType()
                         << ", otherType = " << other.getType()
                         << ", alignment = " << alignment);
-      Value loadVal = rewriter.create<LLVM::MaskedLoadOp>(
-          loc, elemTy, ptr, mask, other, alignment);
+      Value loadVal = LLVM::MaskedLoadOp::create(rewriter, loc, elemTy, ptr,
+                                                 mask, other, alignment);
       rewriter.replaceOp(loadOp, {loadVal});
       return success();
     }
@@ -57,7 +57,7 @@ public:
       LDBG("Constant mask (" << mask << "), direct load type " << elemTy
                              << " with alignment " << alignment);
       Value loadVal =
-          rewriter.create<LLVM::LoadOp>(loc, elemTy, ptr, alignment);
+          LLVM::LoadOp::create(rewriter, loc, elemTy, ptr, alignment);
       rewriter.replaceOp(loadOp, loadVal);
       return success();
     }
@@ -72,11 +72,11 @@ public:
     Block *trueBlock = rewriter.createBlock(afterLoad);
 
     rewriter.setInsertionPointToEnd(currentBlock);
-    rewriter.create<LLVM::CondBrOp>(loc, mask, trueBlock, ValueRange{},
-                                    afterLoad, ValueRange{other});
+    LLVM::CondBrOp::create(rewriter, loc, mask, trueBlock, ValueRange{},
+                           afterLoad, ValueRange{other});
     rewriter.setInsertionPointToStart(trueBlock);
-    auto load = rewriter.create<LLVM::LoadOp>(loc, elemTy, ptr, alignment);
-    rewriter.create<LLVM::BrOp>(loc, ValueRange{load.getResult()}, afterLoad);
+    auto load = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr, alignment);
+    LLVM::BrOp::create(rewriter, loc, ValueRange{load.getResult()}, afterLoad);
 
     Value loadResult = afterLoad->getArgument(0);
     rewriter.replaceOp(loadOp, {loadResult});
@@ -124,7 +124,7 @@ public:
     if (matchPattern(mask, m_One())) {
       LDBG("Constant mask (" << mask << "), direct load type " << elemTy
                              << " with alignment " << alignment);
-      rewriter.create<LLVM::StoreOp>(loc, val, ptr, alignment);
+      LLVM::StoreOp::create(rewriter, loc, val, ptr, alignment);
     } else {
       LDBG("Predicated store with alignment " << alignment);
       // default to predicated load with conditional branching
@@ -133,10 +133,10 @@ public:
           rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
       Block *trueBlock = rewriter.createBlock(afterStore);
       rewriter.setInsertionPointToEnd(currentBlock);
-      rewriter.create<LLVM::CondBrOp>(loc, mask, trueBlock, afterStore);
+      LLVM::CondBrOp::create(rewriter, loc, mask, trueBlock, afterStore);
       rewriter.setInsertionPointToStart(trueBlock);
-      rewriter.create<LLVM::StoreOp>(loc, val, ptr, alignment);
-      rewriter.create<LLVM::BrOp>(loc, afterStore);
+      LLVM::StoreOp::create(rewriter, loc, val, ptr, alignment);
+      LLVM::BrOp::create(rewriter, loc, afterStore);
       rewriter.setInsertionPointToStart(afterStore);
     }
 

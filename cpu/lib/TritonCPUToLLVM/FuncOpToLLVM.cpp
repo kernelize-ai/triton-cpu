@@ -94,8 +94,9 @@ struct FuncOpSPMDParamConversion
     }
 
     // 3. Add the new arguments to the region
-    auto amendedFuncOp = rewriter.create<triton::FuncOp>(
-        funcOp.getLoc(), funcOp.getName(), amendedFuncTy, amendedAttrs);
+    auto amendedFuncOp =
+        triton::FuncOp::create(rewriter, funcOp.getLoc(), funcOp.getName(),
+                               amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
 
     auto nameLoc = [&](const char *name) {
