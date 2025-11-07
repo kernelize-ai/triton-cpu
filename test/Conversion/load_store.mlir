@@ -6,9 +6,6 @@
 #blocked = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [1], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
   tt.func public @kernel(%arg0: !tt.ptr<i32> {tt.divisibility = 8 : i32}, %arg1: !tt.ptr<i32> {tt.divisibility = 8 : i32}) attributes {noinline = false} {
-    %c0 = arith.constant 0 : i32
-    // COM: required for print
-    %block_id = ttc.current_block %c0 : i32
     %0 = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32, #blocked>
     %1 = tt.splat %arg0 : !tt.ptr<i32> -> tensor<64x!tt.ptr<i32>, #blocked>
     %2 = tt.addptr %1, %0 : tensor<64x!tt.ptr<i32>, #blocked>, tensor<64xi32, #blocked>
