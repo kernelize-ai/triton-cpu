@@ -240,7 +240,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         for (int warp_id = 0; warp_id < num_warps; warp_id++) {{
             fibers.emplace_back([&, block_start, run_end, warp_id]() {{
                 int32_t launch_id[] = {{
-                    (int32_t)block_start, (int32_t)block_start, warp_id, 0, 0
+                    (int32_t)block_start, (int32_t)run_end, warp_id, 0, 0
                 }};
                 (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
             }});
