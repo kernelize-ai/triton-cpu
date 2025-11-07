@@ -19,7 +19,6 @@ namespace cpu {
 
 namespace {
 
-#if 1
 static LogicalResult addPidSentinel(triton::FuncOp funcOp,
                                     unsigned blockIdxArgPos) {
   Block &entry = funcOp.getBody().front();
@@ -30,30 +29,6 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
       funcOp.getLoc(), blockIdx.getType(), blockIdx);
   return success();
 }
-#else
-// Replace `tt.get_program_id x` with `ttc.current_ x, block_index_offset`
-// TODO: remove ctx
-static LogicalResult replacePidOp(triton::FuncOp funcOp,
-                                  unsigned blockIdxArgPos, MLIRContext *ctx) {
-  Block &entry = funcOp.getBody().front();
-  Value blockIdx = entry.getArgument(blockIdxArgPos);
-
-  auto programIdOps = llvm::to_vector(funcOp.getOps<triton::GetProgramIdOp>());
-  if (programIdOps.size() == 0)
-    return success(); // nothing to do
-  assert(programIdOps.size() == 1 &&
-         "expected exactly one tt.get_program_id op");
-  triton::GetProgramIdOp programIdOp = programIdOps.front();
-
-  OpBuilder b(programIdOp->getNextNode());
-  Value blockIdOp = b.create<mlir::triton::cpu::BlockIdOp>(
-      programIdOp.getLoc(), programIdOp.getType(), programIdOp.getAxis(),
-      blockIdx);
-  programIdOp.getResult().replaceAllUsesWith(blockIdOp);
-  programIdOp->erase();
-  return success();
-}
-#endif
 
 static constexpr StringLiteral kAttrSymName("sym_name");
 static constexpr StringLiteral kAttrFuncType("function_type");
@@ -228,13 +203,8 @@ struct AddKernelStreamPass
     // 2. Rewrite the tt.get_program_id operation to add the block index offset
     // to the return value (for the impl kernel)
     unsigned blockIdxOffset = implFunc.getNumArguments() - 1;
-#if 1
     if (failed(addPidSentinel(implFunc, blockIdxOffset)))
       return signalPassFailure();
-#else
-    if (failed(replacePidOp(implFunc, blockIdxOffset, ctx)))
-      return signalPassFailure();
-#endif
 
     // 3. Add the wrapper function calling kernel_impl in a loop over
     // block_start to block_end offsets (kernel function parameters)
