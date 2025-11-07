@@ -13,7 +13,7 @@ using namespace mlir::triton;
 
 namespace {
 
-// launch_id = [blockId, threadId, 0, 0]
+// launch_id = [blockStart, blockEnd, threadId, 0, 0]
 namespace LaunchIDOffsets {
 constexpr int kBlockStart = 0;
 constexpr int kBlockEnd = 1;
@@ -336,5 +336,6 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
       typeConverter, LaunchIDOffsets::kBlockStart, benefit);
   patterns.add<BlockIndexOpConversion<mlir::triton::cpu::BlockEndOp>>(
       typeConverter, LaunchIDOffsets::kBlockEnd, benefit);
-  patterns.add<CurrentBlockConversion>(typeConverter, benefit);
+  patterns.add<CurrentBlockConversion>(
+      typeConverter, PatternBenefit(benefit.getBenefit() - 1));
 }
