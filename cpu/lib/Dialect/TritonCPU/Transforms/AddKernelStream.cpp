@@ -144,16 +144,8 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
 
   Value bEnd = wb.create<triton::cpu::BlockEndOp>(wrap.getLoc(), i32Ty);
   Value bStart = wb.create<triton::cpu::BlockStartOp>(wrap.getLoc(), i32Ty);
-
-  Value bStartIdx =
-      wb.create<arith::IndexCastOp>(wrap.getLoc(), wb.getIndexType(), bStart);
-  Value bEndIdx =
-      wb.create<arith::IndexCastOp>(wrap.getLoc(), wb.getIndexType(), bEnd);
-
   Value bStep = wb.create<arith::ConstantOp>(wrap.getLoc(), i32Ty,
                                              wb.getIntegerAttr(i32Ty, 1));
-  Value bStepIdx = wb.create<arith::ConstantIndexOp>(
-      wrap.getLoc(), 1); // TODO: should we parameterize this too?
 
   scf::ForOp forOp =
       wb.create<scf::ForOp>(wrap.getLoc(), bStart, bEnd, bStep, ValueRange{});

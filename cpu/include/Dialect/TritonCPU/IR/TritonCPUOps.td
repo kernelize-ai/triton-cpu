@@ -43,7 +43,7 @@ def TTC_CurrentBlockOp : TTC_Op<"current_block", [SameOperandsAndResultType]> {
   let summary = "The current block ID for this warp.";
 
   let description = [{
-    Get the current block ID.
+    Get the current block ID within the loop over blocks for this persistent kernel.
   }];
 
   let arguments = (ins AnyType:$input);
@@ -63,7 +63,7 @@ def TTC_BlockStartOp : TTC_Op<"block_start", [Pure]> {
   let results = (outs I32:$blockId);
 
   let description = [{
-    coming soon
+    Get the starting block ID (typically retrieved from a function argument).
   }];
 
   let assemblyFormat = "attr-dict";
@@ -77,7 +77,7 @@ def TTC_BlockEndOp : TTC_Op<"block_end", [Pure]> {
   let results = (outs I32:$blockId);
 
   let description = [{
-    coming soon
+    Get the ending block ID (typically retrieved from a function argument).
   }];
 
   let assemblyFormat = "attr-dict";
