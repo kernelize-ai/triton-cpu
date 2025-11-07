@@ -135,34 +135,44 @@ public:
     auto b = TritonLLVMOpBuilder(blockIdOp.getLoc(), rewriter);
     auto funcOp = blockIdOp->getParentOfType<FunctionOpInterface>();
     assert(funcOp && "expected LLVM::FuncOp as a parent of GetProgramIdOp");
-    auto args = funcOp.getArguments();
+    auto arg =
+        funcOp.getArgument(funcOp.getArguments().size() + cpu::kLaunchIdOffset);
+    assert(isa<LLVM::LLVMPointerType>(arg.getType()) &&
+           "Launch id argument must be a pointer");
 
-    auto funcArgIdx = args.size() + cpu::kLaunchIdOffset;
-    assert(funcArgIdx >= 0 && "Launch id argument must be a pointer");
-
-    // find the input block id op using CurrentBlockOp
-    auto funcOp_ = cast<LLVM::LLVMFuncOp>(funcOp);
-    auto currentBlockIdOps =
-        llvm::to_vector(funcOp_.getOps<cpu::CurrentBlockOp>());
-    assert(currentBlockIdOps.size() == 1 &&
-           "expected exactly one CurrentBlockOp");
-    Value currentBlockId = currentBlockIdOps[0].getResult();
+    auto currentBlockId = [&]() -> Value {
+      auto llvmFunc = cast<LLVM::LLVMFuncOp>(funcOp);
+      auto currentBlockIdOps =
+          llvm::to_vector(llvmFunc.getOps<cpu::CurrentBlockOp>());
+      if (currentBlockIdOps.empty()) {
+        // grab the block start argument and assume block end is 1
+        auto b = TritonLLVMOpBuilder(blockIdOp.getLoc(), rewriter);
+        auto idxTy = this->getTypeConverter()->convertType(blockIdOp.getType());
+        auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, arg,
+                         b.i32_val(LaunchIDOffsets::kBlockStart));
+        return b.load(idxTy, gep);
+      } else {
+        assert(currentBlockIdOps.size() <= 1 &&
+               "expected at most one CurrentBlockOp");
+        return currentBlockIdOps[0].getResult();
+      }
+    };
 
     auto programIdDim = blockIdOp.getAxis();
     switch (programIdDim) {
     case ProgramIDDim::X: {
-      rewriter.replaceOp(
-          blockIdOp, convertBlockIndexToDimX(rewriter, currentBlockId, funcOp));
+      rewriter.replaceOp(blockIdOp, convertBlockIndexToDimX(
+                                        rewriter, currentBlockId(), funcOp));
       break;
     }
     case ProgramIDDim::Y: {
-      rewriter.replaceOp(
-          blockIdOp, convertBlockIndexToDimY(rewriter, currentBlockId, funcOp));
+      rewriter.replaceOp(blockIdOp, convertBlockIndexToDimY(
+                                        rewriter, currentBlockId(), funcOp));
       break;
     }
     case ProgramIDDim::Z: {
-      rewriter.replaceOp(
-          blockIdOp, convertBlockIndexToDimZ(rewriter, currentBlockId, funcOp));
+      rewriter.replaceOp(blockIdOp, convertBlockIndexToDimZ(
+                                        rewriter, currentBlockId(), funcOp));
       break;
     }
     default:

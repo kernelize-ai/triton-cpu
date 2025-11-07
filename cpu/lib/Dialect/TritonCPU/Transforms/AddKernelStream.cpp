@@ -60,6 +60,9 @@ static SmallVector<DictionaryAttr> getArgAttrArray(Operation *op) {
   if (auto arr = op->getAttrOfType<ArrayAttr>(kAttrArgAttrs)) {
     for (Attribute a : arr)
       v.push_back(a ? cast<DictionaryAttr>(a) : DictionaryAttr());
+  } else {
+    unsigned numArgs = cast<triton::FuncOp>(op).getNumArguments();
+    v.resize(numArgs, DictionaryAttr());
   }
   return v;
 }
