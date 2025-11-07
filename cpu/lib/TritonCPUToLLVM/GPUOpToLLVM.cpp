@@ -139,32 +139,30 @@ public:
 
     auto funcArgIdx = args.size() + cpu::kLaunchIdOffset;
     assert(funcArgIdx >= 0 && "Launch id argument must be a pointer");
-#if 0
-    auto idxTy = typeConverter->convertType(blockIdOp.getType());
-    // the linear grid id is the first element in the launch params pointer
-    auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, args[funcArgIdx],
-                     b.i32_val(LaunchIDOffsets::kBlockId));
-    auto blockId = b.load(idxTy, gep);
-#endif
+
+    // find the input block id op using CurrentBlockOp
+    auto funcOp_ = cast<LLVM::LLVMFuncOp>(funcOp);
+    auto currentBlockIdOps =
+        llvm::to_vector(funcOp_.getOps<cpu::CurrentBlockOp>());
+    assert(currentBlockIdOps.size() == 1 &&
+           "expected exactly one CurrentBlockOp");
+    Value currentBlockId = currentBlockIdOps[0].getResult();
 
     auto programIdDim = blockIdOp.getAxis();
     switch (programIdDim) {
     case ProgramIDDim::X: {
-      rewriter.replaceOp(blockIdOp,
-                         convertBlockIndexToDimX(
-                             rewriter, blockIdOp.getLinearBlockId(), funcOp));
+      rewriter.replaceOp(
+          blockIdOp, convertBlockIndexToDimX(rewriter, currentBlockId, funcOp));
       break;
     }
     case ProgramIDDim::Y: {
-      rewriter.replaceOp(blockIdOp,
-                         convertBlockIndexToDimY(
-                             rewriter, blockIdOp.getLinearBlockId(), funcOp));
+      rewriter.replaceOp(
+          blockIdOp, convertBlockIndexToDimY(rewriter, currentBlockId, funcOp));
       break;
     }
     case ProgramIDDim::Z: {
-      rewriter.replaceOp(blockIdOp,
-                         convertBlockIndexToDimZ(
-                             rewriter, blockIdOp.getLinearBlockId(), funcOp));
+      rewriter.replaceOp(
+          blockIdOp, convertBlockIndexToDimZ(rewriter, currentBlockId, funcOp));
       break;
     }
     default:
@@ -300,6 +298,19 @@ private:
   const int funcArgIndexOffset;
 };
 
+struct CurrentBlockConversion
+    : public ConvertOpToLLVMPattern<cpu::CurrentBlockOp> {
+  CurrentBlockConversion(LLVMTypeConverter &converter, PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit) {}
+
+  LogicalResult
+  matchAndRewrite(cpu::CurrentBlockOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, op.getInput());
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
@@ -311,8 +322,9 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
   patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
   patterns.add<GpuLocalBarrierOpToLLVM>(typeConverter, benefit);
-  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockStart>>(
+  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::BlockStartOp>>(
       typeConverter, LaunchIDOffsets::kBlockStart, benefit);
-  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::GetBlockEnd>>(
+  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::BlockEndOp>>(
       typeConverter, LaunchIDOffsets::kBlockEnd, benefit);
+  patterns.add<CurrentBlockConversion>(typeConverter, benefit);
 }

@@ -171,12 +171,7 @@ Value TargetInfo::permute(RewriterBase &rewriter, Location loc, Value a,
 
 Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
                             ModuleOp moduleOp, ProgramIDDim axis) const {
-  // TODO: this isn't going to be right because the block id offset is
-  // undefined. is this actually used? maybe we can get this from an existing
-  // BlockIdOp in the module?
-
-  Value undef = rewriter.create<LLVM::UndefOp>(loc, rewriter.getI32Type());
-  return mlir::triton::cpu::BlockIdOp::create(rewriter, loc, axis, undef);
+  return mlir::triton::cpu::BlockIdOp::create(rewriter, loc, axis);
 }
 
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
