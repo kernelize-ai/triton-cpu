@@ -153,6 +153,9 @@ class CPUBackend(BaseBackend):
         passes.gluon.add_canonicalizer(pm)
         passes.common.add_sccp(pm)
         passes.ttir.add_loop_aware_cse(pm)
+        cpu.passes.ttgpuir.add_kernel_stream(pm)
+        passes.common.add_inliner(pm)
+
         passes.gluon.add_canonicalizer(pm)
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
 
