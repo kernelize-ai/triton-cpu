@@ -107,6 +107,7 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
         passes.common.add_cse(pm)
+        passes.ttir.add_triton_licm(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
         pm.run(mod, 'make_ttir')
@@ -131,7 +132,7 @@ class CPUBackend(BaseBackend):
         cpu.passes.ttgpuir.add_kernel_stream(pm)
         passes.common.add_inliner(pm)
 
-        passes.common.add_canonicalizer(pm)
+        passes.common.add_canonicalizer(pm)  # can we remove?
         passes.ttir.add_loop_aware_cse(pm)
         passes.ttgpuir.add_fuse_nested_loops(pm)
 
@@ -176,13 +177,15 @@ class CPUBackend(BaseBackend):
         cpu.passes.ttcpuir.add_to_llvmir(pm)
         cpu.passes.ttcpuir.add_masked_ops_to_llvm(pm)
         cpu.passes.ttcpuir.add_shared_memory_global_conversion(pm)
-        passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
+        passes.common.add_canonicalizer(pm)
 
         passes.convert.add_cf_to_llvmir(pm)
         passes.convert.add_arith_to_llvmir(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
+        passes.common.add_licm(pm)
+        passes.common.add_sccp(pm)
         passes.common.add_symbol_dce(pm)
         pm.run(mod, 'make_llir')
 
