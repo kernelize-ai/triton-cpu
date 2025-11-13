@@ -164,7 +164,28 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
     triton::CallOp::create(fb, wrap.getLoc(), impl.getSymName(), TypeRange{},
                            callArgs);
   }
+#if 1
+  BoolAttr falseAttr = BoolAttr::get(ctx, false);
+  BoolAttr trueAttr = BoolAttr::get(ctx, true);
+  IntegerAttr countAttr = IntegerAttr::get(IntegerType::get(ctx, 32), 4);
+  // BoolAttr fullUnrollAttr = BoolAttr::get(ctx, false);
+  auto loopUnrollAttr = LLVM::LoopUnrollAttr::get(
+      forOp.getContext(), /*disable=*/falseAttr, /*count=*/countAttr,
+      /*runtime-disable=*/falseAttr,
+      /*full=*/falseAttr, {}, {}, {});
 
+  LLVM::LoopAnnotationAttr loopAnnotAttr = LLVM::LoopAnnotationAttr::get(
+      forOp.getContext(), {}, /*vectorize=*/{}, {}, /*unroll*/ loopUnrollAttr,
+      /*unroll_and_jam*/ {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});
+
+  forOp->setAttr("loop_annotation", loopAnnotAttr);
+#endif
+#if 0
+        auto loopUnrollAttr = LLVM::LoopUnrollAttr::get(forOp.getContext(), );
+  loopUnrollAttr->setCount(wb.getI32IntegerAttr(4));
+  forOp->setAttr(
+      loopUnrollAttr);
+#endif
   triton::ReturnOp::create(wb, wrap.getLoc());
   return wrap;
 }
