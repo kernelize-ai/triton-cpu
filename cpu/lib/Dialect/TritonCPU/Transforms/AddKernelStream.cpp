@@ -4,6 +4,8 @@
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "llvm/Support/Debug.h"
 
+#include "triton/Dialect/Triton/Transforms/LoopPeeling.h"
+
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 #define DEBUG_TYPE "tritoncpu-add-kernel-stream"
@@ -163,7 +165,7 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
     fb.create<triton::CallOp>(wrap.getLoc(), impl.getSymName(), TypeRange{},
                               callArgs);
   }
-#if 1
+#if 0
   BoolAttr falseAttr = BoolAttr::get(ctx, false);
   BoolAttr trueAttr = BoolAttr::get(ctx, true);
   IntegerAttr countAttr = IntegerAttr::get(IntegerType::get(ctx, 32), 4);
@@ -179,12 +181,9 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
 
   forOp->setAttr("loop_annotation", loopAnnotAttr);
 #endif
-#if 0
-        auto loopUnrollAttr = LLVM::LoopUnrollAttr::get(forOp.getContext(), );
-  loopUnrollAttr->setCount(wb.getI32IntegerAttr(4));
-  forOp->setAttr(
-      loopUnrollAttr);
-#endif
+
+  mlir::triton::peelLoopEpilogue(forOp);
+
   wb.create<triton::ReturnOp>(wrap.getLoc());
   return wrap;
 }
