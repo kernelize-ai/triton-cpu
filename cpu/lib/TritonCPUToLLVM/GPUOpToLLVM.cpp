@@ -13,10 +13,11 @@ using namespace mlir::triton;
 
 namespace {
 
-// launch_id = [blockId, threadId, 0, 0]
+// launch_id = [blockStart, blockEnd, threadId, 0, 0]
 namespace LaunchIDOffsets {
-constexpr int kBlockId = 0;
-constexpr int kThreadId = 1;
+constexpr int kBlockStart = 0;
+constexpr int kBlockEnd = 1;
+constexpr int kThreadId = 2;
 
 } // namespace LaunchIDOffsets
 
@@ -112,31 +113,44 @@ public:
     auto b = TritonLLVMOpBuilder(blockIdOp.getLoc(), rewriter);
     auto funcOp = blockIdOp->getParentOfType<FunctionOpInterface>();
     assert(funcOp && "expected LLVM::FuncOp as a parent of GetProgramIdOp");
-    auto args = funcOp.getArguments();
+    auto arg =
+        funcOp.getArgument(funcOp.getArguments().size() + cpu::kLaunchIdOffset);
+    assert(isa<LLVM::LLVMPointerType>(arg.getType()) &&
+           "Launch id argument must be a pointer");
 
-    auto funcArgIdx = args.size() + cpu::kLaunchIdOffset;
-    assert(funcArgIdx >= 0 && "Launch id argument must be a pointer");
-    auto idxTy = typeConverter->convertType(blockIdOp.getType());
-    // the linear grid id is the first element in the launch params pointer
-    auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, args[funcArgIdx],
-                     b.i32_val(LaunchIDOffsets::kBlockId));
-    auto blockId = b.load(idxTy, gep);
+    auto currentBlockId = [&]() -> Value {
+      auto llvmFunc = cast<LLVM::LLVMFuncOp>(funcOp);
+      auto currentBlockIdOps =
+          llvm::to_vector(llvmFunc.getOps<cpu::CurrentBlockOp>());
+      if (currentBlockIdOps.empty()) {
+        // grab the block start argument and assume block end is 1
+        auto b = TritonLLVMOpBuilder(blockIdOp.getLoc(), rewriter);
+        auto idxTy = this->getTypeConverter()->convertType(blockIdOp.getType());
+        auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, arg,
+                         b.i32_val(LaunchIDOffsets::kBlockStart));
+        return b.load(idxTy, gep);
+      } else {
+        assert(currentBlockIdOps.size() <= 1 &&
+               "expected at most one CurrentBlockOp");
+        return currentBlockIdOps[0].getResult();
+      }
+    };
 
     auto programIdDim = blockIdOp.getAxis();
     switch (programIdDim) {
     case ProgramIDDim::X: {
-      rewriter.replaceOp(blockIdOp,
-                         convertBlockIndexToDimX(rewriter, blockId, funcOp));
+      rewriter.replaceOp(blockIdOp, convertBlockIndexToDimX(
+                                        rewriter, currentBlockId(), funcOp));
       break;
     }
     case ProgramIDDim::Y: {
-      rewriter.replaceOp(blockIdOp,
-                         convertBlockIndexToDimY(rewriter, blockId, funcOp));
+      rewriter.replaceOp(blockIdOp, convertBlockIndexToDimY(
+                                        rewriter, currentBlockId(), funcOp));
       break;
     }
     case ProgramIDDim::Z: {
-      rewriter.replaceOp(blockIdOp,
-                         convertBlockIndexToDimZ(rewriter, blockId, funcOp));
+      rewriter.replaceOp(blockIdOp, convertBlockIndexToDimZ(
+                                        rewriter, currentBlockId(), funcOp));
       break;
     }
     default:
@@ -240,6 +254,51 @@ public:
   }
 };
 
+template <typename OpTy>
+class BlockIndexOpConversion : public ConvertOpToLLVMPattern<OpTy> {
+public:
+  explicit BlockIndexOpConversion(LLVMTypeConverter &typeConverter,
+                                  const int funcArgIndexOffset,
+                                  PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<OpTy>(typeConverter, benefit),
+        funcArgIndexOffset(funcArgIndexOffset) {}
+
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto funcOp = op->template getParentOfType<FunctionOpInterface>();
+    assert(funcOp && "expected LLVM::FuncOp as a parent of GetProgramIdOp");
+    auto arg =
+        funcOp.getArgument(funcOp.getArguments().size() + cpu::kLaunchIdOffset);
+
+    auto b = TritonLLVMOpBuilder(op.getLoc(), rewriter);
+    auto idxTy = this->getTypeConverter()->convertType(op.getType());
+    auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, arg,
+                     b.i32_val(funcArgIndexOffset));
+    Value blockIndex = b.load(idxTy, gep);
+
+    rewriter.replaceOp(op, blockIndex);
+
+    return success();
+  }
+
+private:
+  const int funcArgIndexOffset;
+};
+
+struct CurrentBlockConversion
+    : public ConvertOpToLLVMPattern<cpu::CurrentBlockOp> {
+  CurrentBlockConversion(LLVMTypeConverter &converter, PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit) {}
+
+  LogicalResult
+  matchAndRewrite(cpu::CurrentBlockOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, op.getInput());
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
@@ -250,4 +309,10 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
   patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
   patterns.add<GpuLocalBarrierOpToLLVM>(typeConverter, benefit);
+  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::BlockStartOp>>(
+      typeConverter, LaunchIDOffsets::kBlockStart, benefit);
+  patterns.add<BlockIndexOpConversion<mlir::triton::cpu::BlockEndOp>>(
+      typeConverter, LaunchIDOffsets::kBlockEnd, benefit);
+  patterns.add<CurrentBlockConversion>(
+      typeConverter, PatternBenefit(benefit.getBenefit() - 1));
 }
