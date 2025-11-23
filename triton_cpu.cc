@@ -44,6 +44,9 @@ void init_triton_cpu_passes_ttgpuir(py::module &&m) {
   m.def("add_kernel_stream", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createMakePersistentKernelPass());
   });
+  m.def("add_loop_peeling", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createLoopPeelingPass());
+  });
 }
 
 void init_triton_cpu(py::module &&m) {

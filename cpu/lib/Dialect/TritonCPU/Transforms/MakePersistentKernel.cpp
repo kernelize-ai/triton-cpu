@@ -186,6 +186,7 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
   mlir::triton::peelLoopEpilogue(forOp);
 
   triton::ReturnOp::create(wb, wrap.getLoc());
+
   return wrap;
 }
 
