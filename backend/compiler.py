@@ -131,6 +131,7 @@ class CPUBackend(BaseBackend):
         # loop optimization + pipelining
         cpu.passes.ttgpuir.add_kernel_stream(pm)
         passes.common.add_inliner(pm)
+        cpu.passes.ttgpuir.add_loop_peeling(pm)
 
         passes.common.add_canonicalizer(pm)  # can we remove?
         passes.ttir.add_loop_aware_cse(pm)

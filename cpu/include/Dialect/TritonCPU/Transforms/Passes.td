@@ -31,4 +31,17 @@ def AddKernelStreamPass : Pass<"add-kernel-stream", "mlir::ModuleOp"> {
     ];
 }
 
+def LoopPeelingPass : Pass<"loop-peeling", "mlir::ModuleOp"> {
+    let summary = "Peel loops to handle boundary conditions.";
+
+    let description = [{
+        coming soon
+    }];
+
+    let dependentDialects = [
+      "mlir::scf::SCFDialect",
+      "mlir::triton::TritonDialect"
+    ];
+}
+
 #endif

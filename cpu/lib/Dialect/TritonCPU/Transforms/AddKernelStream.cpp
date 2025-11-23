@@ -182,8 +182,6 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
   forOp->setAttr("loop_annotation", loopAnnotAttr);
 #endif
 
-  mlir::triton::peelLoopEpilogue(forOp);
-
   wb.create<triton::ReturnOp>(wrap.getLoc());
   return wrap;
 }
