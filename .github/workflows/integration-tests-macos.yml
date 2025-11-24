@@ -21,7 +21,7 @@ jobs:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
     steps:
       - name: Checkout CPU Plugin
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
         with:
@@ -33,7 +33,7 @@ jobs:
           echo "Found Triton commit hash: ${TRITON_COMMIT_HASH}"
           echo "triton_commit_hash=${TRITON_COMMIT_HASH}" >> ${GITHUB_ENV}
       - name: Checkout Triton upstream repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: triton-lang/triton
           path: triton
