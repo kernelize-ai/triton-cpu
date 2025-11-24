@@ -69,7 +69,7 @@ struct LoadStoreConversionBase {
     mlir::Attribute zeroAttr = builder.getZeroAttr(vecTy.getElementType());
     auto denseValue =
         DenseElementsAttr::get(cast<mlir::ShapedType>(vecTy), zeroAttr);
-    Value zeroVal = builder.create<LLVM::ConstantOp>(loc, vecTy, denseValue);
+    Value zeroVal = LLVM::ConstantOp::create(builder, loc, vecTy, denseValue);
     return zeroVal;
   }
 
@@ -81,7 +81,7 @@ struct LoadStoreConversionBase {
 
     auto denseValue =
         DenseElementsAttr::get(cast<mlir::ShapedType>(vecTy), oneAttr);
-    Value trueVal = builder.create<LLVM::ConstantOp>(loc, vecTy, denseValue);
+    Value trueVal = LLVM::ConstantOp::create(builder, loc, vecTy, denseValue);
     return trueVal;
   }
 
