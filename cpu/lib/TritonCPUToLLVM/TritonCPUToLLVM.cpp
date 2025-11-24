@@ -171,8 +171,8 @@ private:
     //
     auto arrayTy = LLVM::LLVMArrayType::get(elemTy, 0);
     unsigned cpuAddrSpace = 0u;
-    auto global = b.create<LLVM::GlobalOp>(
-        loc, arrayTy, /*isConstant=*/false, LLVM::Linkage::External,
+    auto global = LLVM::GlobalOp::create(
+        b, loc, arrayTy, /*isConstant=*/false, LLVM::Linkage::External,
         "global_smem", /*value=*/Attribute(), /*alignment=*/64, cpuAddrSpace);
   }
 };
