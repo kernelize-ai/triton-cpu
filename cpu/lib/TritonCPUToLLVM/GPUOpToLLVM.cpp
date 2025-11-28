@@ -62,14 +62,15 @@ public:
   LogicalResult
   matchAndRewrite(triton::gpu::WarpIdOp warpIdOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto b = TritonLLVMOpBuilder(warpIdOp.getLoc(), rewriter);
     const int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
     if (threadsPerWarp == 1) {
-      rewriter.replaceOp(warpIdOp, b.i32_val(0));
+      auto threadIdOp = mlir::gpu::ThreadIdOp::create(
+          rewriter, warpIdOp.getLoc(), mlir::gpu::Dimension::x);
+      rewriter.replaceOp(warpIdOp, threadIdOp);
       return success();
     }
 
-    warpIdOp.emitError("unsupported number of warps");
+    warpIdOp.emitError("unsupported number threads per warp");
     return failure();
   }
 };
