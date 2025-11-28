@@ -36,6 +36,7 @@ public:
     auto threadIdDim = threadIdOp.getDimension();
     if (threadIdDim != mlir::gpu::Dimension::x) {
       threadIdOp.emitError("unsupported thread id dimension");
+      return failure();
     }
 
     auto funcArgIdx = args.size() + cpu::kLaunchIdOffset;
@@ -50,6 +51,26 @@ public:
     rewriter.replaceOp(threadIdOp, threadId);
 
     return success();
+  }
+};
+
+class WarpIdOpToLLVM : public ConvertOpToLLVMPattern<triton::gpu::WarpIdOp> {
+public:
+  WarpIdOpToLLVM(LLVMTypeConverter &typeConverter, PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::gpu::WarpIdOp>(typeConverter, benefit) {}
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::WarpIdOp warpIdOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto b = TritonLLVMOpBuilder(warpIdOp.getLoc(), rewriter);
+    const int threadsPerWarp = triton::gpu::lookupThreadsPerWarp(rewriter);
+    if (threadsPerWarp == 1) {
+      rewriter.replaceOp(warpIdOp, b.i32_val(0));
+      return success();
+    }
+
+    warpIdOp.emitError("unsupported number of warps");
+    return failure();
   }
 };
 
@@ -246,6 +267,7 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
     LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
     RewritePatternSet &patterns, PatternBenefit benefit) {
   patterns.add<ThreadIdOpToLLVM>(typeConverter, benefit);
+  patterns.add<WarpIdOpToLLVM>(typeConverter, benefit);
   patterns.add<BlockIdOpToLLVM>(typeConverter, benefit);
   patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
