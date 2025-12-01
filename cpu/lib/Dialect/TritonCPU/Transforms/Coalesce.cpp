@@ -8,6 +8,7 @@
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/CoalesceUtils.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/StrUtil.h"
@@ -46,11 +47,11 @@ static Attribute pickDescriptorLoadStoreLayout(int numWarps, int threadsPerWarp,
 
   SmallVector<unsigned> order =
       triton::gpu::getMatrixOrder(type.getRank(), /*rowMajor*/ true);
-  auto CTALayout = triton::gpu::getCTALayout(type.getEncoding());
+  auto cgaLayout = triton::gpu::getCGALayout(type.getEncoding());
 
   Attribute layout = triton::gpu::BlockedEncodingAttr::get(
       type.getContext(), type.getShape(), sizePerThread, order, numWarps,
-      threadsPerWarp, CTALayout);
+      threadsPerWarp, cgaLayout);
   return layout;
 }
 
@@ -101,9 +102,15 @@ getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
 
 struct CoalescePass : public impl::TritonCPUCoalesceBase<CoalescePass> {
 
+  // TODO: the upstream pass now uses "CoalesceUtils::buildCoalescedEncoding".
+  // We can either specialize Coalesce pass to take a custom
+  // buildCoalescedEncoding impl or modify buildCoalescedEncoding to take a
+  // custom num elems per thread function - or perhaps we can make num elements
+  // per thread a dialect specific concept?
   void
   setCoalescedEncoding(ModuleAxisInfoAnalysis &axisInfoAnalysis, Operation *op,
                        int numWarps, int threadsPerWarp,
+                       triton::gpu::CGAEncodingAttr cgaLayout,
                        llvm::MapVector<Operation *, Attribute> &layoutMap) {
     Value ptr = getMemAccessPtr(op);
     auto refTensorType = cast<RankedTensorType>(ptr.getType());
@@ -177,10 +184,9 @@ struct CoalescePass : public impl::TritonCPUCoalesceBase<CoalescePass> {
     SmallVector<unsigned> sizePerThread(refTensorType.getRank(), 1);
     sizePerThread[order[0]] = perThread;
 
-    auto CTALayout = triton::gpu::getCTALayout(refTensorType.getEncoding());
     layoutMap[op] = triton::gpu::BlockedEncodingAttr::get(
         &getContext(), refTensorType.getShape(), sizePerThread, order, numWarps,
-        threadsPerWarp, CTALayout);
+        threadsPerWarp, cgaLayout);
   }
 
   static Type getNewType(Type type, Attribute encoding) {
@@ -209,8 +215,12 @@ struct CoalescePass : public impl::TritonCPUCoalesceBase<CoalescePass> {
       if (!isPtrTensor)
         return;
       int numWarps = triton::gpu::lookupNumWarps(curr);
+
+      auto tensorType = cast<RankedTensorType>(ptr.getType());
+      triton::gpu::CGAEncodingAttr cgaLayout =
+          triton::gpu::getCGALayout(tensorType.getEncoding());
       setCoalescedEncoding(axisInfoAnalysis, curr, numWarps, threadsPerWarp,
-                           layoutMap);
+                           cgaLayout, layoutMap);
     });
 
     // Also pick a layout for descriptor load/store ops.
