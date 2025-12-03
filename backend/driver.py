@@ -418,14 +418,15 @@ class CPULauncher(object):
         launch_exit_hook = args[3]
 
         #self.device.run_command(function, args[4:], [gridX, gridY, gridZ], [num_warps, 1, 1], shared_memory)
-        #schedule = self.device.create_schedule()
-        #command = schedule.create_command(function, args[4:])
-        #command.finalize([gridX, gridY, gridZ], [num_warps, 1, 1], shared_memory)
+        schedule = self.device.create_schedule()
+        #print(f"creating command for function {function} with args {args[4:]}")
+        command = schedule.create_command(function, args[4:])
+        command.finalize([gridX, gridY, gridZ], [num_warps, 1, 1], shared_memory)
         #del schedule
         if launch_enter_hook is not None:
             launch_enter_hook(launch_metadata)
-        #schedule.run()
-        self.device.run_command(function, args[4:], [gridX, gridY, gridZ, num_warps, 1, 1]) # , shared_memory)
+        schedule.run()
+        #self.device.run_command(function, args[4:], [gridX, gridY, gridZ, num_warps, 1, 1]) # , shared_memory)
         if launch_exit_hook is not None:
             launch_exit_hook(launch_metadata)
         #self.launch(gridX, gridY, gridZ, stream, function, *args)
