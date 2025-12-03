@@ -425,6 +425,7 @@ class CPULauncher(object):
         if launch_enter_hook is not None:
             launch_enter_hook(launch_metadata)
         #schedule.run()
+        self.device.run_command(function, args[4:], [gridX, gridY, gridZ, num_warps, 1, 1]) # , shared_memory)
         if launch_exit_hook is not None:
             launch_exit_hook(launch_metadata)
         #self.launch(gridX, gridY, gridZ, stream, function, *args)
