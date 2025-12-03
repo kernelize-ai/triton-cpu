@@ -119,7 +119,7 @@ struct FuncOpSPMDParamConversion
         rewriter.getNamedAttr(funcOp.getArgAttrsAttrName(),
                               rewriter.getArrayAttr(amendedArgAttrs)));
     // 3. Create the amended function op
-    auto amendedFuncOp = rewriter.create<triton::FuncOp>(
+    auto amendedFuncOp = triton::FuncOp::create(rewriter,
         funcOp.getLoc(), funcOp.getName(), amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
 
@@ -136,7 +136,7 @@ struct FuncOpSPMDParamConversion
         auto idxTy = typeConverter->convertType(argType);
         auto gep = b.gep(ptrTy, idxTy, arg, b.i32_val(0));
         auto newArgValue = b.load(idxTy, gep).getResult();
-        auto newArgConvValue = argBuilder.create<UnrealizedConversionCastOp>(arg.getLoc(), argType, newArgValue).getResult(0);
+        auto newArgConvValue = UnrealizedConversionCastOp::create(argBuilder, arg.getLoc(), argType, newArgValue).getResult(0);
         for (auto user : argUsers) {
           user->replaceUsesOfWith(arg, newArgConvValue);
         }
