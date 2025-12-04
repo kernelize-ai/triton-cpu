@@ -137,7 +137,8 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
 
   auto wrap = triton::FuncOp::create(b, kernel.getLoc(), name, wrapTy,
                                      userAttrs, argDicts);
-  wrap.setPublic();
+  wrap->setAttr(SymbolTable::getVisibilityAttrName(),
+                b.getStringAttr("public"));
 
   Block *entry = wrap.addEntryBlock();
   OpBuilder wb(entry, entry->end());
