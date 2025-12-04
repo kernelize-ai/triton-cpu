@@ -25,8 +25,8 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
   Value blockIdx = entry.getArgument(blockIdxArgPos);
 
   OpBuilder b(&entry, entry.begin());
-  Value blockIdOp = b.create<triton::cpu::CurrentBlockOp>(
-      funcOp.getLoc(), blockIdx.getType(), blockIdx);
+  Value blockIdOp = triton::cpu::CurrentBlockOp::create(
+      b, funcOp.getLoc(), blockIdx.getType(), blockIdx);
   return success();
 }
 
@@ -91,9 +91,9 @@ static triton::FuncOp cloneTTFuncWithExtraI32Arg(ModuleOp mod,
   argDicts.push_back(DictionaryAttr::get(ctx, {})); // placeholder for new arg
 
   // Create the new func with attrs/argAttrs passed via the builder.
-  auto newFunc = b.create<triton::FuncOp>(src.getLoc(), newName, newFTy,
-                                          /*attrs=*/userAttrs,
-                                          /*argAttrs=*/argDicts);
+  auto newFunc = triton::FuncOp::create(b, src.getLoc(), newName, newFTy,
+                                        /*attrs=*/userAttrs,
+                                        /*argAttrs=*/argDicts);
   newFunc.setPrivate();
 
   // Preserve result attrs (builder signature didn’t include res_attrs).
@@ -135,20 +135,20 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
   SmallVector<NamedAttribute> userAttrs = collectClonableOpAttrs(kernel);
   SmallVector<DictionaryAttr> argDicts = getArgAttrArray(kernel);
 
-  auto wrap = b.create<triton::FuncOp>(kernel.getLoc(), name, wrapTy, userAttrs,
-                                       argDicts);
+  auto wrap = triton::FuncOp::create(b, kernel.getLoc(), name, wrapTy,
+                                     userAttrs, argDicts);
   wrap.setPublic();
 
   Block *entry = wrap.addEntryBlock();
   OpBuilder wb(entry, entry->end());
 
-  Value bEnd = wb.create<triton::cpu::BlockEndOp>(wrap.getLoc(), i32Ty);
-  Value bStart = wb.create<triton::cpu::BlockStartOp>(wrap.getLoc(), i32Ty);
-  Value bStep = wb.create<arith::ConstantOp>(wrap.getLoc(), i32Ty,
-                                             wb.getIntegerAttr(i32Ty, 1));
+  Value bEnd = triton::cpu::BlockEndOp::create(wb, wrap.getLoc(), i32Ty);
+  Value bStart = triton::cpu::BlockStartOp::create(wb, wrap.getLoc(), i32Ty);
+  Value bStep = arith::ConstantOp::create(wb, wrap.getLoc(), i32Ty,
+                                          wb.getIntegerAttr(i32Ty, 1));
 
   scf::ForOp forOp =
-      wb.create<scf::ForOp>(wrap.getLoc(), bStart, bEnd, bStep, ValueRange{});
+      scf::ForOp::create(wb, wrap.getLoc(), bStart, bEnd, bStep, ValueRange{});
   {
     Block *body = forOp.getBody();
     OpBuilder fb(body, body->begin());
@@ -160,11 +160,11 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
     callArgs.push_back(forOp.getInductionVar()); // add the block index offset
 
     // tt::CallOp can call tt.func by symbol (has FunctionType).
-    fb.create<triton::CallOp>(wrap.getLoc(), impl.getSymName(), TypeRange{},
-                              callArgs);
+    triton::CallOp::create(fb, wrap.getLoc(), impl.getSymName(), TypeRange{},
+                           callArgs);
   }
 
-  wb.create<triton::ReturnOp>(wrap.getLoc());
+  triton::ReturnOp::create(wb, wrap.getLoc());
   return wrap;
 }
 
