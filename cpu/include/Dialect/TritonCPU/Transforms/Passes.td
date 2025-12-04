@@ -17,7 +17,7 @@ def TritonCPUCoalesce: Pass<"tritoncpu-coalesce", "mlir::ModuleOp"> {
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
 }
 
-def AddKernelStreamPass : Pass<"add-kernel-stream", "mlir::ModuleOp"> {
+def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> {
     let summary = "Rewrite the kernel to process multiple blocks sequentially.";
 
     let description = [{

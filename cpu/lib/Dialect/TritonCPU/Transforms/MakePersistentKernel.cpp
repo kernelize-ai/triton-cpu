@@ -6,7 +6,7 @@
 
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
-#define DEBUG_TYPE "tritoncpu-add-kernel-stream"
+#define DEBUG_TYPE "tritoncpu-make-persistent-kernel"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
@@ -14,7 +14,7 @@ namespace mlir {
 namespace triton {
 namespace cpu {
 
-#define GEN_PASS_DEF_ADDKERNELSTREAMPASS
+#define GEN_PASS_DEF_MAKEPERSISTENTKERNELPASS
 #include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
 
 namespace {
@@ -170,9 +170,9 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
 
 } // namespace
 
-struct AddKernelStreamPass
-    : public impl::AddKernelStreamPassBase<AddKernelStreamPass> {
-  using AddKernelStreamPassBase::AddKernelStreamPassBase;
+struct MakePersistentKernelPass
+    : public impl::MakePersistentKernelPassBase<MakePersistentKernelPass> {
+  using MakePersistentKernelPassBase::MakePersistentKernelPassBase;
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
