@@ -47,6 +47,7 @@ public:
     addIllegalDialect<triton::TritonDialect>();
     addIllegalDialect<triton::gpu::TritonGPUDialect>();
     addIllegalDialect<mlir::gpu::GPUDialect>();
+    addIllegalDialect<triton::cpu::TritonCPUDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     addLegalOp<mlir::triton::cpu::MaskedLoadOp,
                mlir::triton::cpu::MaskedStoreOp>();

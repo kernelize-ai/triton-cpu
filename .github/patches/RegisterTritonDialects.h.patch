@@ -1,18 +1,19 @@
 diff --git a/bin/RegisterTritonDialects.h b/bin/RegisterTritonDialects.h
-index 0a11484b4..45f646818 100644
+index 0a11484b4..a6767b968 100644
 --- a/bin/RegisterTritonDialects.h
 +++ b/bin/RegisterTritonDialects.h
-@@ -39,6 +39,9 @@
+@@ -39,6 +39,10 @@
  #include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
  #include "mlir/InitAllPasses.h"
  
 +#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
++#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
 +#include "cpu/include/TritonCPUToLLVM/Passes.h"
 +
  #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
  #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
  #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
-@@ -154,6 +157,11 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
+@@ -154,6 +158,12 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
          llvm::report_fatal_error(result.takeError());
    }
  
@@ -20,11 +21,12 @@ index 0a11484b4..45f646818 100644
 +  mlir::triton::cpu::registerConvertTritonCPUToLLVM();
 +  mlir::triton::cpu::registerAllocateSharedMemoryCPU();
 +  mlir::triton::cpu::registerConvertMaskedOpsToLLVM();
++  mlir::triton::cpu::registerMakePersistentKernelPass();
 +
    registry.insert<
        mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
        mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect,
-@@ -165,5 +173,5 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
+@@ -165,5 +175,5 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
        mlir::triton::amdgpu::TritonAMDGPUDialect,
        mlir::triton::proton::ProtonDialect,
        mlir::triton::proton::gpu::ProtonGPUDialect, mlir::ROCDL::ROCDLDialect,

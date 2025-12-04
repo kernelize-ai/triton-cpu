@@ -17,4 +17,24 @@ def TritonCPUCoalesce: Pass<"tritoncpu-coalesce", "mlir::ModuleOp"> {
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
 }
 
+def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> {
+    let summary = "Rewrite the kernel to process multiple blocks sequentially.";
+
+    let description = [{
+        This pass rewrites kernels to process multiple blocks sequentially by creating a
+        wrapper function that loops over a range of block IDs. Block ID arguments are marked
+        with sentinel ops `ttc.block_start`, `ttc.block_end`, and `ttc.current_block` which
+        are later replaced with function arguments during LLVM lowering. Other backends
+        may choose to replace these ops with function calls or instructions as appropriate.
+        The ops are introduced to differentiate the persistent kernel loop from other loops
+        in the kernel.
+    }];
+
+    let dependentDialects = [
+      "mlir::triton::gpu::TritonGPUDialect",
+      "mlir::scf::SCFDialect",
+      "mlir::triton::cpu::TritonCPUDialect"
+    ];
+}
+
 #endif

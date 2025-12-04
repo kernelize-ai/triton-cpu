@@ -3,6 +3,7 @@
 
 include "TritonCPUDialect.td"
 include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
+include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultType
 include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 
@@ -17,17 +18,17 @@ class TTC_Op<string mnemonic, list<Trait> traits = []> :
 def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
   let summary = "Get the block ID.";
 
+  let description = [{
+    Get the block ID along the specified axis.
+  }];
+
   let arguments = (ins TT_ProgramDim:$axis);
 
   let results = (outs I32:$blockId);
 
-  let description = [{
-    Get the ID of the current block.
-  }];
-
   let builders = [
-    OpBuilder<(ins "ProgramIDDim":$axis), [{
-      build($_builder, $_state, $_builder.getI32Type(), ProgramIDDimAttr::get($_builder.getContext(), axis));
+    OpBuilder<(ins "int":$axis), [{
+      build($_builder, $_state, $_builder.getI32Type(), ProgramIDDimAttr::get($_builder.getContext(), ProgramIDDim(axis)));
     }]>
   ];
 
@@ -36,6 +37,50 @@ def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
       return static_cast<int32_t>(getAxis());
     }
   }];
+}
+
+def TTC_CurrentBlockOp : TTC_Op<"current_block", [SameOperandsAndResultType]> {
+  let summary = "The current block ID for this kernel invocation.";
+
+  let description = [{
+    Get the current block ID within the loop over blocks for this persistent kernel.
+  }];
+
+  let arguments = (ins AnyType:$input);
+
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = [{
+    $input attr-dict `:` type($result)
+  }];
+}
+
+def TTC_BlockStartOp : TTC_Op<"block_start", [Pure]> {
+  let summary = "Get the starting block ID for this kernel invocation.";
+
+  let arguments = (ins);
+
+  let results = (outs I32:$blockId);
+
+  let description = [{
+    Get the starting block ID (typically retrieved from a function argument).
+  }];
+
+  let assemblyFormat = "attr-dict";
+}
+
+def TTC_BlockEndOp : TTC_Op<"block_end", [Pure]> {
+  let summary = "Get the ending block ID for this kernel invocation.";
+
+  let arguments = (ins);
+
+  let results = (outs I32:$blockId);
+
+  let description = [{
+    Get the ending block ID (typically retrieved from a function argument).
+  }];
+
+  let assemblyFormat = "attr-dict";
 }
 
 def TTC_MaskedLoadOp : TTC_Op<"masked_load", [
