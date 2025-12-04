@@ -18,7 +18,7 @@ add_subdirectory(test)
 
 # uKernel Libs
 
-option(BUILD_SLEEF "Build SLEEF library" OFF)
+option(BUILD_SLEEF "Build SLEEF library" ON)
 if(BUILD_SLEEF)
   include(ExternalProject)
 
