@@ -40,7 +40,7 @@ def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
 }
 
 def TTC_CurrentBlockOp : TTC_Op<"current_block", [SameOperandsAndResultType]> {
-  let summary = "The current block ID for this warp.";
+  let summary = "The current block ID for this kernel invocation.";
 
   let description = [{
     Get the current block ID within the loop over blocks for this persistent kernel.
@@ -56,7 +56,7 @@ def TTC_CurrentBlockOp : TTC_Op<"current_block", [SameOperandsAndResultType]> {
 }
 
 def TTC_BlockStartOp : TTC_Op<"block_start", [Pure]> {
-  let summary = "Get the starting block ID for this warp.";
+  let summary = "Get the starting block ID for this kernel invocation.";
 
   let arguments = (ins);
 
@@ -70,7 +70,7 @@ def TTC_BlockStartOp : TTC_Op<"block_start", [Pure]> {
 }
 
 def TTC_BlockEndOp : TTC_Op<"block_end", [Pure]> {
-  let summary = "Get the ending block ID for this warp.";
+  let summary = "Get the ending block ID for this kernel invocation.";
 
   let arguments = (ins);
 
