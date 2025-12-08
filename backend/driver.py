@@ -391,7 +391,7 @@ class CPULauncher(object):
         constants = src.constants if hasattr(src, "constants") else dict()
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
-        signature = {idx: value for idx, value in src.signature.items()}
+        self.signature = {idx: value for idx, value in src.signature.items()}
         #src = make_launcher(constants, signature, metadata.shared)
         #os.environ["CC"] = "g++"
         #mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
@@ -420,7 +420,13 @@ class CPULauncher(object):
         #self.device.run_command(function, args[4:], [gridX, gridY, gridZ], [num_warps, 1, 1], shared_memory)
         schedule = self.device.create_schedule()
         #print(f"creating command for function {function} with args {args[4:]}")
-        command = schedule.create_command(function, args[4:])
+        command = schedule.create_command(function)
+        sig_types = list(self.signature.values())
+        for i, arg in enumerate(args[4:]):
+            if sig_types[i] == "constexpr":
+                continue
+            command.set_arg(i, arg)
+
         command.finalize([gridX, gridY, gridZ], [num_warps, 1, 1], shared_memory)
         #del schedule
         if launch_enter_hook is not None:
