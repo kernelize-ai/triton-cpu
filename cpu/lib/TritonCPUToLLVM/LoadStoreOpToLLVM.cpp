@@ -58,6 +58,63 @@ unsigned getCanonicalIndex(unsigned index, unsigned freeVarMask) {
   return index & ~freeVarMask;
 }
 
+struct DenseAddPtrMatch {
+  Value basePtr; // ptr argument
+  Value offset;  // scalar value for offset calculation
+  int64_t rangeStart = 0;
+  int64_t rangeEnd = 0;
+
+  bool updateRanges(mlir::Value v) {
+    triton::MakeRangeOp mr = v.getDefiningOp<triton::MakeRangeOp>();
+    if (!mr)
+      return false;
+    rangeStart = mr.getStart();
+    rangeEnd = mr.getEnd();
+    return true;
+  }
+};
+
+bool matchDensePointerChain(mlir::Value ptr, DenseAddPtrMatch &out) {
+
+  LDBG("Match add ptr: " << ptr);
+
+  Value baseTensor, offsets;
+  if (!matchPattern(ptr, m_Op<triton::AddPtrOp>(matchers::m_Any(&baseTensor),
+                                                matchers::m_Any(&offsets))))
+    return false;
+
+  LDBG("Match splat: " << baseTensor);
+
+  Value basePtr;
+  if (!matchPattern(baseTensor,
+                    m_Op<triton::SplatOp>(matchers::m_Any(&basePtr))))
+    return false;
+
+  LDBG("Match addi: " << offsets);
+
+  Value lhs, rhs;
+  if (!matchPattern(offsets, m_Op<arith::AddIOp>(matchers::m_Any(&lhs),
+                                                 matchers::m_Any(&rhs))))
+    return false;
+
+  auto trySide = [&](Value splatSide, Value rangeSide) -> bool {
+    Value offset;
+    if (!matchPattern(splatSide,
+                      m_Op<triton::SplatOp>(matchers::m_Any(&offset))))
+      return false;
+
+    if (!out.updateRanges(rangeSide))
+      return false;
+
+    out.basePtr = basePtr;
+    out.offset = offset;
+    return true;
+  };
+
+  // Accept either order: addi(splat(blockBase), make_range) or swapped.
+  return trySide(lhs, rhs) || trySide(rhs, lhs);
+}
+
 struct LoadStoreConversionBase {
   explicit LoadStoreConversionBase(const cpu::TargetInfo &targetInfo,
                                    ModuleAxisInfoAnalysis &axisAnalysisPass)
@@ -118,6 +175,8 @@ struct LoadStoreConversionBase {
       return 1;
     auto contiguity = getContiguity(ptr);
     auto pointeeBitWidth = triton::getPointeeBitWidth(tensorTy);
+    LDBG("getVectorSize contiguity = " << contiguity << " pointeeBitWidth = "
+                                       << pointeeBitWidth);
     // The maximum vector size is 256 bits on the avg CPU (TODO: be more
     // specific?)
     return std::min<unsigned>(256 / pointeeBitWidth, contiguity);
@@ -300,16 +359,76 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
            "Cannot convert store with a tensor pointer into LLVM; "
            "this case should be transformed to normal store before lowering");
     Value llPtr = adaptor.getPtr();
+    LDBG("llPtr: " << llPtr.getType());
     Value llValue = adaptor.getValue();
     Value llMask = adaptor.getMask();
 
     auto valueTy = value.getType();
     Type valueElemTy =
         typeConverter->convertType(getElementTypeOrSelf(valueTy));
+    LDBG("Storing element type: " << valueElemTy);
 
     // Determine the vectorization size
     unsigned vec = getVectorSize(ptr);
+    LDBG("Store op vec size: " << vec);
     unsigned elemsPerThread = getTotalElemsPerThread(ptr.getType());
+
+    DenseAddPtrMatch m;
+    if (matchDensePointerChain(op.getPtr(), m)) {
+      LDBG("Matched dense pointer store");
+      LDBG("base ptr: " << m.basePtr);
+      LDBG("offset: " << m.offset);
+
+      // TODO: can we unpack only those elements that we wish to store? 
+      auto valueElems = unpackLLElements(loc, llValue, rewriter);
+      assert(isa<LLVM::LLVMStructType>(adaptor.getPtr().getType()) && "must have struct of ptrs for dense match path");
+
+      ArrayRef<Type> types =
+      cast<LLVM::LLVMStructType>(adaptor.getPtr().getType()).getBody();
+      auto basePtr = b.extract_val(types[0], adaptor.getPtr(), 0);
+
+      unsigned vecOrig = vec;
+      // TODO: ignore masks for now
+
+      const size_t valueElemNBits =
+          std::max<int>(8, valueElemTy.getIntOrFloatBitWidth());
+      const size_t valueElemNBytes = valueElemNBits / 8;
+      auto vecTy = LLVM::getVectorType(valueElemTy, vec);
+      LDBG("Processing store with vecTy: " << vecTy);
+
+      const int numVecs = elemsPerThread / vec;
+      auto freeVarMasks = getFreeVariableMasks(valueTy);
+      Value threadPred =
+          emitRedundantThreadPredicate(freeVarMasks, rewriter, loc, targetInfo);
+      uint32_t regMask = freeVarMasks[str_attr("reg")];
+
+      LDBG("StoreOp numElems = " << elemsPerThread << " vec = " << vec
+                                 << " valueElemNBits = " << valueElemNBits
+                                 << " " << valueTy);
+      for (size_t vecStart = 0; vecStart < elemsPerThread; vecStart += vec) {
+        if (!isCanonicalIndex(vecStart, regMask)) {
+          // Don't emit store ops for redundant elements within a thread
+          continue;
+        }
+
+        Value pred = packLLVector(
+          loc, ValueRange{llvm::SmallVector<Value>(vec, threadPred)}, rewriter);
+
+        // TODO: mask 
+
+        Value storeVal = packElementRangeIntoVector(
+          rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
+          valueElems, vecStart);
+
+        Value ptr = b.gep(ptr_ty(ctx, 1), valueElemTy, basePtr, b.i32_val(vecStart));
+
+      cpu::llStore(rewriter, loc, ptr/*b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1))*/,
+                   storeVal, pred, /*alignment=*/16);
+      }
+
+      rewriter.eraseOp(op);
+      return success();
+    }
 
     auto ptrElems = unpackLLElements(loc, llPtr, rewriter);
     auto valueElems = unpackLLElements(loc, llValue, rewriter);

@@ -100,6 +100,7 @@ public:
     auto val = storeOp.getValue();
 
     auto elemTy = val.getType();
+#if 0
     if (auto vecTy = dyn_cast<VectorType>(elemTy)) {
       LDBG("Vector masked store type: " << vecTy);
       auto vecElemTy = vecTy.getElementType();
@@ -113,7 +114,7 @@ public:
                                                        alignment);
       return success();
     }
-
+#endif
     unsigned alignment =
         storeOp.getAlignment()
             ? *storeOp.getAlignment()
@@ -121,10 +122,12 @@ public:
                        getElementTypeOrSelf(elemTy).getIntOrFloatBitWidth() /
                            8u);
     // direct store
-    if (matchPattern(mask, m_One())) {
+    if (true || matchPattern(mask, m_One())) {
       LDBG("Constant mask (" << mask << "), direct load type " << elemTy
                              << " with alignment " << alignment);
-      LLVM::StoreOp::create(rewriter, loc, val, ptr, alignment);
+      auto store =
+          LLVM::StoreOp::create(rewriter, loc, val, ptr, alignment,
+                                /*volatile=*/false, /*nontemporal=*/true);
     } else {
       LDBG("Predicated store with alignment " << alignment);
       // default to predicated load with conditional branching
