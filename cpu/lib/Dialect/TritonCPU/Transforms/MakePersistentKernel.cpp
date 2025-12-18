@@ -27,6 +27,15 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
   OpBuilder b(&entry, entry.begin());
   Value blockIdOp = triton::cpu::CurrentBlockOp::create(
       b, funcOp.getLoc(), blockIdx.getType(), blockIdx);
+
+  SmallVector<triton::GetProgramIdOp> pidOps;
+  for (auto pidOp : entry.getOps<triton::GetProgramIdOp>()) {
+    pidOps.push_back(pidOp);
+  }
+  for (auto pidOp : pidOps) {
+    pidOp.replaceAllUsesWith(blockIdOp);
+    pidOp.erase();
+  }
   return success();
 }
 
