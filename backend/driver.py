@@ -200,7 +200,81 @@ def make_launcher(constants, signature, shared_mem_size):
 
 typedef void(*kernel_ptr_t)({arg_types});
 
-static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+static void _launch_openmp(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+    unsigned N = gridX * gridY * gridZ;
+    const int ompMaxThreads = omp_get_max_threads();
+    const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
+    int num_teams = 1; // max_threads > num_warps ? max_threads / num_warps : 1;
+
+    // TODO: only add the plus barrier when we have a barrier
+    alignas(64) unsigned char* global_smem = NULL;
+    unsigned shared_memory_aligned_per_team = 0;
+    if (shared_memory > 0) {{
+        shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
+        // allocate scratch for reductions
+        shared_memory_aligned_per_team += 64 * num_warps;
+        unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * num_teams;
+        global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
+        assert(global_smem);
+        memset(global_smem, 0, shared_memory_aligned_total);
+    }}
+
+    unsigned consecutive_blocks = ceil((float)N / (num_teams));
+
+    //omp_set_dynamic(0);
+
+    int32_t launch_sz[] = {{gridX, gridY, gridZ, num_warps, 1, 1}};
+
+#if 1
+    #pragma omp parallel num_threads(num_warps) proc_bind(spread)
+    {{
+        const int warp_id = omp_get_thread_num();
+
+        int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[0] ' if shared_mem_size > 0 else 'NULL'};
+
+        void* cpu_barrier = NULL; // TODO implement a barrier function, in c++?
+
+#if 1
+            int32_t launch_id[] = {{
+                (int32_t)0, (int32_t)N, warp_id, 0, 0
+            }};
+            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+#else
+        for (unsigned block = 0; block < N; block++) {{
+            int32_t launch_id[] = {{
+                (int32_t)block, (int32_t)block+1, warp_id, 0, 0
+            }};
+            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+        }}
+#endif
+    }}
+#else
+    #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
+    {{
+        int worker_id = omp_get_thread_num();
+        const int warp_id = worker_id % num_warps;
+        const int thread_id = warp_id;
+        const int team_id = worker_id / num_warps;
+        const unsigned block_start = consecutive_blocks * team_id;
+
+        int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
+
+        const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
+
+        void* cpu_barrier = NULL; // TODO implement a barrier function, in c++?
+
+        int32_t launch_id[] = {{
+            (int32_t)block_start, (int32_t)run_end, warp_id, 0, 0
+        }};
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+
+    }}
+#endif
+
+    if (global_smem) free(global_smem);
+}}
+
+static void _launch_fibers(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
     const int ompMaxThreads = omp_get_max_threads();
     const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
@@ -332,7 +406,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
   {newline.join(ptr_decls)}
   Py_BEGIN_ALLOW_THREADS;
-  _launch(num_warps, shared_memory, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
+  _launch_openmp(num_warps, shared_memory, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   Py_END_ALLOW_THREADS;
   if (PyErr_Occurred()) {{
     return NULL;
