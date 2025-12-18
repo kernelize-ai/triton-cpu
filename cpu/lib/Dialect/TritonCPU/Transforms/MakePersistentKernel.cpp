@@ -29,6 +29,15 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
   OpBuilder b(&entry, entry.begin());
   Value blockIdOp = triton::cpu::CurrentBlockOp::create(
       b, funcOp.getLoc(), blockIdx.getType(), blockIdx);
+
+  SmallVector<triton::GetProgramIdOp> pidOps;
+  for (auto pidOp : entry.getOps<triton::GetProgramIdOp>()) {
+    pidOps.push_back(pidOp);
+  }
+  for (auto pidOp : pidOps) {
+    pidOp.replaceAllUsesWith(blockIdOp);
+    pidOp.erase();
+  }
   return success();
 }
 
@@ -166,6 +175,8 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
     triton::CallOp::create(fb, wrap.getLoc(), impl.getSymName(), TypeRange{},
                            callArgs);
   }
+
+  // forOp->setAttr("tt.loop_unroll_factor", wb.getIntegerAttr(i32Ty, 4));
 #if 0
   BoolAttr falseAttr = BoolAttr::get(ctx, false);
   BoolAttr trueAttr = BoolAttr::get(ctx, true);
@@ -183,7 +194,7 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
   forOp->setAttr("loop_annotation", loopAnnotAttr);
 #endif
 
-  mlir::triton::peelLoopEpilogue(forOp);
+  // mlir::triton::peelLoopEpilogue(forOp);
 
   triton::ReturnOp::create(wb, wrap.getLoc());
 
