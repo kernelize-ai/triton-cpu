@@ -107,6 +107,11 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
         passes.common.add_cse(pm)
+
+        cpu.passes.ttgpuir.add_make_persistent_kernel(pm)
+        passes.common.add_inliner(pm)
+        passes.ttir.add_triton_licm(pm)
+
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
         pm.run(mod, 'make_ttir')
@@ -126,14 +131,10 @@ class CPUBackend(BaseBackend):
         passes.ttgpuir.add_optimize_thread_locality(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttir.add_loop_aware_cse(pm)
-
-        # loop optimization + pipelining
-        cpu.passes.ttgpuir.add_kernel_stream(pm)
-        passes.common.add_inliner(pm)
-
+        passes.ttgpuir.add_fuse_nested_loops(pm)
+        passes.ttir.add_triton_licm(pm)
         passes.common.add_canonicalizer(pm)
         passes.ttir.add_loop_aware_cse(pm)
-        passes.ttgpuir.add_fuse_nested_loops(pm)
 
         passes.common.add_symbol_dce(pm)
         passes.common.add_sccp(pm)
@@ -153,7 +154,7 @@ class CPUBackend(BaseBackend):
         passes.gluon.add_canonicalizer(pm)
         passes.common.add_sccp(pm)
         passes.ttir.add_loop_aware_cse(pm)
-        cpu.passes.ttgpuir.add_kernel_stream(pm)
+        cpu.passes.ttgpuir.add_make_persistent_kernel(pm)
         passes.common.add_inliner(pm)
 
         passes.gluon.add_canonicalizer(pm)
