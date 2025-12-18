@@ -90,7 +90,7 @@ class CPUBackend(BaseBackend):
     def parse_attr(desc):
         ret = []
         if "D" in desc:
-            ret += [["tt.divisibility", 8]]
+            ret += [["tt.divisibility", 16]]
         # pop D from desc
         desc = desc.replace("D", "")
         ret += BaseBackend.parse_attr(desc)
@@ -107,6 +107,10 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
         passes.common.add_cse(pm)
+
+        cpu.passes.ttgpuir.add_kernel_stream(pm)
+        passes.common.add_inliner(pm)
+
         passes.ttir.add_triton_licm(pm)
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
@@ -129,9 +133,9 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_loop_aware_cse(pm)
 
         # loop optimization + pipelining
-        cpu.passes.ttgpuir.add_kernel_stream(pm)
-        passes.common.add_inliner(pm)
-        cpu.passes.ttgpuir.add_loop_peeling(pm)
+        # cpu.passes.ttgpuir.add_kernel_stream(pm)
+        # passes.common.add_inliner(pm)
+        # cpu.passes.ttgpuir.add_loop_peeling(pm)
 
         passes.common.add_canonicalizer(pm)  # can we remove?
         passes.ttir.add_loop_aware_cse(pm)
