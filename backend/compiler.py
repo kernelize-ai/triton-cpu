@@ -120,6 +120,9 @@ class CPUBackend(BaseBackend):
 
         passes.ttgpuir.add_optimize_thread_locality(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
+
+        cpu.passes.ttgpuir.add_split_blocks(pm)
+
         passes.ttir.add_loop_aware_cse(pm)
         passes.ttgpuir.add_fuse_nested_loops(pm)
         passes.ttir.add_triton_licm(pm)

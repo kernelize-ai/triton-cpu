@@ -37,4 +37,14 @@ def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> 
     ];
 }
 
+def TritonCPUSplitBlocks : Pass<"tritoncpu-split-blocks", "mlir::ModuleOp"> {
+  let summary = "Split blocks into loops over smaller blocks.";
+
+  let description = [{
+    coming soon
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
+}
+
 #endif
