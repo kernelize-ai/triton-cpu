@@ -209,7 +209,9 @@ class CPUBackend(BaseBackend):
             asm_path = os.path.join(tmpdir, "kernel.s")
             Path(asm_path).write_text(src)
             lib_dirs = cpu_driver.library_dirs()
-            libs = ["sleef", "cpu_utils"]  # TODO: conditionally include?
+            libs = ["cpu_utils"]
+            if int(os.environ.get("USE_SLEEF", 0)) == 1:
+                libs.append("sleef")
             include_dirs = []
             ccflags = []
             for lib_dir in lib_dirs:
