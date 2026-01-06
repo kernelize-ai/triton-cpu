@@ -77,7 +77,7 @@ class CPUBackend(BaseBackend):
         )
 
     def get_codegen_implementation(self, options):
-        return dict()
+        return {"min_dot_size": lambda lhs, rhs: (1, 1, 1)}
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         # TODO
