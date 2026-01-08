@@ -102,6 +102,9 @@ struct ConvertTritonCPUToLLVM
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
 
+    cpu::populateDotOpToLLVMPatterns(typeConverter, patterns, targetInfo,
+                                     benefit);
+
     cpu::populateElementwiseOpToLLVMPatterns(
         typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
 

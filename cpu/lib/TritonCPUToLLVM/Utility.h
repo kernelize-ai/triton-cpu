@@ -7,6 +7,10 @@
 
 #include "TargetInfo.h"
 
+#define CDEBUG_TYPE "convert-triton-cpu-to-llvm"
+#define CDBGS() (llvm::dbgs() << "[" CDEBUG_TYPE "]: ")
+#define CDBG(X) LLVM_DEBUG(CDBGS() << X << "\n")
+
 namespace mlir {
 namespace triton {
 namespace cpu {
