@@ -30,13 +30,23 @@ public:
     Value accum = c;
     Type tgtTy = accum.getType();
     for (auto it = llvm::zip(a, b).begin(); it != llvm::zip(a, b).end(); ++it) {
-      const auto &aElem = std::get<0>(*it);
-      const auto &bElem = std::get<1>(*it);
+      Value aElem = std::get<0>(*it);
+      Value bElem = std::get<1>(*it);
+
+      // Extend to the target type if needed.
       const auto ty = aElem.getType();
-      Value mul = LLVM::FMulOp::create(builder, loc, ty, aElem, bElem);
+      assert(ty == bElem.getType() &&
+             "operands to `tt.dot` have mismatched types");
       if (ty != tgtTy) {
-        mul = LLVM::FPExtOp::create(builder, loc, tgtTy, mul);
+        assert(
+            ty.isFloat() && tgtTy.isFloat() &&
+            "only float point type casting is currently supported in `tt.dot`");
+        aElem = LLVM::FPExtOp::create(builder, loc, tgtTy, aElem);
+        bElem = LLVM::FPExtOp::create(builder, loc, tgtTy, bElem);
       }
+
+      // Multiply and accumulate.
+      auto mul = LLVM::FMulOp::create(builder, loc, tgtTy, aElem, bElem);
       accum = LLVM::FAddOp::create(builder, loc, tgtTy, accum, mul);
     }
     return accum;
