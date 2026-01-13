@@ -219,7 +219,11 @@ def get_hip_autotune_config():
 
 def get_cpu_autotune_config():
     sizes = [
+        {'BLOCK_SIZE_M': 2, 'BLOCK_SIZE_N': 4, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
         {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 4, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
     ]
     return [triton.Config(s | {'matrix_instr_nonkdim': 16}, num_warps=1, num_stages=2) for s in sizes]
 
