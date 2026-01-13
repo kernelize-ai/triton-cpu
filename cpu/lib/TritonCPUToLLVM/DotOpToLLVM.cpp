@@ -11,12 +11,11 @@
 
 using namespace mlir;
 using namespace mlir::triton;
-using namespace ::mlir::triton::gpu;
 
 namespace {
 
 // Adapted from `TritonGPUToLLVM/DotOpToLLVM/FMA.cpp`.
-class GenericFMAVectorMultiplier : public FMAVectorMultiplier {
+class GenericFMAVectorMultiplier : public triton::gpu::FMAVectorMultiplier {
   OpBuilder &builder;
   Location loc;
 
