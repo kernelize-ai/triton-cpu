@@ -41,6 +41,9 @@ public:
         assert(
             ty.isFloat() && tgtTy.isFloat() &&
             "only float point type casting is currently supported in `tt.dot`");
+        assert(
+            ty.getIntOrFloatBitWidth() < tgtTy.getIntOrFloatBitWidth() &&
+            "operands to `tt.dot` must be smaller than the accumulator type");
         aElem = LLVM::FPExtOp::create(builder, loc, tgtTy, aElem);
         bElem = LLVM::FPExtOp::create(builder, loc, tgtTy, bElem);
       }
