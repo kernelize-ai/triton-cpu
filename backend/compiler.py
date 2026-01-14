@@ -117,6 +117,8 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, threads_per_warp, num_ctas)
         cpu.passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
+        cpu.passes.ttgpuir.add_accelerate_matmul(pm)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
 
         passes.ttgpuir.add_optimize_thread_locality(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
