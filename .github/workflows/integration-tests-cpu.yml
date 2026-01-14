@@ -108,6 +108,12 @@ jobs:
         working-directory: ./triton
         run: |
           python python/tutorials/01-vector-add.py
+      - name: Run tutorial 03 on CPU
+        working-directory: .
+        env:
+          TRITON_DEFAULT_BACKEND: "cpu"
+        run: |
+          python python/tutorials/03-matrix-multiplication.py
       - name: Run gluon tests
         working-directory: ./triton
         run: |
