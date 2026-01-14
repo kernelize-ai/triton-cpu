@@ -25,8 +25,8 @@ public:
 
   Value multiplyVectors(ArrayRef<Value> a, ArrayRef<Value> b,
                         Value c) override {
-    auto K = a.size();
-    assert(b.size() == K);
+    assert(a.size() == b.size() &&
+           "operands to `tt.dot` have mismatched sizes");
     Value accum = c;
     Type tgtTy = accum.getType();
     for (auto it = llvm::zip(a, b).begin(); it != llvm::zip(a, b).end(); ++it) {
