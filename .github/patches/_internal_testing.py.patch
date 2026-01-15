@@ -1,0 +1,14 @@
+diff --git a/python/triton/_internal_testing.py b/python/triton/_internal_testing.py
+index cc1ad5fe0..9fa3f4af4 100644
+--- a/python/triton/_internal_testing.py
++++ b/python/triton/_internal_testing.py
+@@ -105,6 +105,9 @@ def is_xpu():
+     target = get_current_target()
+     return False if target is None else target.backend == "xpu"
+
++def is_cpu():
++    target = get_current_target()
++    return False if target is None else target.backend == "cpu"
+
+ def get_arch():
+     target = get_current_target()
