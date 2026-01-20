@@ -21,8 +21,12 @@ public:
   Value ballot(RewriterBase &rewriter, Location loc, Type type,
                Value cmp) const override;
 
+  // Emit a block level barrier
   void barrier(Location loc, RewriterBase &rewriter,
-               bool isWarpSync = false) const override;
+               triton::gpu::AddrSpace targets) const override;
+
+  // Emit a block level barrier with lowest level memory operation visibility
+  void warpSync(Location loc, RewriterBase &rewriter) const override;
 
   void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     std::optional<Value> ctaId, Value val,

@@ -204,6 +204,23 @@ public:
   }
 };
 
+class TritonGpuBarrierOpConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::BarrierOp> {
+public:
+  TritonGpuBarrierOpConversion(const LLVMTypeConverter &converter,
+                               PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<triton::gpu::BarrierOp>(converter, benefit) {}
+  using OpAdaptor = typename triton::gpu::BarrierOp::Adaptor;
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::BarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // TODO: currently ignoring addr space parameter
+    rewriter.replaceOpWithNewOp<mlir::gpu::BarrierOp>(op);
+    return success();
+  }
+};
+
 class GpuBarrierOpToLLVM : public ConvertOpToLLVMPattern<mlir::gpu::BarrierOp> {
 public:
   GpuBarrierOpToLLVM(LLVMTypeConverter &typeConverter,
@@ -260,22 +277,6 @@ protected:
   const cpu::TargetInfo &targetInfo;
 };
 
-class GpuLocalBarrierOpToLLVM
-    : public ConvertOpToLLVMPattern<triton::gpu::LocalBarrierOp> {
-public:
-  GpuLocalBarrierOpToLLVM(LLVMTypeConverter &typeConverter,
-                          PatternBenefit benefit)
-      : ConvertOpToLLVMPattern<triton::gpu::LocalBarrierOp>(typeConverter,
-                                                            benefit) {}
-
-  LogicalResult
-  matchAndRewrite(triton::gpu::LocalBarrierOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOpWithNewOp<mlir::gpu::BarrierOp>(op);
-    return success();
-  }
-};
-
 template <typename OpTy>
 class BlockIndexOpConversion : public ConvertOpToLLVMPattern<OpTy> {
 public:
@@ -330,8 +331,8 @@ void mlir::triton::cpu::populateGPUtoLLVMConversionPatterns(
   patterns.add<WarpIdOpToLLVM>(typeConverter, benefit);
   patterns.add<BlockIdOpToLLVM>(typeConverter, benefit);
   patterns.add<GetNumProgramsOpToLLVM>(typeConverter, benefit);
+  patterns.add<TritonGpuBarrierOpConversion>(typeConverter, benefit);
   patterns.add<GpuBarrierOpToLLVM>(typeConverter, targetInfo, benefit);
-  patterns.add<GpuLocalBarrierOpToLLVM>(typeConverter, benefit);
   patterns.add<BlockIndexOpConversion<mlir::triton::cpu::BlockStartOp>>(
       typeConverter, LaunchIDOffsets::kBlockStart, benefit);
   patterns.add<BlockIndexOpConversion<mlir::triton::cpu::BlockEndOp>>(

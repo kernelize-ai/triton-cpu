@@ -49,12 +49,13 @@ Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
 }
 
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
-                         bool isWarpSync) const {
-  if (isWarpSync) {
-    llvm::report_fatal_error("warp sync barrier not supported on CPU");
-  }
+                         triton::gpu::AddrSpace targets) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  b.barrier();
+  b.barrier(targets);
+}
+
+void TargetInfo::warpSync(Location loc, RewriterBase &rewriter) const {
+  barrier(loc, rewriter, triton::gpu::AddrSpace::All);
 }
 
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
@@ -130,7 +131,7 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
   storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
 
-  barrier(loc, rewriter);
+  b.barrier(triton::gpu::AddrSpace::None);
 
   // compute target lane id
   Value targetThreadId = b.xor_(threadId, b.i32_val(i));
@@ -141,7 +142,7 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   Value loaded = mlir::triton::cpu::llLoad(
       rewriter, loc, targetPtr, val.getType(),
       b.icmp_slt(targetThreadId, b.i32_val(numWarps)), val);
-  barrier(loc, rewriter);
+  b.barrier(triton::gpu::AddrSpace::None);
   return loaded;
 }
 
@@ -219,8 +220,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     crtVal = rewriter.clone(*reduceOp, mapping)->getResult(0);
   }
   acc[0] = crtVal;
-  barrier(loc, rewriter); // barrier before writing back the reduced values to
-                          // shared memory
+  b.barrier(triton::gpu::AddrSpace::None);
   return true;
 }
 
