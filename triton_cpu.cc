@@ -38,6 +38,9 @@ void init_triton_cpu_passes(py::module &&m) {
 }
 
 void init_triton_cpu_passes_ttgpuir(py::module &&m) {
+  m.def("add_accelerate_matmul", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createTritonCPUAccelerateMatmul());
+  });
   m.def("add_coalesce", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce());
   });

@@ -3,6 +3,18 @@
 
 include "mlir/Pass/PassBase.td"
 
+def TritonCPUAccelerateMatmul : Pass<"tritoncpu-accelerate-matmul", "mlir::ModuleOp"> {
+  let summary = "accelerate matmul";
+
+  let description = [{
+    Optimize the input/output layout of `dot` instruction to make them compatible hardware accelerators
+    (e.g., Nvidia tensor cores)
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect"];
+}
+
 def TritonCPUCoalesce: Pass<"tritoncpu-coalesce", "mlir::ModuleOp"> {
   let summary = "coalesce";
 
