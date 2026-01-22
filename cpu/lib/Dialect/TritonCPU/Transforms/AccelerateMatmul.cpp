@@ -62,8 +62,7 @@ public:
                                     PatternRewriter &rewriter) {
       auto vType = cast<RankedTensorType>(v.getType());
       auto newVEncoding = gpu::DotOperandEncodingAttr::get(
-          v.getContext(), opIdx, newRetType.getEncoding(),
-          v.getType()); // TODO: it is unclear if v.getType() is correct here.
+          v.getContext(), opIdx, newRetType.getEncoding(), 0);
       auto newVType = vType.cloneWithEncoding(newVEncoding);
       return gpu::ConvertLayoutOp::create(rewriter, v.getLoc(), newVType, v);
     };
