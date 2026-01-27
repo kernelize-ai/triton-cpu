@@ -108,6 +108,22 @@ LaneMapAnalysis::visitOperation(Operation *op,
       op->hasTrait<OpTrait::Elementwise>()) {
     LaneInfo a = getOperand(0);
     LaneInfo b = getOperand(1);
+    const bool hasLoadOperand =
+        llvm::any_of(op->getOperands(), [](Value operand) {
+          if (!operand.getDefiningOp())
+            return false;
+          return isa<triton::LoadOp>(operand.getDefiningOp());
+        });
+    if (hasLoadOperand) {
+      a = a.kind == LaneInfo::AffineLane
+              ? LaneInfo::getAffine(/*baseScalar=*/Value(), /*c=*/a.constOffset,
+                                    /*s=*/a.stride)
+              : a;
+      b = b.kind == LaneInfo::AffineLane
+              ? LaneInfo::getAffine(/*baseScalar=*/Value(), /*c=*/b.constOffset,
+                                    /*s=*/b.stride)
+              : b;
+    }
     LaneInfo joined = LaneInfo::join(a, b);
     joinToAll(joined);
     return success();
@@ -173,15 +189,7 @@ bool isPointwiseStore(triton::StoreOp storeOp, LaneMapAnalysis &analysis) {
     // p/v laneinfo should match the p/v result.
   }
 
-  if (p == v)
-    return true;
-
-  if (p.kind == LaneInfo::Uniform && v.kind == LaneInfo::AffineLane)
-    return true;
-  if (v.kind == LaneInfo::Uniform && p.kind == LaneInfo::AffineLane)
-    return true;
-
-  return false;
+  return true;
 }
 
 bool isPointwiseLoad(triton::LoadOp loadOp, LaneMapAnalysis &analysis) {
