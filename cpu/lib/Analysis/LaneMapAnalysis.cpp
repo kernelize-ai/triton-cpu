@@ -85,6 +85,23 @@ LaneMapAnalysis::visitOperation(Operation *op,
     return success();
   }
 
+  if (isa<arith::CmpIOp>(op)) {
+    LaneInfo a = getOperand(0);
+    LaneInfo b = getOperand(1);
+    LDBG("Cmp operands " << a << " " << cast<arith::CmpIOp>(op).getPredicate()
+                         << " " << b);
+    // TODO: this specifically matches the mask compare order. Are there others
+    // we should match?
+    if (a.kind == LaneInfo::AffineLane && b.kind == LaneInfo::Uniform) {
+      LaneInfo joined = LaneInfo::getAffine(
+          /*baseScalar=*/op->getResult(0), /*c=*/a.constOffset, /*s=*/a.stride);
+      joinToAll(joined);
+      return success();
+    }
+    joinToAll(LaneInfo::getUnknown());
+    return success();
+  }
+
   // For elementwise ops, joining operand lane-forms is the canonical,
   // conservative rule.
   if (isa<arith::ArithDialect>(op->getDialect()) &&
@@ -144,6 +161,18 @@ bool isPointwiseStore(triton::StoreOp storeOp, LaneMapAnalysis &analysis) {
   if (p.kind == LaneInfo::Unknown || v.kind == LaneInfo::Unknown)
     return false;
 
+  if (storeOp.getMask()) {
+    auto *maskLat = analysis.getLatticeElement(storeOp.getMask());
+    if (!maskLat)
+      return false;
+    const LaneInfo &m = maskLat->getValue();
+    LDBG("StoreOp mask lane info: " << m);
+    if (m.kind == LaneInfo::Unknown)
+      return false;
+    // since the mask is applied elementwise any other combo of mask laneinfo +
+    // p/v laneinfo should match the p/v result.
+  }
+
   if (p == v)
     return true;
 
@@ -153,6 +182,35 @@ bool isPointwiseStore(triton::StoreOp storeOp, LaneMapAnalysis &analysis) {
     return true;
 
   return false;
+}
+
+bool isPointwiseLoad(triton::LoadOp loadOp, LaneMapAnalysis &analysis) {
+  LDBG("Evaluating loadOp for pointwise load");
+
+  auto *ptr = analysis.getLatticeElement(loadOp.getPtr());
+
+  if (!ptr)
+    return false;
+
+  const LaneInfo &p = ptr->getValue();
+  LDBG("LoadOp ptr lane info: " << p);
+  if (p.kind == LaneInfo::Unknown)
+    return false;
+
+  if (!loadOp.getMask())
+    return true;
+  // check the mask
+  auto *mask = analysis.getLatticeElement(loadOp.getMask());
+
+  if (!mask)
+    return false;
+
+  const LaneInfo &m = mask->getValue();
+  LDBG("LoadOp mask lane info: " << m);
+  if (m.kind == LaneInfo::Unknown)
+    return false;
+
+  return true;
 }
 
 } // namespace cpu

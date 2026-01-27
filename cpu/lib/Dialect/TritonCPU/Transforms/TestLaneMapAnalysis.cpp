@@ -39,6 +39,14 @@ struct TestLaneMapAnalysisPass
       else
         llvm::errs() << "NOT_POINTWISE\n";
     });
+
+    mod.walk([&](triton::LoadOp load) {
+      llvm::errs() << "LOAD ";
+      if (isPointwiseLoad(load, *analysis))
+        llvm::errs() << "POINTWISE\n";
+      else
+        llvm::errs() << "NOT_POINTWISE\n";
+    });
   }
 };
 
