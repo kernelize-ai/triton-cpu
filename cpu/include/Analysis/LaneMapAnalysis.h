@@ -11,6 +11,7 @@
 
 namespace mlir {
 namespace triton {
+namespace cpu {
 
 struct LaneInfo {
   enum Kind { Unknown, Uniform, AffineLane } kind = Unknown;
@@ -48,16 +49,21 @@ struct LaneInfo {
     if (a == b)
       return a;
 
-    if (a.kind == Unknown)
+    if (a.kind == Unknown && b.kind != Unknown)
       return b;
-    if (b.kind == Unknown)
+    if (b.kind == Unknown && a.kind != Unknown)
       return a;
+    if (a.kind == Unknown && b.kind == Unknown)
+      return getUnknown();
 
-    // Two uniforms => still uniform (TODO: propagate baseScalar?)
+    // Uniform join: if both uniform but different bases, keep uniform (still
+    // pointwise)
     if (a.kind == Uniform && b.kind == Uniform)
       return getUniform();
 
-    // Uniform + affine => affine (fill baseScalar if missing)
+    // If one is uniform and other is affine, keep affine (still pointwise)
+    // If the affine LaneInfo does not have a base scalar use the uniform's base
+    // scalar
     if (a.kind == Uniform && b.kind == AffineLane)
       return b.baseScalar ? b
                           : getAffine(a.baseScalar, b.constOffset, b.stride);
@@ -65,7 +71,7 @@ struct LaneInfo {
       return a.baseScalar ? a
                           : getAffine(b.baseScalar, a.constOffset, a.stride);
 
-    // Two different affine => unknown (conservative)
+    // Two different affine forms => unknown (conservative)
     return getUnknown();
   }
 
@@ -87,21 +93,11 @@ struct LaneInfo {
   }
 };
 
-#if 0
-/// Lattice wrapper that uses LaneInfo::join.
-class LaneLattice : public mlir::dataflow::Lattice<LaneInfo> {
-public:
-  using Lattice::Lattice;
-
-  mlir::ChangeResult join(const LaneInfo &rhs) override {
-    LaneInfo cur = getValue();
-    LaneInfo next = LaneInfo::join(cur, rhs);
-    if (next == cur) return mlir::ChangeResult::NoChange;
-    setValue(next);
-    return mlir::ChangeResult::Change;
-  }
-};
-#endif
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                     const LaneInfo &info) {
+  info.print(os);
+  return os;
+}
 
 using LaneLattice = dataflow::Lattice<LaneInfo>;
 
@@ -135,16 +131,11 @@ private:
       if (r)
         propagateIfChanged(r, r->join(LaneInfo::getUnknown()));
   }
-
-  static LaneInfo evalAddI(const LaneInfo &a, const LaneInfo &b);
-  static LaneInfo evalSubI(const LaneInfo &a, const LaneInfo &b);
-  static LaneInfo evalMulI(const LaneInfo &a, const LaneInfo &b);
-  static LaneInfo evalAddPtr(const LaneInfo &basePtr, const LaneInfo &offs);
 };
 
-// TODO: maybe unused
 bool isPointwiseStore(triton::StoreOp storeOp, LaneMapAnalysis &analysis);
 
+} // namespace cpu
 } // namespace triton
 } // namespace mlir
 

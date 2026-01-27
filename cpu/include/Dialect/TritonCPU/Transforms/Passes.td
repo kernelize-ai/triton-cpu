@@ -49,4 +49,14 @@ def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> 
     ];
 }
 
+def TestLaneMapAnalysisPass : Pass<"test-lane-map-analysis", "mlir::ModuleOp"> {
+  let summary = "Test lane map analysis";
+
+  let description = [{
+    This pass tests the lane map analysis on the module.
+  }];
+
+  let dependentDialects = ["mlir::triton::TritonDialect"];
+}
+
 #endif

@@ -3,97 +3,51 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
+
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "tritoncpu-lane-map-analysis"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+
 using namespace mlir;
 using namespace mlir::triton;
 
-// TODO: it would be nice to embed these all in the generic LaneInfo.join
-LaneInfo LaneMapAnalysis::evalAddI(const LaneInfo &a, const LaneInfo &b) {
-  // Affine + constant uniform => affine with shifted c
-  if (a.kind == LaneInfo::AffineLane && b.kind == LaneInfo::Uniform) {
-    if (auto k = getI64Const(b.baseScalar))
-      return LaneInfo::getAffine(a.baseScalar, a.constOffset + *k, a.stride);
-  }
-  if (b.kind == LaneInfo::AffineLane && a.kind == LaneInfo::Uniform) {
-    if (auto k = getI64Const(a.baseScalar))
-      return LaneInfo::getAffine(b.baseScalar, b.constOffset + *k, b.stride);
-  }
-
-  // Affine + affine: only if bases match (or one base is null)
-  if (a.kind == LaneInfo::AffineLane && b.kind == LaneInfo::AffineLane) {
-    if (a.baseScalar == b.baseScalar)
-      return LaneInfo::getAffine(a.baseScalar, a.constOffset + b.constOffset,
-                                 a.stride + b.stride);
-  }
-
-  // Otherwise conservative join
-  return LaneInfo::join(a, b);
-}
-
-LaneInfo LaneMapAnalysis::evalSubI(const LaneInfo &a, const LaneInfo &b) {
-  if (a.kind == LaneInfo::AffineLane && b.kind == LaneInfo::Uniform) {
-    if (auto k = getI64Const(b.baseScalar))
-      return LaneInfo::getAffine(a.baseScalar, a.constOffset - *k, a.stride);
-  }
-  if (a.kind == LaneInfo::AffineLane && b.kind == LaneInfo::AffineLane) {
-    if (a.baseScalar == b.baseScalar)
-      return LaneInfo::getAffine(a.baseScalar, a.constOffset - b.constOffset,
-                                 a.stride - b.stride);
-  }
-  return LaneInfo::join(a, b);
-}
-
-LaneInfo LaneMapAnalysis::evalMulI(const LaneInfo &a, const LaneInfo &b) {
-  // Only handle multiply by constant
-  if (a.kind == LaneInfo::AffineLane && b.kind == LaneInfo::Uniform) {
-    if (auto k = getI64Const(b.baseScalar))
-      return LaneInfo::getAffine(a.baseScalar, a.constOffset * (*k),
-                                 a.stride * (*k));
-  }
-  if (b.kind == LaneInfo::AffineLane && a.kind == LaneInfo::Uniform) {
-    if (auto k = getI64Const(a.baseScalar))
-      return LaneInfo::getAffine(b.baseScalar, b.constOffset * (*k),
-                                 b.stride * (*k));
-  }
-  return LaneInfo::join(a, b);
-}
-
-LaneInfo LaneMapAnalysis::evalAddPtr(const LaneInfo &basePtr,
-                                     const LaneInfo &offs) {
-  // The useful case: basePtr is uniform scalar pointer; offs is affine lane
-  // (i32 offsets).
-  if (offs.kind != LaneInfo::AffineLane)
-    return LaneInfo::getUnknown();
-
-  if (basePtr.kind == LaneInfo::Uniform) {
-    // ptr(i) = basePtr + (offs.c + offs.s * lane)
-    // treat as affine with baseScalar = base pointer and c/s from offs.
-    return LaneInfo::getAffine(basePtr.baseScalar, offs.constOffset,
-                               offs.stride);
-  }
-
-  // If basePtr itself is affine, you can combine if same baseScalar (rare).
-  if (basePtr.kind == LaneInfo::AffineLane &&
-      basePtr.baseScalar == offs.baseScalar) {
-    return LaneInfo::getAffine(basePtr.baseScalar,
-                               basePtr.constOffset + offs.constOffset,
-                               basePtr.stride + offs.stride);
-  }
-
-  return LaneInfo::getUnknown();
-}
+namespace mlir {
+namespace triton {
+namespace cpu {
 
 LogicalResult
 LaneMapAnalysis::visitOperation(Operation *op,
                                 ArrayRef<const LaneLattice *> operands,
                                 ArrayRef<LaneLattice *> results) {
+  LDBG("Visiting operation " << *op);
+  LLVM_DEBUG({
+    for (auto *operand : operands) {
+      if (operand)
+        DBGS() << "Operand " << *operand << " has value " << operand->getValue()
+               << "\n";
+    }
+    for (auto *result : results) {
+      if (result)
+        DBGS() << "Result " << *result << " has value " << result->getValue()
+               << "\n";
+    }
+  });
+
   auto getOperand = [&](unsigned i) -> LaneInfo {
     return (i < operands.size() && operands[i]) ? operands[i]->getValue()
                                                 : LaneInfo::getUnknown();
   };
   auto joinToAll = [&](const LaneInfo &v) {
-    for (auto *r : results)
-      if (r)
+    for (auto *r : results) {
+      if (r) {
+        LDBG("Propagating to result " << *r << " with value "
+                                      << LaneInfo::join(r->getValue(), v));
         propagateIfChanged(r, r->join(v));
+      }
+    }
   };
 
   // No results => nothing to do.
@@ -101,13 +55,14 @@ LaneMapAnalysis::visitOperation(Operation *op,
     return success();
 
   if (isa<arith::ConstantOp>(op)) {
-    // Keep baseScalar as the constant SSA value, so evalAddI/MulI can read it.
-    joinToAll(LaneInfo::getUniform(op->getResult(0)));
+    // constants are always uniform across lanes
+    // TODO: keep the base scalar?
+    joinToAll(LaneInfo::getUniform());
     return success();
   }
 
   if (auto splat = dyn_cast<triton::SplatOp>(op)) {
-    // tt.splat %scalar => uniform with that scalar
+    // splat is uniform across lanes, keep the baseScalar
     joinToAll(LaneInfo::getUniform(splat.getSrc()));
     return success();
   }
@@ -120,45 +75,44 @@ LaneMapAnalysis::visitOperation(Operation *op,
     return success();
   }
 
-  if (isa<arith::AddIOp>(op)) {
-    joinToAll(evalAddI(getOperand(0), getOperand(1)));
-    return success();
-  }
-  if (isa<arith::SubIOp>(op)) {
-    joinToAll(evalSubI(getOperand(0), getOperand(1)));
-    return success();
-  }
-  if (isa<arith::MulIOp>(op)) {
-    joinToAll(evalMulI(getOperand(0), getOperand(1)));
-    return success();
-  }
-
-  if (isa<arith::CmpIOp, arith::CmpFOp, arith::SelectOp>(op)) {
-    // Compare/select/etc: pointwise if operands are pointwise
-    joinToAll(LaneInfo::join(getOperand(0), getOperand(1)));
+  // For elementwise ops, joining operand lane-forms is the canonical,
+  // conservative rule.
+  if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+          arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::CmpIOp,
+          arith::CmpFOp, arith::SelectOp>(op)) {
+    LaneInfo a = operands[0] ? operands[0]->getValue() : LaneInfo::getUnknown();
+    LaneInfo b = operands[1] ? operands[1]->getValue() : LaneInfo::getUnknown();
+    LaneInfo joined = LaneInfo::join(a, b);
+    joinToAll(joined);
     return success();
   }
 
-  if (isa<triton::BroadcastOp, triton::ExpandDimsOp>(op)) {
-    // Simple shape ops that preserve lane mapping (conservative forward)
-    joinToAll(getOperand(0));
+  if (auto addPtrOp = dyn_cast<triton::AddPtrOp>(op)) {
+    LaneInfo base =
+        operands[0] ? operands[0]->getValue() : LaneInfo::getUnknown();
+    LaneInfo offs =
+        operands[1] ? operands[1]->getValue() : LaneInfo::getUnknown();
+    LaneInfo joined = LaneInfo::join(base, offs);
+    joinToAll(joined);
     return success();
   }
 
-  if (isa<triton::AddPtrOp>(op)) {
-    joinToAll(evalAddPtr(getOperand(0), getOperand(1)));
-    return success();
-  }
-
-  if (isa<triton::LoadOp>(op)) {
-    // result lanes follow pointer lanes
-    joinToAll(getOperand(0));
+  if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
+    LaneInfo ptr =
+        operands[0] ? operands[0]->getValue() : LaneInfo::getUnknown();
+    // load keeps the lane mapping of the pointer
+    LDBG("Load op ptr lane info: " << ptr);
+    joinToAll(ptr);
     return success();
   }
 
   if (isa<triton::StoreOp>(op)) {
-    // stores have no results; nothing to propagate.
+    joinToAll(LaneInfo::getUnknown());
     return success();
+  }
+
+  if (isa<cpu::BlockStartOp>(op) || isa<cpu::BlockEndOp>(op)) {
+    joinToAll(LaneInfo::getUniform(op->getResult(0)));
   }
 
   // Unknown op kind => unknown
@@ -166,8 +120,9 @@ LaneMapAnalysis::visitOperation(Operation *op,
   return success();
 }
 
-bool mlir::triton::isPointwiseStore(triton::StoreOp storeOp,
-                                    LaneMapAnalysis &analysis) {
+bool isPointwiseStore(triton::StoreOp storeOp, LaneMapAnalysis &analysis) {
+  LDBG("Evaluating storeOp for pointwise store");
+
   auto *ptrLat = analysis.getLatticeElement(storeOp.getPtr());
   auto *valLat = analysis.getLatticeElement(storeOp.getValue());
 
@@ -176,7 +131,8 @@ bool mlir::triton::isPointwiseStore(triton::StoreOp storeOp,
 
   const LaneInfo &p = ptrLat->getValue();
   const LaneInfo &v = valLat->getValue();
-
+  LDBG("StoreOp ptr lane info: " << p);
+  LDBG("StoreOp value lane info: " << v);
   if (p.kind == LaneInfo::Unknown || v.kind == LaneInfo::Unknown)
     return false;
 
@@ -190,3 +146,7 @@ bool mlir::triton::isPointwiseStore(triton::StoreOp storeOp,
 
   return false;
 }
+
+} // namespace cpu
+} // namespace triton
+} // namespace mlir
