@@ -75,31 +75,37 @@ LaneMapAnalysis::visitOperation(Operation *op,
     return success();
   }
 
+  if (auto broadcast = dyn_cast<triton::BroadcastOp>(op)) {
+    joinToAll(getOperand(0));
+    return success();
+  }
+
+  if (auto expandDims = dyn_cast<triton::ExpandDimsOp>(op)) {
+    joinToAll(getOperand(0));
+    return success();
+  }
+
   // For elementwise ops, joining operand lane-forms is the canonical,
   // conservative rule.
-  if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
-          arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::CmpIOp,
-          arith::CmpFOp, arith::SelectOp>(op)) {
-    LaneInfo a = operands[0] ? operands[0]->getValue() : LaneInfo::getUnknown();
-    LaneInfo b = operands[1] ? operands[1]->getValue() : LaneInfo::getUnknown();
+  if (isa<arith::ArithDialect>(op->getDialect()) &&
+      op->hasTrait<OpTrait::Elementwise>()) {
+    LaneInfo a = getOperand(0);
+    LaneInfo b = getOperand(1);
     LaneInfo joined = LaneInfo::join(a, b);
     joinToAll(joined);
     return success();
   }
 
   if (auto addPtrOp = dyn_cast<triton::AddPtrOp>(op)) {
-    LaneInfo base =
-        operands[0] ? operands[0]->getValue() : LaneInfo::getUnknown();
-    LaneInfo offs =
-        operands[1] ? operands[1]->getValue() : LaneInfo::getUnknown();
+    LaneInfo base = getOperand(0);
+    LaneInfo offs = getOperand(1);
     LaneInfo joined = LaneInfo::join(base, offs);
     joinToAll(joined);
     return success();
   }
 
   if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
-    LaneInfo ptr =
-        operands[0] ? operands[0]->getValue() : LaneInfo::getUnknown();
+    LaneInfo ptr = getOperand(0);
     // load keeps the lane mapping of the pointer
     LDBG("Load op ptr lane info: " << ptr);
     joinToAll(ptr);
@@ -111,7 +117,9 @@ LaneMapAnalysis::visitOperation(Operation *op,
     return success();
   }
 
-  if (isa<cpu::BlockStartOp>(op) || isa<cpu::BlockEndOp>(op)) {
+  // block index is uniform across all lanes
+  if (isa<cpu::BlockStartOp>(op) || isa<cpu::BlockEndOp>(op) ||
+      isa<cpu::CurrentBlockOp>(op)) {
     joinToAll(LaneInfo::getUniform(op->getResult(0)));
   }
 

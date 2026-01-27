@@ -61,6 +61,16 @@ struct LaneInfo {
     if (a.kind == Uniform && b.kind == Uniform)
       return getUniform();
 
+    // Affine join: if both affine but with different bases keep the known base
+    // (if it exists)
+    if (a.kind == AffineLane && b.kind == AffineLane) {
+      if (!(a.constOffset == b.constOffset && a.stride == b.stride))
+        return getUnknown();
+      if (!a.baseScalar && !b.baseScalar)
+        return getUnknown();
+      return a.baseScalar ? a : b;
+    }
+
     // If one is uniform and other is affine, keep affine (still pointwise)
     // If the affine LaneInfo does not have a base scalar use the uniform's base
     // scalar
