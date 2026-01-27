@@ -119,4 +119,5 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
   }
 }
 
-// CHECK: STORE POINTWISE
+// CHECK-DAG: LOAD POINTWISE
+// CHECK-DAG: STORE POINTWISE

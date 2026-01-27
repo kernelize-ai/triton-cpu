@@ -127,15 +127,6 @@ public:
                                llvm::ArrayRef<LaneLattice *> results) override;
 
 private:
-  static std::optional<int64_t> getI64Const(mlir::Value v) {
-    mlir::Attribute attr;
-    if (mlir::matchPattern(v, mlir::m_Constant(&attr))) {
-      if (auto ia = llvm::dyn_cast<mlir::IntegerAttr>(attr))
-        return ia.getInt();
-    }
-    return std::nullopt;
-  }
-
   void setAllUnknown(llvm::ArrayRef<LaneLattice *> results) {
     for (auto *r : results)
       if (r)
@@ -144,6 +135,7 @@ private:
 };
 
 bool isPointwiseStore(triton::StoreOp storeOp, LaneMapAnalysis &analysis);
+bool isPointwiseLoad(triton::LoadOp loadOp, LaneMapAnalysis &analysis);
 
 } // namespace cpu
 } // namespace triton
