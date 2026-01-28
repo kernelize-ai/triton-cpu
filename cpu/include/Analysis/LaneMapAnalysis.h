@@ -13,96 +13,185 @@ namespace mlir {
 namespace triton {
 namespace cpu {
 
+struct UniformLinearExpr {
+  UniformLinearExpr() = default;
+
+  int64_t c = 0;
+  DenseMap<Value, int64_t>
+      coeffs; // sum coeff[v] * v where v must be scalar-uniform
+
+  bool operator==(const UniformLinearExpr &other) const {
+    return c == other.c && coeffs == other.coeffs;
+  }
+
+  static UniformLinearExpr add(const UniformLinearExpr &a,
+                               const UniformLinearExpr &b) {
+    UniformLinearExpr result;
+    result.c = a.c + b.c;
+    result.coeffs = a.coeffs;
+    for (auto &kv : b.coeffs) {
+      result.coeffs[kv.first] += kv.second;
+    }
+    return result;
+  }
+
+  static UniformLinearExpr fromConst(int64_t c) {
+    UniformLinearExpr result;
+    result.c = c;
+    return result;
+  }
+
+  static UniformLinearExpr fromValue(Value v, int64_t coeff = 1) {
+    UniformLinearExpr result;
+    result.coeffs[v] = coeff;
+    return result;
+  }
+
+  void print(llvm::raw_ostream &os) const {
+    os << "{c=" << c;
+    if (!coeffs.empty()) {
+      os << ", coeffs=[";
+      bool first = true;
+      for (auto &kv : coeffs) {
+        if (!first)
+          os << ", ";
+        first = false;
+        os << kv.second << "*" << kv.first;
+      }
+      os << "]";
+    }
+    os << "}";
+  }
+};
+
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                     const UniformLinearExpr &expr) {
+  expr.print(os);
+  return os;
+}
+
 struct LaneInfo {
-  enum Kind { Unknown, Uniform, AffineLane } kind = Unknown;
+  enum Kind { Uninitialized, Uniform, Pointwise, Overdefined } kind = Uninitialized;
 
-  // Uniform: baseScalar optionally holds the defining scalar Value.
-  // AffineLane: laneVal = baseScalar + constOffset + stride * laneId
-  Value baseScalar;
-  int64_t constOffset = 0;
-  int64_t stride = 0;
+  // Pointwise: value(lane) = base(lane) + uniform + laneStride * laneId
+  // Uniform:   value(lane) = uniform
+  Value base;                // may be scalar or tensor
+  UniformLinearExpr uniform; // lane-invariant linear expression
+  int64_t laneStride = 0; // TODO: do we need this? make_range step is always 1
 
-  static LaneInfo getUnknown() { return LaneInfo(); }
+  static LaneInfo getUninitialized() { return LaneInfo(); }
 
-  static LaneInfo getUniform(Value baseScalar = Value()) {
+  static LaneInfo getOverdefined() {
+    LaneInfo f; f.kind = Overdefined; return f;
+  }
+
+  static LaneInfo getUniform(UniformLinearExpr u = UniformLinearExpr()) {
     LaneInfo f;
     f.kind = Uniform;
-    f.baseScalar = baseScalar;
+    f.uniform = std::move(u);
     return f;
   }
 
-  static LaneInfo getAffine(Value baseScalar, int64_t c, int64_t s) {
+  static LaneInfo getPointwise(Value base,
+                               UniformLinearExpr u = UniformLinearExpr(),
+                               int64_t s = 0) {
     LaneInfo f;
-    f.kind = AffineLane;
-    f.baseScalar = baseScalar;
-    f.constOffset = c;
-    f.stride = s;
+    f.kind = Pointwise;
+    f.base = base;
+    f.uniform = std::move(u);
+    f.laneStride = s;
     return f;
+  }
+
+  static LaneInfo getPessimisticValueState(Value v) {
+    if (!isa<TensorType>(v.getType())) {
+      return getUniform(UniformLinearExpr::fromValue(v));
+    }
+    return getUninitialized();
   }
 
   bool operator==(const LaneInfo &o) const {
-    return kind == o.kind && baseScalar == o.baseScalar &&
-           constOffset == o.constOffset && stride == o.stride;
+    if (kind != o.kind)
+      return false;
+    if (!(uniform == o.uniform))
+      return false;
+
+    if (kind == Pointwise) {
+      return base == o.base && laneStride == o.laneStride;
+    }
+
+    return true;
   }
 
   static LaneInfo join(const LaneInfo &a, const LaneInfo &b) {
-    if (a == b)
-      return a;
+   if (a == b) return a;
 
-    if (a.kind == Unknown && b.kind != Unknown)
-      return b;
-    if (b.kind == Unknown && a.kind != Unknown)
-      return a;
-    if (a.kind == Unknown && b.kind == Unknown)
-      return getUnknown();
+  // ⊥ rules
+  if (a.kind == Uninitialized) return b;
+  if (b.kind == Uninitialized) return a;
 
-    // Uniform join: if both uniform but different bases, keep uniform (still
-    // pointwise)
-    if (a.kind == Uniform && b.kind == Uniform) {
-      if (a.baseScalar && !b.baseScalar)
-        return getUniform(a.baseScalar);
-      if (b.baseScalar && !a.baseScalar)
-        return getUniform(b.baseScalar);
-      return getUniform();
-    }
+  // ⊤ rules
+  if (a.kind == Overdefined || b.kind == Overdefined)
+    return getOverdefined();
 
-    // Affine join: if both affine but with different bases keep the known base
-    // (if it exists)
-    if (a.kind == AffineLane && b.kind == AffineLane) {
-      if (!(a.constOffset == b.constOffset && a.stride == b.stride))
-        return getUnknown();
-      if (!a.baseScalar && !b.baseScalar)
-        return getUnknown();
-      return a.baseScalar ? a : b;
-    }
+  // Uniform ⊔ Uniform
+  if (a.kind == Uniform && b.kind == Uniform) {
+    if (a.uniform == b.uniform) return a;
+    return getUniform(); // "some uniform", drop details
+  }
 
-    // If one is uniform and other is affine, keep affine (still pointwise)
-    // If the affine LaneInfo does not have a base scalar use the uniform's base
-    // scalar
-    if (a.kind == Uniform && b.kind == AffineLane)
-      return b.baseScalar ? b
-                          : getAffine(a.baseScalar, b.constOffset, b.stride);
-    if (b.kind == Uniform && a.kind == AffineLane)
-      return a.baseScalar ? a
-                          : getAffine(b.baseScalar, a.constOffset, a.stride);
+  // Promote Uniform to Pointwise(null base) for merging with Pointwise
+  auto asPointwise = [](const LaneInfo &x) -> LaneInfo {
+    if (x.kind == Uniform)
+      return getPointwise(Value(), x.uniform, /*s=*/0);
+    return x;
+  };
+  LaneInfo ap = asPointwise(a);
+  LaneInfo bp = asPointwise(b);
 
-    // Two different affine forms => unknown (conservative)
-    return getUnknown();
+  // Pointwise ⊔ Pointwise
+  if (ap.kind == Pointwise && bp.kind == Pointwise) {
+    // Base: if either is unknown-base or bases disagree => unknown-base
+    Value outBase;
+    if (!ap.base || !bp.base) outBase = Value();
+    else if (ap.base == bp.base) outBase = ap.base;
+    else outBase = Value();
+
+    // Uniform part: keep if identical else drop
+    UniformLinearExpr outU = (ap.uniform == bp.uniform) ? ap.uniform
+                                                        : UniformLinearExpr();
+
+    int64_t outStride = (ap.laneStride == bp.laneStride) ? ap.laneStride : 0;
+    return getPointwise(outBase, outU, outStride);
+  }
+
+  return getOverdefined();
   }
 
   void print(llvm::raw_ostream &os) const {
     os << "LaneInfo(";
     switch (kind) {
-    case Unknown:
-      os << "Unknown";
+    case Uninitialized:
+      os << "Uninitialized";
       break;
-    case Uniform:
-      os << "Uniform(base=" << baseScalar << ")";
+    case Overdefined:
+      os << "Overdefined";
       break;
-    case AffineLane:
-      os << "Affine(base=" << baseScalar << ", c=" << constOffset
-         << ", s=" << stride << ")";
+    case Uniform: {
+      os << "Uniform";
+      if (base)
+        os << ", base=" << base;
+      os << ", u=" << uniform;
       break;
+    }
+    case Pointwise: {
+      os << "Pointwise";
+      os << ", base=" << base;
+      os << ", u=" << uniform;
+      if (laneStride != 0)
+        os << ", laneStride=" << laneStride;
+      break;
+    }
     }
     os << ")";
   }
@@ -124,7 +213,9 @@ public:
   using SparseForwardDataFlowAnalysis<LaneLattice>::getLatticeElement;
 
   void setToEntryState(LaneLattice *lattice) override {
-    propagateIfChanged(lattice, lattice->join(LaneInfo::getUnknown()));
+    propagateIfChanged(
+        lattice, lattice->join(
+                     LaneInfo::getPessimisticValueState(lattice->getAnchor())));
   }
 
   LogicalResult visitOperation(mlir::Operation *op,
@@ -140,7 +231,7 @@ private:
   void setAllUnknown(llvm::ArrayRef<LaneLattice *> results) {
     for (auto *r : results)
       if (r)
-        propagateIfChanged(r, r->join(LaneInfo::getUnknown()));
+        propagateIfChanged(r, r->join(LaneInfo::getOverdefined()));
   }
 };
 
