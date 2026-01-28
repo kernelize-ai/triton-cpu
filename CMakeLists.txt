@@ -63,7 +63,7 @@ if(BUILD_SLEEF)
   ExternalProject_Add_Step(sleef copy_lib
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
     COMMAND ${CMAKE_COMMAND} -E copy
-            ${SLEEF_INSTALL_DIR}/lib/libsleef.a
+            ${SLEEF_INSTALL_DIR}/lib64/libsleef.a
             ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
     DEPENDEES install
     ALWAYS 1
