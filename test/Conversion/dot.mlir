@@ -1,4 +1,4 @@
-// RUN: triton-opt %s -split-input-file --convert-triton-cpu-to-llvm | FileCheck %s
+// RUN: triton-opt %s -split-input-file --convert-triton-cpu-to-llvm --canonicalize | FileCheck %s
 
 #blocked = #ttg.blocked<{sizePerThread = [2, 2], threadsPerWarp = [1, 1], warpsPerCTA = [1, 1], order = [1, 0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shared = 0 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
