@@ -57,7 +57,7 @@ LaneMapAnalysis::visitOperation(Operation *op,
   if (isa<arith::ConstantOp>(op)) {
     // constants are always uniform across lanes
     // TODO: keep the base scalar?
-    joinToAll(LaneInfo::getUniform());
+    joinToAll(LaneInfo::getUniform(op->getResult(0)));
     return success();
   }
 
@@ -130,10 +130,15 @@ LaneMapAnalysis::visitOperation(Operation *op,
   }
 
   if (auto addPtrOp = dyn_cast<triton::AddPtrOp>(op)) {
+#if 1
+    LaneInfo offs = getOperand(1);
+    joinToAll(offs);
+#else
     LaneInfo base = getOperand(0);
     LaneInfo offs = getOperand(1);
     LaneInfo joined = LaneInfo::join(base, offs);
     joinToAll(joined);
+#endif
     return success();
   }
 
@@ -159,6 +164,45 @@ LaneMapAnalysis::visitOperation(Operation *op,
   // Unknown op kind => unknown
   setAllUnknown(results);
   return success();
+}
+
+void LaneMapAnalysis::visitNonControlFlowArguments(
+    Operation *op, const RegionSuccessor &successor,
+    ArrayRef<LaneLattice *> argLattices, unsigned firstIndex) {
+  if (auto forOp = dyn_cast<scf::ForOp>(op)) {
+    auto getLaneOrUnknown = [](const LaneLattice *lat) {
+      return lat ? lat->getValue() : LaneInfo::getUnknown();
+    };
+
+    Block *body = forOp.getBody();
+    auto yield = cast<scf::YieldOp>(body->getTerminator());
+    llvm::errs() << "yield = " << yield << "\n";
+    for (auto [idx, arg] : llvm::enumerate(body->getArguments())) {
+      llvm::errs() << "checkout arg: " << idx << " ==> " << arg << "\n";
+      if (idx == 0) {
+        // induction var
+        continue;
+      }
+
+      LaneInfo fromInit =
+          getLaneOrUnknown(getLatticeElementFor(getProgramPointAfter(op), arg));
+      llvm::errs() << "fromInitLat: " << fromInit << "\n";
+
+      auto yieldVal = yield.getOperand(idx - forOp.getNumInductionVars());
+      auto yieldLat = getLatticeElementFor(getProgramPointAfter(op), yieldVal);
+      LaneInfo yieldInfo = getLaneOrUnknown(yieldLat);
+
+      // LaneInfo merged = LaneInfo::join(fromInit, fromYield);
+      llvm::errs() << "yieldVal: " << yieldVal << "\n";
+      llvm::errs() << "fromYieldLat: " << yieldInfo << "\n";
+
+      // TODO: how can we merge fromInit and yieldInfo?
+    }
+    llvm::errs() << "done\n";
+  }
+  setAllToEntryStates(argLattices.take_front(firstIndex));
+  setAllToEntryStates(argLattices.drop_front(
+      firstIndex + successor.getSuccessorInputs().size()));
 }
 
 bool isPointwiseStore(triton::StoreOp storeOp, LaneMapAnalysis &analysis) {

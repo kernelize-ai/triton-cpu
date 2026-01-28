@@ -58,8 +58,13 @@ struct LaneInfo {
 
     // Uniform join: if both uniform but different bases, keep uniform (still
     // pointwise)
-    if (a.kind == Uniform && b.kind == Uniform)
+    if (a.kind == Uniform && b.kind == Uniform) {
+      if (a.baseScalar && !b.baseScalar)
+        return getUniform(a.baseScalar);
+      if (b.baseScalar && !a.baseScalar)
+        return getUniform(b.baseScalar);
       return getUniform();
+    }
 
     // Affine join: if both affine but with different bases keep the known base
     // (if it exists)
@@ -92,7 +97,7 @@ struct LaneInfo {
       os << "Unknown";
       break;
     case Uniform:
-      os << "Uniform";
+      os << "Uniform(base=" << baseScalar << ")";
       break;
     case AffineLane:
       os << "Affine(base=" << baseScalar << ", c=" << constOffset
@@ -125,6 +130,11 @@ public:
   LogicalResult visitOperation(mlir::Operation *op,
                                llvm::ArrayRef<const LaneLattice *> operands,
                                llvm::ArrayRef<LaneLattice *> results) override;
+
+  void visitNonControlFlowArguments(Operation *op,
+                                    const RegionSuccessor &successor,
+                                    ArrayRef<LaneLattice *> argLattices,
+                                    unsigned firstIndex) override;
 
 private:
   void setAllUnknown(llvm::ArrayRef<LaneLattice *> results) {
