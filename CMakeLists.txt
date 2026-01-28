@@ -59,12 +59,17 @@ if(BUILD_SLEEF)
     INSTALL_DIR ${SLEEF_INSTALL_DIR}
   )
 
+  # Try lib64 first, fall back to lib.
+  if(EXISTS ${SLEEF_INSTALL_DIR}/lib64/libsleef.a)
+    set(SLEEF_LIB_PATH ${SLEEF_INSTALL_DIR}/lib64/libsleef.a)
+  else()
+    set(SLEEF_LIB_PATH ${SLEEF_INSTALL_DIR}/lib/libsleef.a)
+  endif()
+
   # Add a custom step to copy libsleef.a after install
   ExternalProject_Add_Step(sleef copy_lib
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-    COMMAND ${CMAKE_COMMAND} -E copy
-            ${SLEEF_INSTALL_DIR}/lib/libsleef.a
-            ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+    COMMAND ${CMAKE_COMMAND} -E copy ${SLEEF_LIB_PATH} ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
     DEPENDEES install
     ALWAYS 1
   )
