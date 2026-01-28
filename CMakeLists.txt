@@ -58,7 +58,7 @@ if(BUILD_SLEEF)
     UPDATE_DISCONNECTED 1    # don’t re-fetch every time
     INSTALL_DIR ${SLEEF_INSTALL_DIR}
   )
-q
+
   # Try lib64 first, fall back to lib.
   if(EXISTS ${SLEEF_INSTALL_DIR}/lib64/libsleef.a)
     set(SLEEF_LIB_PATH ${SLEEF_INSTALL_DIR}/lib64/libsleef.a)
