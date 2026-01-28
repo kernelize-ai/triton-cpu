@@ -18,7 +18,14 @@ add_subdirectory(test)
 
 # uKernel Libs
 
-option(BUILD_SLEEF "Build SLEEF library" ON)
+# Build Sleef by default; turn it off with `BUILD_SLEEF=OFF` in the environment (i.e., when building
+# via `pip install`) or `-DCMAKE_BUILD_SLEEF=OFF` if using CMake directly.
+if(DEFINED ENV{BUILD_SLEEF})
+  set(DEFAULT_BUILD_SLEEF $ENV{BUILD_SLEEF})
+else()
+  set(DEFAULT_BUILD_SLEEF ON)
+endif()
+option(BUILD_SLEEF "Build SLEEF library" ${DEFAULT_BUILD_SLEEF})
 if(BUILD_SLEEF)
   include(ExternalProject)
 
