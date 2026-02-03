@@ -18,9 +18,9 @@ repos:
       - id: debug-statements
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.1
+    rev: v0.15.0
     hooks:
-      - id: ruff
+      - id: ruff-check
         files: '(^python|^third_party/proton|^third_party/amd|^third_party/nvidia|^test)/.*'
         args: ["--fix", "--exit-non-zero-on-fix"]
         exclude: |

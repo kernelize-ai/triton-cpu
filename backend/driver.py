@@ -1,12 +1,10 @@
 import functools
 import triton
 import os
-import subprocess
 import tempfile
 import time
 import platform
 import importlib
-from pathlib import Path
 
 from triton.runtime.build import compile_module_from_src
 from triton.backends.driver import DriverBase
