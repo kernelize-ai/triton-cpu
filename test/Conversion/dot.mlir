@@ -13,8 +13,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
     // COM: We should see a bunch of repetitions of this pattern:
     // CHECK: [[A:%.*]] = llvm.fpext {{%.*}} : f16 to f32
     // CHECK: [[B:%.*]] = llvm.fpext {{%.*}} : f16 to f32
-    // CHECK: [[MUL:%.*]] = llvm.fmul [[A]], [[B]] : f32
-    // CHECK: {{%.*}} = llvm.fadd {{%.*}}, [[MUL]] : f32
+    // CHECK: [[MUL:%.*]] = llvm.intr.fma([[A]], [[B]], {{%.*}}) : (f32, f32, f32) -> f32
     tt.return %d : tensor<2x2xf32, #blocked>
   }
 }
@@ -34,8 +33,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
     // COM: We should see a bunch of repetitions of this pattern:
     // CHECK: [[A:%.*]] = llvm.fpext {{%.*}} : bf16 to f32
     // CHECK: [[B:%.*]] = llvm.fpext {{%.*}} : bf16 to f32
-    // CHECK: [[MUL:%.*]] = llvm.fmul [[A]], [[B]] : f32
-    // CHECK: {{%.*}} = llvm.fadd {{%.*}}, [[MUL]] : f32
+    // CHECK: [[MUL:%.*]] = llvm.intr.fma([[A]], [[B]], {{%.*}}) : (f32, f32, f32) -> f32
     tt.return %d : tensor<2x2xf32, #blocked>
   }
 }
