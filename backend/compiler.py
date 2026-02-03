@@ -1,4 +1,3 @@
-from importlib.metadata import metadata
 import tempfile
 import functools
 import hashlib
@@ -110,7 +109,7 @@ class CPUBackend(BaseBackend):
     @staticmethod
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
-        dump_enabled = pm.enable_debug()
+        pm.enable_debug()
         threads_per_warp = 1
         metadata["warp_size"] = threads_per_warp
         num_ctas = 1
