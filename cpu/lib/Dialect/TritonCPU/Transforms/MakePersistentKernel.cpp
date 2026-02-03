@@ -148,9 +148,14 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
                                      userAttrs, argDicts);
   wrap->setAttr(SymbolTable::getVisibilityAttrName(),
                 b.getStringAttr("public"));
+  wrap->setAttr("ttc.persistent_kernel", b.getUnitAttr());
 
   Block *entry = wrap.addEntryBlock();
   OpBuilder wb(entry, entry->end());
+
+  for (auto arg : llvm::zip(wrap.getArguments(), kernel.getArguments())) {
+    std::get<0>(arg).setLoc(std::get<1>(arg).getLoc());
+  }
 
   Value bEnd = triton::cpu::BlockEndOp::create(wb, wrap.getLoc(), i32Ty);
   Value bStart = triton::cpu::BlockStartOp::create(wb, wrap.getLoc(), i32Ty);
