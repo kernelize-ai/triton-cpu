@@ -143,8 +143,8 @@ struct ConvertTritonCPUToLLVM
 
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo,
                                                    patterns, benefit);
-    mlir::triton::populateInstrumentationToLLVMPatterns(
-        typeConverter, targetInfo, patterns, benefit);
+    mlir::triton::populateInstrumentationToLLVMPatterns(typeConverter,
+                                                        patterns);
 
     TritonLLVMConversionTarget convTarget(*context);
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns))))
