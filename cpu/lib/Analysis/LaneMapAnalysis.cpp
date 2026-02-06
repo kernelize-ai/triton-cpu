@@ -20,41 +20,147 @@ namespace cpu {
 
 namespace {
 
-// Cases:
-// Uniform + Uniform -> Uniform(sum)
-// Pointwise(baseX) + Uniform(u) -> Pointwise(baseX, uniform += u)
-// Uniform + Pointwise(baseY) -> Pointwise(baseY, uniform += u)
-// Pointwise(baseX) + Pointwise(baseX) with same base -> Pointwise(baseX,
-// uniform += uniform) otherwise -> Unknown
-inline LaneInfo addElementwiseAdd(const LaneInfo &a, const LaneInfo &b) {
-// If either is ⊥, treat as no information; the framework join will handle it,
-  // but returning the other is often fine too.
-  if (a.kind == LaneInfo::Uninitialized) return b;
-  if (b.kind == LaneInfo::Uninitialized) return a;
-
+// Updated signature to accept the result Value of the operation being visited
+inline LaneInfo addElementwiseAdd(const LaneInfo &a, const LaneInfo &b,
+                                  Value resultVal = Value()) {
+  // 1. Handle Uninitialized/Overdefined propagation
+  if (a.kind == LaneInfo::Uninitialized)
+    return b;
+  if (b.kind == LaneInfo::Uninitialized)
+    return a;
   if (a.kind == LaneInfo::Overdefined || b.kind == LaneInfo::Overdefined)
     return LaneInfo::getOverdefined();
 
+  // 2. Uniform + Uniform -> Uniform
   if (a.kind == LaneInfo::Uniform && b.kind == LaneInfo::Uniform)
     return LaneInfo::getUniform(UniformLinearExpr::add(a.uniform, b.uniform));
 
-  auto toPointwise = [](const LaneInfo &x) {
-    if (x.kind == LaneInfo::Uniform) return LaneInfo::getPointwise(Value(), x.uniform, 0);
-    return x;
-  };
-  LaneInfo ap = toPointwise(a);
-  LaneInfo bp = toPointwise(b);
+  // 3. Handle Mixed Cases (Uniform + Pointwise)
+  // We want to preserve the base of the Pointwise operand.
+  const LaneInfo *pPointwise = nullptr;
+  const LaneInfo *pUniform = nullptr;
 
-  UniformLinearExpr outU = UniformLinearExpr::add(ap.uniform, bp.uniform);
+  if (a.kind == LaneInfo::Pointwise && b.kind == LaneInfo::Uniform) {
+    pPointwise = &a;
+    pUniform = &b;
+  } else if (b.kind == LaneInfo::Pointwise && a.kind == LaneInfo::Uniform) {
+    pPointwise = &b;
+    pUniform = &a;
+  }
 
-  Value outBase;
-  if (ap.kind == LaneInfo::Pointwise && bp.kind == LaneInfo::Pointwise &&
-      ap.base && bp.base && ap.base == bp.base)
-    outBase = ap.base;
-  else
-    outBase = Value(); // base-agnostic pointwise (safe fallback)
+  if (pPointwise) {
+    UniformLinearExpr newU =
+        UniformLinearExpr::add(pPointwise->uniform, pUniform->uniform);
+    // Preserve the existing base and stride
+    return LaneInfo::getPointwise(pPointwise->base, newU,
+                                  pPointwise->laneStride);
+  }
 
-  return LaneInfo::getPointwise(outBase, outU, /*laneStride=*/0);
+  // 4. Pointwise + Pointwise
+  // Both are pointwise. We add their uniform offsets.
+  UniformLinearExpr newU = UniformLinearExpr::add(a.uniform, b.uniform);
+
+  // If bases match, preserve the base.
+  if (a.base == b.base) {
+    return LaneInfo::getPointwise(a.base, newU, a.laneStride);
+  }
+
+  // If bases differ (e.g. row_idx + col_idx), we cannot point to just one.
+  // We set the NEW base to be the result of this operation.
+  // This essentially says: "The variation starts from this add instruction."
+  // The uniform parts (coeffs) are still extracted into 'newU'.
+  if (resultVal) {
+    return LaneInfo::getPointwise(resultVal, newU, 0);
+  }
+
+  // Fallback if no resultVal provided (shouldn't happen with correct usage)
+  return LaneInfo::getPointwise(Value(), newU, 0);
+}
+
+// Helper to detect if a value is effectively constant (even if Pointwise)
+bool isConstantValue(Value v) {
+  if (!v)
+    return false;
+  Operation *op = v.getDefiningOp();
+  if (!op)
+    return false;
+  if (isa<arith::ConstantOp>(op))
+    return true;
+  // Handle splat of constant
+  if (auto splat = dyn_cast<triton::SplatOp>(op)) {
+    if (auto def = splat.getSrc().getDefiningOp())
+      return isa<arith::ConstantOp>(def);
+  }
+  return false;
+}
+
+// Generic merger for arithmetic ops
+LaneInfo mergeArithmetic(Operation *op, const LaneInfo &lhs,
+                         const LaneInfo &rhs) {
+  // 1. Handle Uninitialized/Overdefined
+  if (lhs.kind == LaneInfo::Uninitialized)
+    return rhs;
+  if (rhs.kind == LaneInfo::Uninitialized)
+    return lhs;
+  if (lhs.kind == LaneInfo::Overdefined || rhs.kind == LaneInfo::Overdefined)
+    return LaneInfo::getOverdefined();
+
+  // 2. Uniform + Uniform
+  if (lhs.kind == LaneInfo::Uniform && rhs.kind == LaneInfo::Uniform) {
+    // For simplicity, we only strictly track ADD for the uniform expr.
+    // For others, we might reset 'u' or try to combine if your
+    // UniformLinearExpr supports it. Assuming 'add' is the primary concern for
+    // pointers:
+    if (isa<arith::AddIOp, arith::AddFOp, triton::AddPtrOp>(op)) {
+      return LaneInfo::getUniform(
+          UniformLinearExpr::add(lhs.uniform, rhs.uniform));
+    }
+    // For mul/rem/etc between uniforms, you might just return a clean
+    // Uniform(0) or calculate it if you have the facility.
+    return LaneInfo::getUniform();
+  }
+
+  // 3. Identify Base and Offset
+  const LaneInfo *pBase = nullptr; // The operand providing the base
+  const LaneInfo *pOff =
+      nullptr; // The operand providing the offset (Uniform or Constant)
+
+  // Case A: Pointwise + Uniform
+  if (lhs.kind == LaneInfo::Pointwise && rhs.kind == LaneInfo::Uniform) {
+    pBase = &lhs;
+    pOff = &rhs;
+  } else if (rhs.kind == LaneInfo::Pointwise && lhs.kind == LaneInfo::Uniform) {
+    pBase = &rhs;
+    pOff = &lhs;
+  }
+  // Case B: Pointwise + Constant Pointwise (Fix for the Loop Issue)
+  else if (lhs.kind == LaneInfo::Pointwise && rhs.kind == LaneInfo::Pointwise) {
+    if (isConstantValue(rhs.base)) {
+      pBase = &lhs;
+      pOff = &rhs;
+    } else if (isConstantValue(lhs.base)) {
+      pBase = &rhs;
+      pOff = &lhs;
+    } else if (lhs.base == rhs.base) {
+      // Bases match, standard merge
+      pBase = &lhs;
+      pOff = &rhs;
+    }
+  }
+
+  // If we found a valid Base + Offset pattern and the Op is linear
+  // (Add/Sub/AddPtr)
+  if (pBase && isa<arith::AddIOp, arith::AddFOp, triton::AddPtrOp>(op)) {
+    // We can merge them into the existing base
+    UniformLinearExpr newU =
+        UniformLinearExpr::add(pBase->uniform, pOff->uniform);
+    return LaneInfo::getPointwise(pBase->base, newU, pBase->laneStride);
+  }
+
+  // 4. Fallback: Create a NEW Base
+  // For Mul, Rem, Div, or conflicting bases, we set the result as the new base.
+  // This is crucial: Never return NULL base for a valid operation.
+  return LaneInfo::getPointwise(op->getResult(0), UniformLinearExpr(), 0);
 }
 
 } // namespace
@@ -122,13 +228,16 @@ LaneMapAnalysis::visitOperation(Operation *op,
     return success();
   }
 
-  if (isa<triton::BroadcastOp, triton::ExpandDimsOp>(op)) {
-    LaneInfo in = getOperand(0);
-    if (in.kind == LaneInfo::Pointwise) {
+  // Handle ExpandDims / Broadcast (Ensure they set base=result if needed)
+  if (isa<triton::ExpandDimsOp, triton::BroadcastOp>(op)) {
+    LaneInfo src = getOperand(0);
+    if (src.kind == LaneInfo::Pointwise) {
+      // If tracking through dims is supported, do so.
+      // Otherwise, start a new base to be safe.
       joinToAll(
-          LaneInfo::getPointwise(op->getResult(0), in.uniform, in.laneStride));
+          LaneInfo::getPointwise(op->getResult(0), UniformLinearExpr(), 0));
     } else {
-      joinToAll(in);
+      joinToAll(src); // Propagate Uniform
     }
     return success();
   }
@@ -171,11 +280,15 @@ LaneMapAnalysis::visitOperation(Operation *op,
     LaneInfo a = getOperand(0);
     LaneInfo b = getOperand(1);
 
-    if (isa<arith::AddIOp, arith::AddFOp>(op)) {
-      joinToAll(addElementwiseAdd(a, b));
+    // Handle Arithmetic and Pointer Arithmetic
+    if (isa<arith::AddIOp, arith::AddFOp, arith::SubIOp, arith::SubFOp,
+            arith::MulIOp, arith::DivSIOp, arith::RemSIOp>(op)) {
+      LaneInfo lhs = getOperand(0);
+      LaneInfo rhs = getOperand(1);
+      joinToAll(mergeArithmetic(op, lhs, rhs));
       return success();
     }
-
+#if 0
     if (isa<arith::SubIOp, arith::SubFOp>(op)) {
       // Similar to add, but negate rhs uniform.
       // TODO: use addElementwiseAdd but find some way to negate the second
@@ -210,19 +323,28 @@ LaneMapAnalysis::visitOperation(Operation *op,
       joinToAll(LaneInfo::getOverdefined());
       return success();
     }
-
+#endif
     // Default conservative behavior for other elementwise ops:
     // keep pointwise if possible, else unknown.
     joinToAll(LaneInfo::join(a, b));
     return success();
   }
 
+#if 1
+  if (auto addPtrOp = dyn_cast<triton::AddPtrOp>(op)) {
+    LaneInfo lhs = getOperand(0);
+    LaneInfo rhs = getOperand(1);
+    joinToAll(mergeArithmetic(op, lhs, rhs));
+    return success();
+  }
+#else
   if (auto addPtrOp = dyn_cast<triton::AddPtrOp>(op)) {
     LaneInfo base = getOperand(0);
     LaneInfo offs = getOperand(1);
-    joinToAll(addElementwiseAdd(base, offs));
+    joinToAll(addElementwiseAdd(base, offs, op->getResult(0)));
     return success();
   }
+#endif
 
   if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
     LaneInfo ptr = getOperand(0);
