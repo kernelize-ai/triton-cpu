@@ -71,7 +71,12 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
 }
 
 struct LaneInfo {
-  enum Kind { Uninitialized, Uniform, Pointwise, Overdefined } kind = Uninitialized;
+  enum Kind {
+    Uninitialized,
+    Uniform,
+    Pointwise,
+    Overdefined
+  } kind = Uninitialized;
 
   // Pointwise: value(lane) = base(lane) + uniform + laneStride * laneId
   // Uniform:   value(lane) = uniform
@@ -82,7 +87,9 @@ struct LaneInfo {
   static LaneInfo getUninitialized() { return LaneInfo(); }
 
   static LaneInfo getOverdefined() {
-    LaneInfo f; f.kind = Overdefined; return f;
+    LaneInfo f;
+    f.kind = Overdefined;
+    return f;
   }
 
   static LaneInfo getUniform(UniformLinearExpr u = UniformLinearExpr()) {
@@ -124,48 +131,55 @@ struct LaneInfo {
   }
 
   static LaneInfo join(const LaneInfo &a, const LaneInfo &b) {
-   if (a == b) return a;
+    if (a == b)
+      return a;
 
-  // ⊥ rules
-  if (a.kind == Uninitialized) return b;
-  if (b.kind == Uninitialized) return a;
+    // ⊥ rules
+    if (a.kind == Uninitialized)
+      return b;
+    if (b.kind == Uninitialized)
+      return a;
 
-  // ⊤ rules
-  if (a.kind == Overdefined || b.kind == Overdefined)
+    // ⊤ rules
+    if (a.kind == Overdefined || b.kind == Overdefined)
+      return getOverdefined();
+
+    // Uniform ⊔ Uniform
+    if (a.kind == Uniform && b.kind == Uniform) {
+      if (a.uniform == b.uniform)
+        return a;
+      return getUniform(); // "some uniform", drop details
+    }
+
+    // Promote Uniform to Pointwise(null base) for merging with Pointwise
+    auto asPointwise = [](const LaneInfo &x) -> LaneInfo {
+      if (x.kind == Uniform)
+        return getPointwise(Value(), x.uniform, /*s=*/0);
+      return x;
+    };
+    LaneInfo ap = asPointwise(a);
+    LaneInfo bp = asPointwise(b);
+
+    // Pointwise ⊔ Pointwise
+    if (ap.kind == Pointwise && bp.kind == Pointwise) {
+      // Base: if either is unknown-base or bases disagree => unknown-base
+      Value outBase;
+      if (!ap.base || !bp.base)
+        outBase = Value();
+      else if (ap.base == bp.base)
+        outBase = ap.base;
+      else
+        outBase = Value();
+
+      // Uniform part: keep if identical else drop
+      UniformLinearExpr outU =
+          (ap.uniform == bp.uniform) ? ap.uniform : UniformLinearExpr();
+
+      int64_t outStride = (ap.laneStride == bp.laneStride) ? ap.laneStride : 0;
+      return getPointwise(outBase, outU, outStride);
+    }
+
     return getOverdefined();
-
-  // Uniform ⊔ Uniform
-  if (a.kind == Uniform && b.kind == Uniform) {
-    if (a.uniform == b.uniform) return a;
-    return getUniform(); // "some uniform", drop details
-  }
-
-  // Promote Uniform to Pointwise(null base) for merging with Pointwise
-  auto asPointwise = [](const LaneInfo &x) -> LaneInfo {
-    if (x.kind == Uniform)
-      return getPointwise(Value(), x.uniform, /*s=*/0);
-    return x;
-  };
-  LaneInfo ap = asPointwise(a);
-  LaneInfo bp = asPointwise(b);
-
-  // Pointwise ⊔ Pointwise
-  if (ap.kind == Pointwise && bp.kind == Pointwise) {
-    // Base: if either is unknown-base or bases disagree => unknown-base
-    Value outBase;
-    if (!ap.base || !bp.base) outBase = Value();
-    else if (ap.base == bp.base) outBase = ap.base;
-    else outBase = Value();
-
-    // Uniform part: keep if identical else drop
-    UniformLinearExpr outU = (ap.uniform == bp.uniform) ? ap.uniform
-                                                        : UniformLinearExpr();
-
-    int64_t outStride = (ap.laneStride == bp.laneStride) ? ap.laneStride : 0;
-    return getPointwise(outBase, outU, outStride);
-  }
-
-  return getOverdefined();
   }
 
   void print(llvm::raw_ostream &os) const {
