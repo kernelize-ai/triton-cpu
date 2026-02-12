@@ -196,16 +196,36 @@ def make_launcher(constants, signature, shared_mem_size):
 #include <omp.h>
 #include <boost/fiber/all.hpp>
 
+#include <pthread.h>
+
 #include <stdalign.h>
+
+#define max(a, b) ((a) > (b) ? (a) : (b))
+
+#define min(a, b) ((a) < (b) ? (a) : (b))
 
 typedef void(*kernel_ptr_t)({arg_types});
 
 static void _launch_openmp(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
     unsigned N = gridX * gridY * gridZ;
-    const int ompMaxThreads = omp_get_max_threads();
-    const int max_threads = N * num_warps < ompMaxThreads ? N * num_warps : ompMaxThreads;
-    int num_teams = 1; // max_threads > num_warps ? max_threads / num_warps : 1;
+    const int ompMaxThreads = 10; // omp_get_max_threads();
+    const int threadsPerBlock = 1; 
+    const int max_threads = N * threadsPerBlock < ompMaxThreads ? N * threadsPerBlock : ompMaxThreads;
 
+    int blockSizeBytes = 16 * 4 * 2; // a and b  
+    int totalSizeBytes = blockSizeBytes * N;
+    int l2Bytes = 16 * 1024 * 1024; // 16 MB
+    int l1Bytes = 128 * 1024; // 128 KB
+
+    float l1Fill = 0.75;
+    float l2Fill = 0.75;
+
+    int maxBlocksPerThread = max(1, (int)floor((l1Bytes * l1Fill) / blockSizeBytes));
+    int num_teams = min(10, max(1, (int)ceil((float)N / maxBlocksPerThread))); 
+
+    
+    //int num_teams = 10; //max_threads > threadsPerBlock ? max_threads / threadsPerBlock : 1;
+    
     // TODO: only add the plus barrier when we have a barrier
     alignas(64) unsigned char* global_smem = NULL;
     unsigned shared_memory_aligned_per_team = 0;
@@ -219,57 +239,35 @@ static void _launch_openmp(int num_warps, int shared_memory, int gridX, int grid
         memset(global_smem, 0, shared_memory_aligned_total);
     }}
 
-    unsigned consecutive_blocks = ceil((float)N / (num_teams));
+    unsigned consecutive_blocks = 4 * maxBlocksPerThread; //ceil((float)N / (num_teams));
+    //printf("%d Using %d teams with %d blocks per team\\n", N * 16, num_teams, consecutive_blocks);
 
     //omp_set_dynamic(0);
 
-    int32_t launch_sz[] = {{gridX, gridY, gridZ, num_warps, 1, 1}};
+    int32_t launch_sz[] = {{gridX, gridY, gridZ, threadsPerBlock, 1, 1}};
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 
-#if 1
-    #pragma omp parallel num_threads(num_warps) proc_bind(spread)
-    {{
-        const int warp_id = omp_get_thread_num();
-
-        int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[0] ' if shared_mem_size > 0 else 'NULL'};
-
-        void* cpu_barrier = NULL; // TODO implement a barrier function, in c++?
-
-#if 1
-            int32_t launch_id[] = {{
-                (int32_t)0, (int32_t)N, warp_id, 0, 0
-            }};
-            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-#else
-        for (unsigned block = 0; block < N; block++) {{
-            int32_t launch_id[] = {{
-                (int32_t)block, (int32_t)block+1, warp_id, 0, 0
-            }};
-            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-        }}
-#endif
-    }}
-#else
-    #pragma omp parallel num_threads(num_teams * num_warps) proc_bind(close)
+    #pragma omp parallel num_threads(num_teams * threadsPerBlock) proc_bind(close)
     {{
         int worker_id = omp_get_thread_num();
-        const int warp_id = worker_id % num_warps;
+        const int warp_id = worker_id % threadsPerBlock;
         const int thread_id = warp_id;
-        const int team_id = worker_id / num_warps;
+        const int team_id = worker_id / threadsPerBlock;
         const unsigned block_start = consecutive_blocks * team_id;
 
         int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
 
-        const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
 
         void* cpu_barrier = NULL; // TODO implement a barrier function, in c++?
 
-        int32_t launch_id[] = {{
-            (int32_t)block_start, (int32_t)run_end, warp_id, 0, 0
-        }};
-        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-
+        for (int i = block_start; i < N; i += consecutive_blocks * num_teams) {{
+            const unsigned run_end = (i + consecutive_blocks < N) ? (i + consecutive_blocks) : N;
+            int32_t launch_id[] = {{
+                (int32_t)i, (int32_t)run_end, thread_id, 0, 0
+            }};
+            (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+        }}
     }}
-#endif
 
     if (global_smem) free(global_smem);
 }}
