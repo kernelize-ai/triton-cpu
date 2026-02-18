@@ -221,7 +221,6 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   Value crtVal = val;
   for (unsigned other = 1; other < warpSize; ++other) {
     Value otherThreadId = b.i32_val(other);
-    // b.urem(b.add(threadId, b.i32_val(other)), b.i32_val(warpSize));
     Value otherSlot =
         b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
     Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
