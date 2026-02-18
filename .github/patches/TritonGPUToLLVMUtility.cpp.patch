@@ -1,0 +1,13 @@
+diff --git a/lib/Conversion/TritonGPUToLLVM/Utility.cpp b/lib/Conversion/TritonGPUToLLVM/Utility.cpp
+index e7f2a2789..101767513 100644
+--- a/lib/Conversion/TritonGPUToLLVM/Utility.cpp
++++ b/lib/Conversion/TritonGPUToLLVM/Utility.cpp
+@@ -1589,7 +1589,7 @@ SmallVector<Value> inlineRegionImpl(RewriterBase &rewriter, Region &region,
+ }
+ 
+ std::tuple<Block *, Block *, Block *>
+-createIfBlock(ConversionPatternRewriter &b, Location loc, Value cnd) {
++createIfBlock(RewriterBase &b, Location loc, Value cnd) {
+   Block *prevBlock = b.getInsertionBlock();
+   Block *ifBlock = b.splitBlock(prevBlock, b.getInsertionPoint());
+ 

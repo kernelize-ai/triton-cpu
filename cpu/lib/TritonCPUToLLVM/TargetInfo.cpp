@@ -183,10 +183,6 @@ Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned reduceLaneIdMask) const {
-  llvm::errs() << "reduce lane id mask = " << reduceLaneIdMask << "\n";
-  // TODO: fix this function
-  return false;
-
   auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
   unsigned int warpSize =
       mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.threads-per-warp"))
@@ -208,12 +204,24 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                                           getSharedAddressSpace());
   Value smemBase = LLVM::getSharedMemoryBase(loc, rewriter, *this, op);
   Value threadId = getThreadId(rewriter, loc);
-
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
+
+  // all threads store their values
+  Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
+  storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
+
+  b.barrier(triton::gpu::AddrSpace::None);
+
+  // only thread 0 reduces
+  Value condition = b.icmp_eq(threadId, b.i32_val(0));
+  auto [prevBlock, ifBlock, thenBlock] =
+      createIfBlock(rewriter, loc, condition);
+  rewriter.setInsertionPointToStart(ifBlock);
+
   Value crtVal = val;
   for (unsigned other = 1; other < warpSize; ++other) {
-    Value otherThreadId =
-        b.urem(b.add(threadId, b.i32_val(other)), b.i32_val(warpSize));
+    Value otherThreadId = b.i32_val(other);
+    // b.urem(b.add(threadId, b.i32_val(other)), b.i32_val(warpSize));
     Value otherSlot =
         b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
     Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
@@ -224,8 +232,17 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     mapping.map(reduceOp->getOperand(1), otherVal);
     crtVal = rewriter.clone(*reduceOp, mapping)->getResult(0);
   }
-  acc[0] = crtVal;
+  // store the reduced value
+  storeDShared(rewriter, loc, slot, std::nullopt, crtVal, b.true_val());
+
+  rewriter.setInsertionPointToStart(thenBlock);
   b.barrier(triton::gpu::AddrSpace::None);
+  // all threads load the reduced value from thread 0
+  Value reducedValSlot =
+      b.gep(ptrTy, int_ty(elemSizeBits), smemBase, b.i32_val(0));
+  acc[0] = loadDShared(rewriter, loc, reducedValSlot, std::nullopt,
+                       val.getType(), b.true_val());
+
   return true;
 }
 
