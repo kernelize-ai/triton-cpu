@@ -119,11 +119,12 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                          b.i32_val(shared));
 
   Value threadId = getThreadId(rewriter, loc);
+  // TODO: If we allow numWarps > 1 we should compute laneId here
 
   unsigned iWarpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
-  assert(iWarpSize == 1 && "only size 1 warps supported for reductions on CPU");
   unsigned int numWarps =
       mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
+  assert(numWarps == 1 && "only 1 warp supported for xor reductions on CPU");
 
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
 
@@ -137,11 +138,10 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   Value targetThreadId = b.xor_(threadId, b.i32_val(i));
   Value targetPtr =
       b.gep(ptrTy, int_ty(elemSizeBits), smemBase, targetThreadId);
-  // load from target lane (note we could use 64B alignments here since we're in
-  // the sync region)
+  // load from target lane
   Value loaded = mlir::triton::cpu::llLoad(
       rewriter, loc, targetPtr, val.getType(),
-      b.icmp_slt(targetThreadId, b.i32_val(numWarps)), val);
+      b.icmp_slt(targetThreadId, b.i32_val(iWarpSize)), val);
   b.barrier(triton::gpu::AddrSpace::None);
   return loaded;
 }
@@ -177,18 +177,18 @@ Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
 
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
-                            unsigned numLaneToReduce,
-                            unsigned interleave) const {
-  // no need to reduce if only one lane is involved
-  if (numLaneToReduce == 1)
-    return true;
+                            unsigned reduceLaneIdMask) const {
+  llvm::errs() << "reduce lane id mask = " << reduceLaneIdMask << "\n";
+  // TODO: fix this function
+  return false;
 
   auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
-  unsigned int numWarps =
-      mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
-  // Fallback to shuffleXOR (TODO: implement masked warpReduce if performance is
-  // better)
-  if (numLaneToReduce < numWarps)
+  unsigned int warpSize =
+      mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.threads-per-warp"))
+          .getInt();
+
+  // partial reductions fallback to shuffleXor
+  if (reduceLaneIdMask != (warpSize - 1))
     return false;
 
   Operation *reduceOp = op.getSingleCombiner();
@@ -206,9 +206,9 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
 
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
   Value crtVal = val;
-  for (unsigned other = 1; other < numLaneToReduce; ++other) {
+  for (unsigned other = 1; other < warpSize; ++other) {
     Value otherThreadId =
-        b.urem(b.add(threadId, b.i32_val(other)), b.i32_val(numLaneToReduce));
+        b.urem(b.add(threadId, b.i32_val(other)), b.i32_val(warpSize));
     Value otherSlot =
         b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
     Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
