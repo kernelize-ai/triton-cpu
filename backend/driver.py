@@ -113,7 +113,7 @@ def ty_to_cpp(ty):
     }[ty]
 
 
-def make_launcher(constants, signature, shared_mem_size):
+def make_launcher(constants, signature, shared_mem_size, warp_size):
 
     def _flatten_signature(sig, output):
         # Flatten tuples
@@ -201,6 +201,9 @@ def make_launcher(constants, signature, shared_mem_size):
 typedef void(*kernel_ptr_t)({arg_types});
 
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+    assert(num_warps == 1); // only one warp supported per block, currently
+
+    const int32_t warp_size = {warp_size};
     unsigned N = gridX * gridY * gridZ;
     const int ompMaxThreads = omp_get_max_threads();
     const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
@@ -211,7 +214,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     if (shared_memory > 0) {{
         shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
         // allocate scratch for reductions
-        shared_memory_aligned_per_team += 64 * num_warps;
+        shared_memory_aligned_per_team += 64 * warp_size;
         unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * max_threads;
         global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
         assert(global_smem);
@@ -220,7 +223,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     unsigned consecutive_blocks = (N + max_threads - 1) / max_threads;
 
-    int32_t launch_sz[] = {{gridX, gridY, gridZ, num_warps, 1, 1}};
+    int32_t launch_sz[] = {{gridX, gridY, gridZ, warp_size, 1, 1}};
 
     boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
 
@@ -232,15 +235,15 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
         std::vector<boost::fibers::fiber> fibers;
-        fibers.reserve(num_warps);
+        fibers.reserve(warp_size);
 
-        boost::fibers::barrier barrier(num_warps);
+        boost::fibers::barrier barrier(warp_size);
         void *cpu_barrier = &barrier;
 
-        for (int warp_id = 0; warp_id < num_warps; warp_id++) {{
-            fibers.emplace_back([&, block_start, run_end, warp_id]() {{
+        for (int lane_id = 0; lane_id < warp_size; lane_id++) {{
+            fibers.emplace_back([&, block_start, run_end, lane_id]() {{
                 int32_t launch_id[] = {{
-                    (int32_t)block_start, (int32_t)run_end, warp_id, 0, 0
+                    (int32_t)block_start, (int32_t)run_end, lane_id, 0, 0
                 }};
                 (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
             }});
@@ -332,6 +335,7 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
 
   {newline.join(ptr_decls)}
   Py_BEGIN_ALLOW_THREADS;
+  // TODO: parameterize warp size here (add to metadata?)
   _launch(num_warps, shared_memory, gridX, gridY, gridZ, kernel_ptr{', ' + ', '.join(internal_args_list) if len(internal_args_list) > 0 else ''});
   Py_END_ALLOW_THREADS;
   if (PyErr_Occurred()) {{
@@ -387,7 +391,7 @@ class CPULauncher(object):
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
-        src = make_launcher(constants, signature, metadata.shared)
+        src = make_launcher(constants, signature, metadata.shared, metadata.warp_size)
         os.environ["CC"] = "g++"
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())

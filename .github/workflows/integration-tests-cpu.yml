@@ -105,7 +105,7 @@ jobs:
       - name: Run python tests on CPU
         working-directory: ./triton
         run: |
-          TRITON_CPU_NUM_WARPS=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr or test_dot[) and not test_reduce1d[1-sum-float16-512]"
+          TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr or test_dot[) and not test_reduce1d[1-sum-float16-512]"
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
@@ -120,7 +120,7 @@ jobs:
       - name: Run gluon tests
         working-directory: ./triton
         run: |
-          TRITON_CPU_NUM_WARPS=4 python -m pytest --device "cpu" python/test/gluon/test_core.py -k "test_copy_kernel"
+          TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/gluon/test_core.py -k "test_copy_kernel"
       - name: Run interpreter tests
         working-directory: ./triton
         if: false
