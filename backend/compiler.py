@@ -32,6 +32,7 @@ class CPUOptions:
     instrumentation_mode: str = ""
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
     matrix_instr_nonkdim: int = 16
+    # TODO: de-duplicate with driver
     warp_size: int = int(os.environ.get('TRITON_CPU_WARP_SIZE', 1))
     min_dot_size: int = 1
 

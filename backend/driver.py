@@ -483,7 +483,7 @@ class CPUDriver(DriverBase):
 
     def get_current_target(self):
         capability = "cpu"
-        warp_size = 1
+        warp_size = int(os.environ.get('TRITON_CPU_WARP_SIZE', 1))
         return GPUTarget("cpu", capability, warp_size)
 
     def get_active_torch_device(self):
