@@ -88,6 +88,11 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
         "CPU does not support cross-CTA shared memory transfers");
   Value falseVal = LLVM::ConstantOp::create(rewriter, loc, elemTy,
                                             rewriter.getZeroAttr(elemTy));
+  if (isa<VectorType>(elemTy) && !isa<VectorType>(pred.getType())) {
+    auto vecTy = cast<VectorType>(elemTy);
+    SmallVector<Value> predVec(vecTy.getNumElements(), pred);
+    pred = packLLVector(loc, predVec, rewriter);
+  }
   auto load =
       mlir::triton::cpu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal);
   return load;
