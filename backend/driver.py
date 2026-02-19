@@ -71,6 +71,9 @@ class CpuUtils(object):
     def __init__(self):
         pass
 
+    def unload_module(self, lib):
+        pass
+
     def load_binary(self, name, kernel, shared_mem, device):
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".so") as f:
             f.write(kernel)
