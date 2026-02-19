@@ -188,12 +188,13 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
       mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.threads-per-warp"))
           .getInt();
 
-  // partial reductions fallback to shuffleXor
+  // We only support full warp reduction (i.e. all lanes) on CPU for now.
+  // Partial reductions (sub-groups) fallback to shuffleXor.
   if (reduceLaneIdMask != (warpSize - 1))
     return false;
 
-  Operation *reduceOp = op.getSingleCombiner();
-  if (!reduceOp)
+  Operation *combinerOp = op.getSingleCombiner();
+  if (!combinerOp)
     return false;
 
   assert(acc.size() == 1 && "only single value reduction supported on CPU");
@@ -206,41 +207,47 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   Value threadId = getThreadId(rewriter, loc);
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
 
-  // all threads store their values
+  // 1. All threads store their initial values to shared memory slots
+  // corresponding to their thread ID.
   Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
   storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
 
+  // Wait for all threads to finish writing.
   b.barrier(triton::gpu::AddrSpace::None);
 
-  // only thread 0 reduces
-  Value condition = b.icmp_eq(threadId, b.i32_val(0));
-  auto [prevBlock, ifBlock, thenBlock] =
-      createIfBlock(rewriter, loc, condition);
-  rewriter.setInsertionPointToStart(ifBlock);
+  // 2. Perform the reduction sequentially on Thread 0 (Leader Thread).
+  // Thread 0 iterates through all other threads' values and accumulates them.
+  Value isLeaderThread = b.icmp_eq(threadId, b.i32_val(0));
+  auto [prevBlock, reductionBlock, continuationBlock] =
+      createIfBlock(rewriter, loc, isLeaderThread);
+  rewriter.setInsertionPointToStart(reductionBlock);
 
-  Value crtVal = val;
-  for (unsigned other = 1; other < warpSize; ++other) {
-    Value otherThreadId = b.i32_val(other);
+  Value accumulatedVal = val;
+  for (unsigned otherIdx = 1; otherIdx < warpSize; ++otherIdx) {
+    Value otherThreadId = b.i32_val(otherIdx);
     Value otherSlot =
         b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
     Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
                                  val.getType(), b.true_val());
 
     IRMapping mapping;
-    mapping.map(reduceOp->getOperand(0), crtVal);
-    mapping.map(reduceOp->getOperand(1), otherVal);
-    crtVal = rewriter.clone(*reduceOp, mapping)->getResult(0);
+    mapping.map(combinerOp->getOperand(0), accumulatedVal);
+    mapping.map(combinerOp->getOperand(1), otherVal);
+    accumulatedVal = rewriter.clone(*combinerOp, mapping)->getResult(0);
   }
-  // store the reduced value
-  storeDShared(rewriter, loc, slot, std::nullopt, crtVal, b.true_val());
+  // Store the final reduced value back into Thread 0's slot so others can read
+  // it.
+  storeDShared(rewriter, loc, slot, std::nullopt, accumulatedVal, b.true_val());
 
-  rewriter.setInsertionPointToStart(thenBlock);
+  rewriter.setInsertionPointToStart(continuationBlock);
+
+  // Wait for Thread 0 to finish reduction.
   b.barrier(triton::gpu::AddrSpace::None);
-  // all threads load the reduced value from thread 0
-  Value reducedValSlot =
-      b.gep(ptrTy, int_ty(elemSizeBits), smemBase, b.i32_val(0));
-  acc[0] = loadDShared(rewriter, loc, reducedValSlot, std::nullopt,
-                       val.getType(), b.true_val());
+
+  // 3. All threads load the reduced value from Thread 0's slot
+  Value leaderSlot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, b.i32_val(0));
+  acc[0] = loadDShared(rewriter, loc, leaderSlot, std::nullopt, val.getType(),
+                       b.true_val());
 
   return true;
 }
