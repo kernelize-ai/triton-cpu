@@ -43,6 +43,10 @@ jobs:
         run: |
           brew update
           brew install ccache llvm@20 lld coreutils libomp boost
+      - name: Apply Triton patches
+        working-directory: ./triton
+        run: |
+          git apply -v ${GITHUB_WORKSPACE}/.github/patches/*.patch
       - name: Compute cache keys
         id: cache-key
         run: |
@@ -111,10 +115,6 @@ jobs:
           which clang++
           clang++ --version
           TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
-      - name: Apply Triton patches
-        working-directory: ./triton
-        run: |
-          git apply -v ${GITHUB_WORKSPACE}/.github/patches/*.patch
       - name: CCache Stats
         run: ccache --print-stats
       - name: Run lit tests
