@@ -20,7 +20,7 @@ from types import ModuleType
 
 @dataclass(frozen=True)
 class CPUOptions:
-    num_warps: int = int(os.environ.get('TRITON_CPU_NUM_WARPS', 1))
+    num_warps: int = 1
     num_ctas: int = 1
     num_stages: int = 1
     cluster_dims: tuple = (1, 1, 1)
@@ -32,7 +32,8 @@ class CPUOptions:
     instrumentation_mode: str = ""
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
     matrix_instr_nonkdim: int = 16
-    warp_size: int = 1
+    # TODO: de-duplicate with driver
+    warp_size: int = int(os.environ.get('TRITON_CPU_WARP_SIZE', 1))
     min_dot_size: int = 1
 
     def hash(self):
@@ -111,10 +112,8 @@ class CPUBackend(BaseBackend):
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         dump_enabled = pm.enable_debug()
-        threads_per_warp = 1
-        metadata["warp_size"] = threads_per_warp
         num_ctas = 1
-        passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, threads_per_warp, num_ctas)
+        passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
         cpu.passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         cpu.passes.ttgpuir.add_accelerate_matmul(pm)

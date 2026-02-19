@@ -88,6 +88,11 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
         "CPU does not support cross-CTA shared memory transfers");
   Value falseVal = LLVM::ConstantOp::create(rewriter, loc, elemTy,
                                             rewriter.getZeroAttr(elemTy));
+  if (isa<VectorType>(elemTy) && !isa<VectorType>(pred.getType())) {
+    auto vecTy = cast<VectorType>(elemTy);
+    SmallVector<Value> predVec(vecTy.getNumElements(), pred);
+    pred = packLLVector(loc, predVec, rewriter);
+  }
   auto load =
       mlir::triton::cpu::llLoad(rewriter, loc, ptr, elemTy, pred, falseVal);
   return load;
@@ -119,11 +124,12 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                          b.i32_val(shared));
 
   Value threadId = getThreadId(rewriter, loc);
+  // TODO: If we allow numWarps > 1 we should compute laneId here
 
   unsigned iWarpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
-  assert(iWarpSize == 1 && "only size 1 warps supported for reductions on CPU");
   unsigned int numWarps =
       mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
+  assert(numWarps == 1 && "only 1 warp supported for xor reductions on CPU");
 
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
 
@@ -137,11 +143,10 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   Value targetThreadId = b.xor_(threadId, b.i32_val(i));
   Value targetPtr =
       b.gep(ptrTy, int_ty(elemSizeBits), smemBase, targetThreadId);
-  // load from target lane (note we could use 64B alignments here since we're in
-  // the sync region)
+  // load from target lane
   Value loaded = mlir::triton::cpu::llLoad(
       rewriter, loc, targetPtr, val.getType(),
-      b.icmp_slt(targetThreadId, b.i32_val(numWarps)), val);
+      b.icmp_slt(targetThreadId, b.i32_val(iWarpSize)), val);
   b.barrier(triton::gpu::AddrSpace::None);
   return loaded;
 }
@@ -177,22 +182,19 @@ Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
 
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
-                            unsigned numLaneToReduce,
-                            unsigned interleave) const {
-  // no need to reduce if only one lane is involved
-  if (numLaneToReduce == 1)
-    return true;
-
+                            unsigned reduceLaneIdMask) const {
   auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
-  unsigned int numWarps =
-      mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
-  // Fallback to shuffleXOR (TODO: implement masked warpReduce if performance is
-  // better)
-  if (numLaneToReduce < numWarps)
+  unsigned int warpSize =
+      mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.threads-per-warp"))
+          .getInt();
+
+  // We only support full warp reduction (i.e. all lanes) on CPU for now.
+  // Partial reductions (sub-groups) fallback to shuffleXor.
+  if (reduceLaneIdMask != (warpSize - 1))
     return false;
 
-  Operation *reduceOp = op.getSingleCombiner();
-  if (!reduceOp)
+  Operation *combinerOp = op.getSingleCombiner();
+  if (!combinerOp)
     return false;
 
   assert(acc.size() == 1 && "only single value reduction supported on CPU");
@@ -203,24 +205,50 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                                           getSharedAddressSpace());
   Value smemBase = LLVM::getSharedMemoryBase(loc, rewriter, *this, op);
   Value threadId = getThreadId(rewriter, loc);
-
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
-  Value crtVal = val;
-  for (unsigned other = 1; other < numLaneToReduce; ++other) {
-    Value otherThreadId =
-        b.urem(b.add(threadId, b.i32_val(other)), b.i32_val(numLaneToReduce));
+
+  // 1. All threads store their initial values to shared memory slots
+  // corresponding to their thread ID.
+  Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
+  storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
+
+  // Wait for all threads to finish writing.
+  b.barrier(triton::gpu::AddrSpace::None);
+
+  // 2. Perform the reduction sequentially on Thread 0 (Leader Thread).
+  // Thread 0 iterates through all other threads' values and accumulates them.
+  Value isLeaderThread = b.icmp_eq(threadId, b.i32_val(0));
+  auto [prevBlock, reductionBlock, continuationBlock] =
+      createIfBlock(rewriter, loc, isLeaderThread);
+  rewriter.setInsertionPointToStart(reductionBlock);
+
+  Value accumulatedVal = val;
+  for (unsigned otherIdx = 1; otherIdx < warpSize; ++otherIdx) {
+    Value otherThreadId = b.i32_val(otherIdx);
     Value otherSlot =
         b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
     Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
                                  val.getType(), b.true_val());
 
     IRMapping mapping;
-    mapping.map(reduceOp->getOperand(0), crtVal);
-    mapping.map(reduceOp->getOperand(1), otherVal);
-    crtVal = rewriter.clone(*reduceOp, mapping)->getResult(0);
+    mapping.map(combinerOp->getOperand(0), accumulatedVal);
+    mapping.map(combinerOp->getOperand(1), otherVal);
+    accumulatedVal = rewriter.clone(*combinerOp, mapping)->getResult(0);
   }
-  acc[0] = crtVal;
+  // Store the final reduced value back into Thread 0's slot so others can read
+  // it.
+  storeDShared(rewriter, loc, slot, std::nullopt, accumulatedVal, b.true_val());
+
+  rewriter.setInsertionPointToStart(continuationBlock);
+
+  // Wait for Thread 0 to finish reduction.
   b.barrier(triton::gpu::AddrSpace::None);
+
+  // 3. All threads load the reduced value from Thread 0's slot
+  Value leaderSlot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, b.i32_val(0));
+  acc[0] = loadDShared(rewriter, loc, leaderSlot, std::nullopt, val.getType(),
+                       b.true_val());
+
   return true;
 }
 

@@ -71,8 +71,12 @@ public:
       return success();
     }
 
-    warpIdOp.emitError("unsupported number threads per warp");
-    return failure();
+    auto numWarps = triton::gpu::lookupNumWarps(warpIdOp);
+    assert(numWarps == 1 && "triton cpu does not yet support multiple warps w/ "
+                            "multiple threads per warp");
+    rewriter.replaceOp(
+        warpIdOp, LLVM::createConstantI32(warpIdOp->getLoc(), rewriter, 0));
+    return success();
   }
 };
 

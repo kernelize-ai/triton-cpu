@@ -1,8 +1,8 @@
 diff --git a/python/test/unit/language/test_core.py b/python/test/unit/language/test_core.py
-index a5afccf1a..ee3cab93b 100644
+index 9a70966ed..9792ec73b 100644
 --- a/python/test/unit/language/test_core.py
 +++ b/python/test/unit/language/test_core.py
-@@ -36,6 +36,7 @@ from triton._internal_testing import (
+@@ -37,6 +37,7 @@ from triton._internal_testing import (
      is_hip_rdna4,
      is_hip_gfx1250,
      is_xpu,
@@ -10,7 +10,7 @@ index a5afccf1a..ee3cab93b 100644
      get_arch,
      torch_float8_dtypes,
      torch_dtypes,
-@@ -121,6 +122,9 @@ def check_type_supported(dtype, device):
+@@ -122,6 +123,9 @@ def check_type_supported(dtype, device):
      '''
      skip test if dtype is not supported on the current device
      '''
@@ -20,7 +20,18 @@ index a5afccf1a..ee3cab93b 100644
      if device in ['cuda']:
          cc = torch.cuda.get_device_capability()
          if cc[0] < 8 and (dtype is tl.bfloat16 or dtype == "bfloat16" or dtype is torch.bfloat16):
-@@ -3203,7 +3207,7 @@ def get_test_dot_vdot2_cases():
+@@ -2014,7 +2018,9 @@ def test_load_store_same_ptr(device):
+ 
+     for _ in range(1000):
+         x = torch.ones((65536, ), device=device, dtype=torch.float32)
+-        if is_hip():
++        if is_cpu():
++            kernel[(65536, )](x, num_warps=1)
++        elif is_hip():
+             kernel[(65536, )](x, num_warps=16)  # threads per Warp for ROCM is 64
+         else:
+             kernel[(65536, )](x, num_warps=32)
+@@ -3236,7 +3242,7 @@ def get_test_dot_vdot2_cases():
  
  
  def get_test_small_dots_cases():
@@ -29,7 +40,7 @@ index a5afccf1a..ee3cab93b 100644
          return []
      return [(2, 4, 32, 1, False, False, 'None', 'ieee', 'float16', 'float32', 1, None),
              (1, 2, 32, 1, False, False, 'None', 'ieee', 'float8e5', 'float32', 1, None)]
-@@ -3269,6 +3273,14 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
+@@ -3304,6 +3310,14 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
              if in_dtype == 'float64':
                  pytest.skip("float64 not supported on HIP yet")
  
