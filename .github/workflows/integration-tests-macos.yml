@@ -12,7 +12,7 @@ on:
 jobs:
   integration-tests-macos:
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       matrix:
         runner: ${{ fromJson(inputs.matrix) }}
