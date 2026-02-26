@@ -47,6 +47,9 @@ void init_triton_cpu_passes_ttgpuir(py::module &&m) {
   m.def("add_make_persistent_kernel", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createMakePersistentKernelPass());
   });
+  m.def("add_tile_and_fuse", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createTritonCPUTileAndFuse());
+  });
 }
 
 void init_triton_cpu(py::module &&m) {
