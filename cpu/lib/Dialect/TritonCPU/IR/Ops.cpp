@@ -21,6 +21,22 @@ void MaskedLoadOp::getEffects(
                        GlobalMemory::get());
 }
 
+LogicalResult GenericOp::verify() {
+  const int64_t blockSize = getBlockSize();
+  const int64_t vectorSize = getVectorSize();
+  if (blockSize <= 0)
+    return emitOpError("expects blockSize > 0, got ") << blockSize;
+  if (vectorSize <= 0)
+    return emitOpError("expects vectorSize > 0, got ") << vectorSize;
+  if (blockSize % vectorSize != 0)
+    return emitOpError("expects blockSize % vectorSize == 0, got blockSize=")
+           << blockSize << " vectorSize=" << vectorSize;
+
+  // TODO: other verification checks?
+
+  return success();
+}
+
 } // namespace cpu
 } // namespace triton
 

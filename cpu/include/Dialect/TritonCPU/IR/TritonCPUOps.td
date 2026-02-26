@@ -4,6 +4,7 @@
 include "TritonCPUDialect.td"
 include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
 include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultType
+include "mlir/Interfaces/ControlFlowInterfaces.td" // ReturnLike
 include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 
@@ -152,6 +153,41 @@ def TTC_MaskedStoreOp : TTC_Op<"masked_store", [
   let assemblyFormat = [{
     $ptr `,` $value `,` $mask
     attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def TTC_YieldOp : TTC_Op<"yield", [Terminator, ReturnLike, HasParent<"GenericOp">]> {
+  let summary = "Terminator for ttc.generic";
+  let arguments = (ins);
+  let assemblyFormat = "attr-dict";
+}
+
+def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImplicitTerminator<"YieldOp">]> {
+  let summary = "Schedule-owning generic over a block";
+
+  let description = [{
+    "TODO"
+  }];
+
+  let arguments = (ins
+    Variadic<TT_Type>:$ins,
+    Variadic<TT_Type>:$outs,
+    Variadic<TT_Type>:$params,
+
+    I32Attr:$blockSize,
+    I32Attr:$vectorSize
+  );
+
+  let results = (outs); // TODO: support materializing intermediates in local memory
+
+  let regions = (region AnyRegion:$body);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `ins` `(` $ins `)` `outs` `(` $outs `)` `params` `(` $params `)`
+    attr-dict-with-keyword $body
+    `:` functional-type(operands, results)
   }];
 }
 

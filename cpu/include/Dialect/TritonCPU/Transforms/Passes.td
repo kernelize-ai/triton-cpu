@@ -49,4 +49,16 @@ def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> 
     ];
 }
 
+def TritonCPUTileAndFuse : Pass<"tritoncpu-tile-and-fuse", "mlir::ModuleOp"> {
+  let summary = "Replace ops with ttc.generic according to triton GPU layouts";
+
+  let description = [{
+    TODO
+  }];
+
+  let dependentDialects = [
+    "mlir::triton::cpu::TritonCPUDialect"
+  ];
+}
+
 #endif
