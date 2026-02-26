@@ -32,12 +32,31 @@ static bool isClosed(const llvm::SetVector<Operation *> &ops) {
   return true;
 }
 
+static std::optional<Attribute>
+getCommonEncoding(const llvm::SetVector<Operation *> &ops) {
+  // assumes the op result encodings match the inputs
+  auto storeOp = cast<triton::StoreOp>(*ops.begin());
+  Attribute encoding =
+      cast<RankedTensorType>(storeOp.getValue().getType()).getEncoding();
+  for (Operation *op : ops) {
+    for (auto result : op->getResults()) {
+      auto resultType = cast<RankedTensorType>(result.getType());
+      if (resultType.getEncoding() != encoding) {
+        return std::nullopt;
+      }
+    }
+  }
+  return encoding;
+}
+
 struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
   using OpRewritePattern<triton::StoreOp>::OpRewritePattern;
 
   mlir::LogicalResult
   matchAndRewrite(triton::StoreOp storeOp,
                   mlir::PatternRewriter &rewriter) const override {
+    Location loc = storeOp.getLoc();
+
     auto genericParent = storeOp->getParentOfType<cpu::GenericOp>();
     if (genericParent) {
       return failure();
@@ -75,18 +94,46 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
         queue.push_back(operand);
       }
     }
-    if (failed) {
+    if (failed)
       return failure();
+
+    for (auto op : opsToClone) {
+        llvm::errs() << "op to clone: " << *op << "\n";
     }
 
-    if (!isClosed(opsToClone)) {
+    if (!isClosed(opsToClone))
       return failure();
-    }
+
+    // TODO: common encoding, or common type? should we put the type on the generic op, or split out the parameters as individual attributes as below: 
+    auto encoding = getCommonEncoding(opsToClone);
+    if (!encoding)
+      return failure();
+
+    llvm::errs() << "common encoding = " << encoding << "\n";
+    auto blockSizeAttr = rewriter.getI32IntegerAttr(0);
+    auto vectorSizeAttr = rewriter.getI32IntegerAttr(0);
 
     // create generic op using opsToClone as the body. Rewrite load op
     // parameters to be generic op block args
-    // TODO
-    llvm::errs() << "TODO\n";
+
+    // the load op arguments will be forwarded through the generic in order
+    SmallVector<Value> genericOpInputs;
+    for (auto op : opsToClone) {
+      if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
+        genericOpInputs.push_back(loadOp.getPtr());
+        if (loadOp.getMask())
+          genericOpInputs.push_back(loadOp.getMask());
+        if (loadOp.getOther())
+          genericOpInputs.push_back(loadOp.getOther());
+      }
+    }
+
+    SmallVector<Value> genericOpOutputs; // none for now
+    SmallVector<Value> genericOpParams;  // none for now
+
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, genericOpInputs, genericOpOutputs,
+                               genericOpParams, blockSizeAttr, vectorSizeAttr);
 
     return failure();
   }
