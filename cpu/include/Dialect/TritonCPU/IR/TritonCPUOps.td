@@ -171,7 +171,6 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImpl
 
   let arguments = (ins
     Variadic<TT_Type>:$ins,
-    Variadic<TT_Type>:$outs,
     Variadic<TT_Type>:$params,
 
     DenseI32ArrayAttr:$blockShape,
@@ -185,9 +184,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImpl
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    `ins` `(` $ins `)` `outs` `(` $outs `)` `params` `(` $params `)`
-    attr-dict-with-keyword $body
-    `:` functional-type(operands, results)
+    $ins (`(` $params^ `)`)? attr-dict-with-keyword $body `:` functional-type(operands, results)
   }];
 }
 
