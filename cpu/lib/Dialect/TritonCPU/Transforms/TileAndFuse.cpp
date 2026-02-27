@@ -128,8 +128,7 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
       }
     }
 
-    SmallVector<Value> genericOpOutputs; // none for now
-    SmallVector<Value> genericOpParams;  // none for now
+    SmallVector<Value> genericOpParams; // none for now
 
     auto shape = tensorTy->getShape();
     SmallVector<int32_t> shapeVec(shape.begin(), shape.end());
@@ -138,12 +137,32 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
                                           sizePerThread.end());
 
     auto generic =
-        cpu::GenericOp::create(rewriter, loc, genericOpInputs, genericOpOutputs,
-                               genericOpParams, shapeVec, sizePerThreadVec);
+        cpu::GenericOp::create(rewriter, loc, genericOpInputs, genericOpParams,
+                               shapeVec, sizePerThreadVec);
     llvm::errs() << "created generic: " << generic << "\n";
-    // TODO: populate generic body
+    rewriter.createBlock(&generic->getRegion(0));
+    Block *entry = &generic->getRegion(0).front();
+    SmallVector<BlockArgument> args;
+    args.reserve(genericOpInputs.size());
+    for (Value v : genericOpInputs) {
+      args.push_back(entry->addArgument(v.getType(), v.getLoc()));
+    }
+    IRMapping mapping;
+    for (auto [v, a] : llvm::zip(genericOpInputs, args)) {
+      mapping.map(v, a);
+    }
 
-    return failure();
+    rewriter.setInsertionPointToStart(entry);
+    for (auto op : llvm::reverse(opsToClone)) {
+      rewriter.clone(*op, mapping);
+    }
+
+    cpu::YieldOp::create(rewriter, loc);
+
+    for (auto op : opsToClone) {
+      rewriter.eraseOp(op);
+    }
+    return success();
   }
 };
 
