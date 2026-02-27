@@ -128,6 +128,7 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_loop_aware_cse(pm)
 
         passes.common.add_symbol_dce(pm)
+        cpu.passes.ttgpuir.add_tile_and_fuse(pm)
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)
@@ -161,7 +162,6 @@ class CPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
-        cpu.passes.ttgpuir.add_tile_and_fuse(pm)  # TODO: should this be its own block? part of the gpu block?
         passes.convert.add_scf_to_cf(pm)
         cpu.passes.ttcpuir.add_allocate_shared_memory(pm)
         passes.convert.add_index_to_llvmir(pm)
