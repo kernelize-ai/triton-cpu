@@ -22,16 +22,48 @@ void MaskedLoadOp::getEffects(
 }
 
 LogicalResult GenericOp::verify() {
-  const int64_t blockSize = getBlockSize();
-  const int64_t vectorSize = getVectorSize();
-  if (blockSize <= 0)
-    return emitOpError("expects blockSize > 0, got ") << blockSize;
-  if (vectorSize <= 0)
-    return emitOpError("expects vectorSize > 0, got ") << vectorSize;
-  if (blockSize % vectorSize != 0)
-    return emitOpError("expects blockSize % vectorSize == 0, got blockSize=")
-           << blockSize << " vectorSize=" << vectorSize;
+#if 1
+  auto blockShape = getBlockShape();
+  auto vectorShape = getVectorShape();
 
+  if (blockShape.size() != vectorShape.size()) {
+    return emitOpError(
+               "expects blockShape and vectorShape to have the same rank, got ")
+           << blockShape.size() << " vs " << vectorShape.size();
+  }
+  for (unsigned i = 0; i < blockShape.size(); i++) {
+    if (blockShape[i] % vectorShape[i] != 0) {
+      return emitOpError("expects blockShape[")
+             << i << "] % vectorShape[" << i << "] == 0, got " << blockShape[i]
+             << " vs " << vectorShape[i];
+    }
+  }
+#else
+  RankedTensorType blockType = getBlockType();
+  auto encoding = blockType.getEncoding();
+  if (!encoding) {
+    return emitOpError("expects blockType to have a valid encoding");
+  }
+  auto blockedEncoding = dyn_cast<triton::gpu::BlockedEncodingAttr>(encoding);
+  if (!blockedEncoding) {
+    return emitOpError("expects blockType to have a BlockedEncodingAttr");
+  }
+
+  const auto blockDims = blockType.getShape();
+  const auto sizePerThread = blockedEncoding.getSizePerThread();
+  if (blockDims.size() != sizePerThread()) {
+    return emitOpError("expects blockDims.size() == sizePerThread(), got ")
+           << blockDims.size() << " vs " << sizePerThread();
+  }
+
+  for (unsigned i = 0; i < blockDims.size(); i++) {
+    if (blockDims[i] % sizePerThread[i] != 0) {
+      return emitOpError("expects blockDims[")
+             << i << "] % sizePerThread[" << i << "] == 0, got " << blockDims[i]
+             << " vs " << sizePerThread[i];
+    }
+  }
+#endif
   // TODO: other verification checks?
 
   return success();
