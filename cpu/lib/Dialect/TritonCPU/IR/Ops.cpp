@@ -32,6 +32,11 @@ LogicalResult GenericOp::verify() {
            << blockShape.size() << " vs " << vectorShape.size();
   }
   for (unsigned i = 0; i < blockShape.size(); i++) {
+    if (blockShape[i] < vectorShape[i]) {
+      return emitOpError("expects blockShape[")
+             << i << "] >= vectorShape[" << i << "], got " << blockShape[i]
+             << " vs " << vectorShape[i];
+    }
     if (blockShape[i] % vectorShape[i] != 0) {
       return emitOpError("expects blockShape[")
              << i << "] % vectorShape[" << i << "] == 0, got " << blockShape[i]

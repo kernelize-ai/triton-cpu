@@ -120,6 +120,7 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
 
     // the load op arguments will be forwarded through the generic in order of
     // load op appearance
+    // TODO: we should do this as a set vector to avoid duplication
     SmallVector<Value> genericOpInputs;
     for (auto op : opsToClone) {
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
@@ -128,6 +129,12 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
           genericOpInputs.push_back(loadOp.getMask());
         if (loadOp.getOther())
           genericOpInputs.push_back(loadOp.getOther());
+      }
+      if (auto storeOp = dyn_cast<triton::StoreOp>(op)) {
+        genericOpInputs.push_back(storeOp.getPtr());
+        // value must be part of the generic region or the generic is not closed
+        if (storeOp.getMask())
+          genericOpInputs.push_back(storeOp.getMask());
       }
     }
 
@@ -139,6 +146,16 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     SmallVector<int32_t> sizePerThreadVec(sizePerThread.begin(),
                                           sizePerThread.end());
 
+    // Use sizePerThread to set the tile size for now. In the future, we could
+    // determine this dynamically (say if the number of contiguous entries in
+    // the tensor was 1, but we wanted to scatter load and vectorize)
+    auto updateTensorType = [&](RankedTensorType oldType) -> RankedTensorType {
+      return RankedTensorType::get(
+          llvm::to_vector(llvm::map_range(
+              sizePerThread, [](int32_t s) { return int64_t(s); })),
+          oldType.getElementType(), encoding);
+    };
+
     auto generic =
         cpu::GenericOp::create(rewriter, loc, genericOpInputs, genericOpParams,
                                shapeVec, sizePerThreadVec);
@@ -147,7 +164,11 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     SmallVector<BlockArgument> args;
     args.reserve(genericOpInputs.size());
     for (Value v : genericOpInputs) {
-      args.push_back(entry->addArgument(v.getType(), v.getLoc()));
+      // keep the encoding but replace the block shape with the generic tile
+      // shape
+      auto existingType = cast<RankedTensorType>(v.getType());
+      args.push_back(
+          entry->addArgument(updateTensorType(existingType), v.getLoc()));
     }
     IRMapping mapping;
     for (auto [v, a] : llvm::zip(genericOpInputs, args)) {
@@ -156,7 +177,12 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
 
     rewriter.setInsertionPointToStart(entry);
     for (auto op : llvm::reverse(opsToClone)) {
-      rewriter.clone(*op, mapping);
+      auto newOp = rewriter.clone(*op, mapping);
+      for (auto result : newOp->getResults()) {
+        result.setType(
+            updateTensorType(cast<RankedTensorType>(result.getType())));
+      }
+      mapping.map(op->getResults(), newOp->getResults());
     }
 
     cpu::YieldOp::create(rewriter, loc);
