@@ -32,21 +32,21 @@ static bool isClosed(const llvm::SetVector<Operation *> &ops) {
   return true;
 }
 
-static std::optional<Attribute>
-getCommonEncoding(const llvm::SetVector<Operation *> &ops) {
+static std::optional<RankedTensorType>
+getCommonType(const llvm::SetVector<Operation *> &ops) {
   // assumes the op result encodings match the inputs
   auto storeOp = cast<triton::StoreOp>(*ops.begin());
-  Attribute encoding =
-      cast<RankedTensorType>(storeOp.getValue().getType()).getEncoding();
+  RankedTensorType tensorTy =
+      cast<RankedTensorType>(storeOp.getValue().getType());
   for (Operation *op : ops) {
     for (auto result : op->getResults()) {
       auto resultType = cast<RankedTensorType>(result.getType());
-      if (resultType.getEncoding() != encoding) {
+      if (resultType != tensorTy) {
         return std::nullopt;
       }
     }
   }
-  return encoding;
+  return tensorTy;
 }
 
 struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
@@ -98,20 +98,20 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
       return failure();
 
     for (auto op : opsToClone) {
-        llvm::errs() << "op to clone: " << *op << "\n";
+      llvm::errs() << "op to clone: " << *op << "\n";
     }
 
     if (!isClosed(opsToClone))
       return failure();
 
-    // TODO: common encoding, or common type? should we put the type on the generic op, or split out the parameters as individual attributes as below: 
-    auto encoding = getCommonEncoding(opsToClone);
+    auto tensorTy = getCommonType(opsToClone);
+    if (!tensorTy)
+      return failure();
+    auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy->getEncoding());
     if (!encoding)
       return failure();
 
-    llvm::errs() << "common encoding = " << encoding << "\n";
-    auto blockSizeAttr = rewriter.getI32IntegerAttr(0);
-    auto vectorSizeAttr = rewriter.getI32IntegerAttr(0);
+    llvm::errs() << "common type = " << tensorTy << "\n";
 
     // create generic op using opsToClone as the body. Rewrite load op
     // parameters to be generic op block args
@@ -131,9 +131,17 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     SmallVector<Value> genericOpOutputs; // none for now
     SmallVector<Value> genericOpParams;  // none for now
 
+    auto shape = tensorTy->getShape();
+    SmallVector<int32_t> shapeVec(shape.begin(), shape.end());
+    auto sizePerThread = encoding.getSizePerThread();
+    SmallVector<int32_t> sizePerThreadVec(sizePerThread.begin(),
+                                          sizePerThread.end());
+
     auto generic =
         cpu::GenericOp::create(rewriter, loc, genericOpInputs, genericOpOutputs,
-                               genericOpParams, blockSizeAttr, vectorSizeAttr);
+                               genericOpParams, shapeVec, sizePerThreadVec);
+    llvm::errs() << "created generic: " << generic << "\n";
+    // TODO: populate generic body
 
     return failure();
   }

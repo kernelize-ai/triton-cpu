@@ -166,8 +166,8 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImpl
     Variadic<TT_Type>:$outs,
     Variadic<TT_Type>:$params,
 
-    I32Attr:$blockSize,
-    I32Attr:$vectorSize
+    DenseI32ArrayAttr:$blockShape,
+    DenseI32ArrayAttr:$vectorShape // Tile shape?
   );
 
   let results = (outs); // TODO: support materializing intermediates in local memory
