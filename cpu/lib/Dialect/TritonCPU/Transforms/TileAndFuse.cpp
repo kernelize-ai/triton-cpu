@@ -97,9 +97,11 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     if (failed)
       return failure();
 
-    for (auto op : opsToClone) {
-      llvm::errs() << "op to clone: " << *op << "\n";
-    }
+    LLVM_DEBUG({
+      for (auto op : opsToClone) {
+        DBGS() << "op to clone: " << *op << "\n";
+      }
+    });
 
     if (!isClosed(opsToClone))
       return failure();
@@ -111,12 +113,13 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     if (!encoding)
       return failure();
 
-    llvm::errs() << "common type = " << tensorTy << "\n";
+    LDBG("Creating generic op with common type " << tensorTy);
 
     // create generic op using opsToClone as the body. Rewrite load op
     // parameters to be generic op block args
 
-    // the load op arguments will be forwarded through the generic in order
+    // the load op arguments will be forwarded through the generic in order of
+    // load op appearance
     SmallVector<Value> genericOpInputs;
     for (auto op : opsToClone) {
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
@@ -139,7 +142,6 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     auto generic =
         cpu::GenericOp::create(rewriter, loc, genericOpInputs, genericOpParams,
                                shapeVec, sizePerThreadVec);
-    llvm::errs() << "created generic: " << generic << "\n";
     rewriter.createBlock(&generic->getRegion(0));
     Block *entry = &generic->getRegion(0).front();
     SmallVector<BlockArgument> args;
