@@ -152,7 +152,7 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     auto updateTensorType = [&](RankedTensorType oldType) -> RankedTensorType {
       return RankedTensorType::get(
           llvm::to_vector(llvm::map_range(
-              sizePerThread, [](int32_t s) { return int64_t(s); })),
+              sizePerThreadVec, [](int32_t s) { return int64_t(s); })),
           oldType.getElementType(), encoding);
     };
 
