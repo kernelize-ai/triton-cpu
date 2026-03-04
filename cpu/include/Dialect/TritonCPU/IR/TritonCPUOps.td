@@ -15,7 +15,7 @@ class TTC_Op<string mnemonic, list<Trait> traits = []> :
        !listconcat(traits, [])> {
 }
 
-def TTC_BlockIdOp : TTC_Op<"block_id", [Pure]> {
+def TTC_BlockIdOp : TTC_Op<"block_id", []> {
   let summary = "Get the block ID.";
 
   let description = [{
