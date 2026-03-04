@@ -25,7 +25,7 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
   Value blockIdx = entry.getArgument(blockIdxArgPos);
 
   OpBuilder b(&entry, entry.begin());
-  Value blockIdOp = triton::cpu::CurrentBlockOp::create(
+  Value currentBlockOp = triton::cpu::CurrentBlockOp::create(
       b, funcOp.getLoc(), blockIdx.getType(), blockIdx);
 
   SmallVector<triton::GetProgramIdOp> pidOps;
@@ -33,6 +33,9 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
     pidOps.push_back(pidOp);
   }
   for (auto pidOp : pidOps) {
+    Location loc = pidOp.getLoc();
+    ProgramIDDim axis = pidOp.getAxis();
+    Value blockIdOp = triton::cpu::BlockIdOp::create(b, loc, axis);
     pidOp.replaceAllUsesWith(blockIdOp);
     pidOp.erase();
   }
@@ -203,21 +206,20 @@ struct MakePersistentKernelPass
     LDBG("Adding kernel stream function wrapping " << kernels[0].getName());
     auto kernel = kernels[0];
 
-    // 1. Clone the existing kernel, rename to `kernel`_impl, and add an i32
+    // 1. Clone the existing kernel, rename to `<kernel>.impl`, and add an i32
     // parameter which is the block index offset
     StringRef oldName = kernel.getName();
     std::string implName = (oldName + ".impl").str();
     triton::FuncOp implFunc =
         cloneTTFuncWithExtraI32Arg(moduleOp, kernel, implName);
 
-    // 2. Rewrite the tt.get_program_id operation to add the block index offset
-    // to the return value (for the impl kernel)
+    // 2. Rewrite every `tt.get_program_id` operation to a `ttc.block_index`.
     unsigned blockIdxOffset = implFunc.getNumArguments() - 1;
     if (failed(addPidSentinel(implFunc, blockIdxOffset)))
       return signalPassFailure();
 
     // 3. Add the wrapper function calling kernel_impl in a loop over
-    // block_start to block_end offsets (kernel function parameters)
+    // block_start to block_end offsets (kernel function parameters).
     buildWrapper(moduleOp, kernel, implFunc, oldName);
 
     // 4. Erase the original kernel
