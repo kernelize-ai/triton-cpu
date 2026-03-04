@@ -17,7 +17,6 @@ def TritonCPU_Dialect : Dialect {
   ];
 
   let useDefaultAttributePrinterParser = 1;
-  let usePropertiesForAttributes = 1;
 }
 
 #endif
