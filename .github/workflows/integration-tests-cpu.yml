@@ -96,6 +96,18 @@ jobs:
           MAX_JOBS=8 TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
       - name: CCache Stats
         run: ccache --print-stats
+
+      # Local tests.
+      - name: Run local tests
+        working-directory: .
+        run: python -m pytest python/test
+      - name: Run tutorial 03 on CPU
+        working-directory: .
+        env:
+          TRITON_DEFAULT_BACKEND: "cpu"
+        run: python python/tutorials/03-matrix-multiplication.py
+
+      # Triton tests.
       - name: Run lit tests
         working-directory: ./triton
         run: |
@@ -109,14 +121,7 @@ jobs:
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
-        run: |
-          python python/tutorials/01-vector-add.py
-      - name: Run tutorial 03 on CPU
-        working-directory: .
-        env:
-          TRITON_DEFAULT_BACKEND: "cpu"
-        run: |
-          python python/tutorials/03-matrix-multiplication.py
+        run: python python/tutorials/01-vector-add.py
       - name: Run gluon tests
         working-directory: ./triton
         run: |
@@ -128,8 +133,7 @@ jobs:
       - name: Run regression tests
         working-directory: ./triton
         if: false
-        run: |
-          make test-regression
+        run: make test-regression
       - name: Run C++ unittests
         working-directory: ./triton
         run: make test-cpp
