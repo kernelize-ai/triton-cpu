@@ -43,11 +43,10 @@ def TTC_CurrentBlockOp : TTC_Op<"current_block", [SameOperandsAndResultType]> {
   let summary = "The current block ID for this kernel invocation.";
 
   let description = [{
-    Get the current block ID. This operation is generic, but within triton-cpu
-    we expect it to be used predominantly by persistent kernels (see
-    `MakePersistentKernel`). In that context, this operation serves only as a
-    marker for the SSA value it points to: the sole input is expected to be the
-    induction variable for the persistent loop.
+    Get the current block ID. We expect it to be used predominantly by
+    persistent kernels (see `MakePersistentKernel`). In that context, this
+    operation serves only as a marker for the SSA value it points to: the sole
+    input is expected to be the induction variable for the persistent loop.
   }];
 
   let arguments = (ins AnyType:$input);
@@ -67,13 +66,12 @@ def TTC_BlockStartOp : TTC_Op<"block_start", [Pure]> {
   let results = (outs I32:$blockId);
 
   let description = [{
-    Get the starting block ID. This operation is generic, but within triton-cpu
-    we expect it to be used predominantly by persistent kernels (see
-    `MakePersistentKernel`): that pass synthesizes a loop over a range of
-    blocks. In triton-cpu, we use runtime information to populate the starting
-    and ending block IDs for each kernel invocation, which allows the kernel to
-    process multiple blocks sequentially. The `block_start` and `block_end` ops
-    are used to query this information within the kernel.
+    Get the starting block ID. We expect it to be used predominantly by
+    persistent kernels (see `MakePersistentKernel`): that pass synthesizes a
+    loop over a range of blocks. Then, we use runtime information to populate
+    the starting and ending block IDs for each kernel invocation, which allows
+    the kernel to process multiple blocks sequentially. The `block_start` and
+    `block_end` ops are used to query this information within the kernel.
   }];
 
   let assemblyFormat = "attr-dict";
