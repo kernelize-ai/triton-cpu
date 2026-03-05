@@ -160,13 +160,17 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
     std::get<0>(arg).setLoc(std::get<1>(arg).getLoc());
   }
 
+  // Create a loop over the blocks given to the kernel; this assumes
+  // `block_{start|end}` have a lowering that reads the range of blocks.
   Value bEnd = triton::cpu::BlockEndOp::create(wb, wrap.getLoc(), i32Ty);
   Value bStart = triton::cpu::BlockStartOp::create(wb, wrap.getLoc(), i32Ty);
   Value bStep = arith::ConstantOp::create(wb, wrap.getLoc(), i32Ty,
                                           wb.getIntegerAttr(i32Ty, 1));
-
   scf::ForOp forOp =
       scf::ForOp::create(wb, wrap.getLoc(), bStart, bEnd, bStep, ValueRange{});
+
+  // Now call `<kernel>.impl` inside the loop, using the original args with the
+  // block index appended.
   {
     Block *body = forOp.getBody();
     OpBuilder fb(body, body->begin());
