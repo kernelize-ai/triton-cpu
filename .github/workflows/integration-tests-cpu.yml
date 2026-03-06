@@ -99,13 +99,13 @@ jobs:
 
       # Local tests.
       - name: Run local tests
-        working-directory: .
-        run: python -m pytest python/test
+        working-directory: ./triton
+        run: python -m pytest ../python/test
       - name: Run tutorial 03 on CPU
-        working-directory: .
+        working-directory: ./triton
         env:
           TRITON_DEFAULT_BACKEND: "cpu"
-        run: python python/tutorials/03-matrix-multiplication.py
+        run: python ../python/tutorials/03-matrix-multiplication.py
 
       # Triton tests.
       - name: Run lit tests
