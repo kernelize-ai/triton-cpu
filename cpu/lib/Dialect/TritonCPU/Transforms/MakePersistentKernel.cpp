@@ -25,14 +25,17 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
   Value blockIdx = entry.getArgument(blockIdxArgPos);
 
   OpBuilder b(&entry, entry.begin());
-  Value blockIdOp = triton::cpu::CurrentBlockOp::create(
-      b, funcOp.getLoc(), blockIdx.getType(), blockIdx);
+  triton::cpu::CurrentBlockOp::create(b, funcOp.getLoc(), blockIdx.getType(),
+                                      blockIdx);
 
   SmallVector<triton::GetProgramIdOp> pidOps;
   for (auto pidOp : entry.getOps<triton::GetProgramIdOp>()) {
     pidOps.push_back(pidOp);
   }
   for (auto pidOp : pidOps) {
+    Location loc = pidOp.getLoc();
+    ProgramIDDim axis = pidOp.getAxis();
+    Value blockIdOp = triton::cpu::BlockIdOp::create(b, loc, axis);
     pidOp.replaceAllUsesWith(blockIdOp);
     pidOp.erase();
   }
@@ -157,13 +160,17 @@ static triton::FuncOp buildWrapper(ModuleOp mod, triton::FuncOp kernel,
     std::get<0>(arg).setLoc(std::get<1>(arg).getLoc());
   }
 
+  // Create a loop over the blocks given to the kernel; this assumes
+  // `block_{start|end}` have a lowering that reads the range of blocks.
   Value bEnd = triton::cpu::BlockEndOp::create(wb, wrap.getLoc(), i32Ty);
   Value bStart = triton::cpu::BlockStartOp::create(wb, wrap.getLoc(), i32Ty);
   Value bStep = arith::ConstantOp::create(wb, wrap.getLoc(), i32Ty,
                                           wb.getIntegerAttr(i32Ty, 1));
-
   scf::ForOp forOp =
       scf::ForOp::create(wb, wrap.getLoc(), bStart, bEnd, bStep, ValueRange{});
+
+  // Now call `<kernel>.impl` inside the loop, using the original args with the
+  // block index appended.
   {
     Block *body = forOp.getBody();
     OpBuilder fb(body, body->begin());
@@ -203,21 +210,20 @@ struct MakePersistentKernelPass
     LDBG("Adding kernel stream function wrapping " << kernels[0].getName());
     auto kernel = kernels[0];
 
-    // 1. Clone the existing kernel, rename to `kernel`_impl, and add an i32
+    // 1. Clone the existing kernel, rename to `<kernel>.impl`, and add an i32
     // parameter which is the block index offset
     StringRef oldName = kernel.getName();
     std::string implName = (oldName + ".impl").str();
     triton::FuncOp implFunc =
         cloneTTFuncWithExtraI32Arg(moduleOp, kernel, implName);
 
-    // 2. Rewrite the tt.get_program_id operation to add the block index offset
-    // to the return value (for the impl kernel)
+    // 2. Rewrite every `tt.get_program_id` operation to a `ttc.block_index`.
     unsigned blockIdxOffset = implFunc.getNumArguments() - 1;
     if (failed(addPidSentinel(implFunc, blockIdxOffset)))
       return signalPassFailure();
 
     // 3. Add the wrapper function calling kernel_impl in a loop over
-    // block_start to block_end offsets (kernel function parameters)
+    // block_start to block_end offsets (kernel function parameters).
     buildWrapper(moduleOp, kernel, implFunc, oldName);
 
     // 4. Erase the original kernel

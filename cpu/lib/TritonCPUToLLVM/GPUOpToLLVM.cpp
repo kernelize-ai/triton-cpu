@@ -149,7 +149,8 @@ public:
       auto currentBlockIdOps =
           llvm::to_vector(llvmFunc.getOps<cpu::CurrentBlockOp>());
       if (currentBlockIdOps.empty()) {
-        // grab the block start argument and assume block end is 1
+        // Grab the block start argument and assume there is only one block--a
+        // non-persistent kernel.
         auto b = TritonLLVMOpBuilder(blockIdOp.getLoc(), rewriter);
         auto idxTy = this->getTypeConverter()->convertType(blockIdOp.getType());
         auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, arg,
