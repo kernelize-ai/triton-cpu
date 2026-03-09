@@ -57,6 +57,23 @@ LogicalResult GenericOp::verify() {
     }
   }
 
+  // Combiners region must have one block per scalar result.
+  Region &combiners = getCombiners();
+  unsigned numResults = getNumResults();
+  if (combiners.getBlocks().size() != numResults) {
+    return emitOpError("expects combiners region to have ")
+           << numResults << " block(s), got " << combiners.getBlocks().size();
+  }
+  for (auto [i, block] : llvm::enumerate(combiners.getBlocks())) {
+    Type resultTy = getResultTypes()[i];
+    if (block.getNumArguments() != 2 ||
+        block.getArgument(0).getType() != resultTy ||
+        block.getArgument(1).getType() != resultTy) {
+      return emitOpError("combiner block ")
+             << i << " expects two arguments of type " << resultTy;
+    }
+  }
+
   return success();
 }
 

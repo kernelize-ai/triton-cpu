@@ -33,7 +33,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     int64_t vectorSize = vectorShape[0];
     unsigned numChunks = blockSize / vectorSize;
 
-    Block *body = &op.getRegion().front();
+    Block *body = &op.getRegion(0).front();
 
     // TODO: currently we unroll the generic op during lowering because
     // extractvalue cannot take a dynamic index. To reduce code size, we will
