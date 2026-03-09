@@ -22,7 +22,6 @@ void MaskedLoadOp::getEffects(
 }
 
 LogicalResult GenericOp::verify() {
-#if 1
   auto blockShape = getBlockShape();
   auto vectorShape = getVectorShape();
 
@@ -43,33 +42,6 @@ LogicalResult GenericOp::verify() {
              << " vs " << vectorShape[i];
     }
   }
-#else
-  RankedTensorType blockType = getBlockType();
-  auto encoding = blockType.getEncoding();
-  if (!encoding) {
-    return emitOpError("expects blockType to have a valid encoding");
-  }
-  auto blockedEncoding = dyn_cast<triton::gpu::BlockedEncodingAttr>(encoding);
-  if (!blockedEncoding) {
-    return emitOpError("expects blockType to have a BlockedEncodingAttr");
-  }
-
-  const auto blockDims = blockType.getShape();
-  const auto sizePerThread = blockedEncoding.getSizePerThread();
-  if (blockDims.size() != sizePerThread()) {
-    return emitOpError("expects blockDims.size() == sizePerThread(), got ")
-           << blockDims.size() << " vs " << sizePerThread();
-  }
-
-  for (unsigned i = 0; i < blockDims.size(); i++) {
-    if (blockDims[i] % sizePerThread[i] != 0) {
-      return emitOpError("expects blockDims[")
-             << i << "] % sizePerThread[" << i << "] == 0, got " << blockDims[i]
-             << " vs " << sizePerThread[i];
-    }
-  }
-#endif
-  // TODO: other verification checks?
 
   return success();
 }

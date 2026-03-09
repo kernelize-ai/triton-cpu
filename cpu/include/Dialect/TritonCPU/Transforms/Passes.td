@@ -50,10 +50,31 @@ def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> 
 }
 
 def TritonCPUTileAndFuse : Pass<"tritoncpu-tile-and-fuse", "mlir::ModuleOp"> {
-  let summary = "Replace ops with ttc.generic according to triton GPU layouts";
+  let summary = "Wrap elementwise op chains in ttc.generic for tiled lowering";
 
   let description = [{
-    TODO
+    Identifies closed chains of tensor operations ending in a `tt.store` and
+    wraps them in `ttc.generic` regions to enable tiled, iterative lowering.
+
+    A chain is a set of ops reachable by walking the def-use graph back from a
+    `tt.store` through `tt.load` and elementwise `arith` ops. The chain must be
+    "closed": every result produced within the chain must be consumed within it
+    (i.e. no values escape to users outside the chain).
+
+    When a valid chain is found, a `ttc.generic` op is created whose:
+    - `ins` operands are the pointer, mask, and other arguments of any `tt.load`
+      and `tt.store` ops in the chain.
+    - `blockShape` is taken from the tensor shape of the common tensor type.
+    - `vectorShape` (tile size) is taken from the `sizePerThread` field of the
+      `BlockedEncodingAttr` on the common tensor type.
+
+    The ops in the chain are cloned into the generic region with tensor types
+    updated to the tile shape, and load/store pointer arguments replaced with
+    tiled block arguments. The original ops are erased.
+
+    The resulting `ttc.generic` is later lowered to LLVM by unrolling the region
+    body once per tile (blockShape / vectorShape iterations), extracting and
+    inserting sub-vectors from the operands for each tile.
   }];
 
   let dependentDialects = [
