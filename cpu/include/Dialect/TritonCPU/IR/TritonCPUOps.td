@@ -158,11 +158,11 @@ def TTC_MaskedStoreOp : TTC_Op<"masked_store", [
 
 def TTC_YieldOp : TTC_Op<"yield", [Terminator, ReturnLike, HasParent<"GenericOp">]> {
   let summary = "Terminator for ttc.generic";
-  let arguments = (ins);
-  let assemblyFormat = "attr-dict";
+  let arguments = (ins Variadic<AnyType>:$values);
+  let assemblyFormat = "($values^ `:` type($values))? attr-dict";
 }
 
-def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImplicitTerminator<"YieldOp">]> {
+def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
   let summary = "Tiled iteration over a tensor block with fused loads and stores";
 
   let description = [{
@@ -182,23 +182,49 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImpl
     - `params`: scalar or tensor-typed pass-through values that are forwarded
       into the body region unchanged (not tiled).
 
-    The body region receives block arguments corresponding to (in order) the
-    tiled slices of `ins` followed by the untiled `params`. It must be terminated
-    by a `ttc.yield`.
+    The `body` region receives block arguments corresponding to (in order) the
+    tiled slices of `ins` followed by the untiled `params`. It is executed once
+    per tile and terminated by `ttc.yield`. When the op has scalar results,
+    `ttc.yield` returns one partial value per result (e.g. the output of a
+    `tt.reduce` over the tile).
+
+    The `combiners` region contains one block per scalar result. Each block takes
+    two arguments `(acc, partial)` of the result type and yields the updated
+    accumulator. The lowering bootstraps the accumulator from the first tile's
+    partial result and applies the combiner for each subsequent tile.
 
     Constraints:
     - `blockShape` and `vectorShape` must have the same rank.
     - Each `blockShape[i]` must be a positive multiple of `vectorShape[i]`.
+    - `combiners` must have exactly as many blocks as there are scalar results,
+      each with two arguments and one yield of the matching type.
 
-    Example (pseudocode for a 128-element elementwise chain, tile size 16):
+    Example — elementwise chain (no scalar results, empty combiners):
     ```
     ttc.generic %src_ptrs, %dst_ptrs {blockShape = [128], vectorShape = [16]}
-        : tensor<128x!tt.ptr<f32>>, tensor<128x!tt.ptr<f32>> {
-    ^bb0(%src_tile: tensor<16x!tt.ptr<f32>>, %dst_tile: tensor<16x!tt.ptr<f32>>):
-      %v = tt.load %src_tile : tensor<16xf32>
-      %w = math.exp %v       : tensor<16xf32>
-      tt.store %dst_tile, %w : tensor<16xf32>
+        : tensor<128x!tt.ptr<f32>>, tensor<128x!tt.ptr<f32>>
+    body {
+    ^bb0(%src: tensor<16x!tt.ptr<f32>>, %dst: tensor<16x!tt.ptr<f32>>):
+      %v = tt.load %src : tensor<16xf32>
+      %w = math.exp %v  : tensor<16xf32>
+      tt.store %dst, %w : tensor<16xf32>
       ttc.yield
+    } combiners {}
+    ```
+
+    Example — reduction (one scalar result):
+    ```
+    %max = ttc.generic %ptrs, %mask {blockShape = [128], vectorShape = [16]}
+        : tensor<128x!tt.ptr<f32>>, tensor<128xi1> -> f32
+    body {
+    ^bb0(%tptrs: tensor<16x!tt.ptr<f32>>, %tmask: tensor<16xi1>):
+      %tile    = tt.load %tptrs, %tmask : tensor<16xf32>
+      %partial = tt.reduce %tile {max}  : tensor<16xf32> -> f32
+      ttc.yield %partial : f32
+    } combiners {
+    ^bb0(%acc: f32, %partial: f32):
+      %new = arith.maxnumf %acc, %partial : f32
+      ttc.yield %new : f32
     }
     ```
 
@@ -206,6 +232,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImpl
     times. For each iteration, sub-vectors are extracted from the LLVM struct
     representation of each `ins` operand, cast back to the tile tensor type, and
     substituted for the corresponding block arguments before cloning the body.
+    Scalar results are accumulated across tiles using the combiner blocks.
   }];
 
   let arguments = (ins
@@ -216,14 +243,14 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImpl
     DenseI32ArrayAttr:$vectorShape
   );
 
-  let results = (outs); // TODO: support scalar results from reductions
+  let results = (outs Variadic<AnyType>:$results);
 
-  let regions = (region AnyRegion:$body);
+  let regions = (region AnyRegion:$body, AnyRegion:$combiners);
 
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    $ins (`(` $params^ `)`)? attr-dict-with-keyword $body `:` functional-type(operands, results)
+    $ins (`(` $params^ `)`)? attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
   }];
 }
 
