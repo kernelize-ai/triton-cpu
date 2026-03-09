@@ -127,7 +127,8 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_loop_aware_cse(pm)
 
         passes.common.add_symbol_dce(pm)
-        cpu.passes.ttgpuir.add_tile_and_fuse(pm)
+        if os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1":
+            cpu.passes.ttgpuir.add_tile_and_fuse(pm)
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)
