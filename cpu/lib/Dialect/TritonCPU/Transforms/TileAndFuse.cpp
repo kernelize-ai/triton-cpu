@@ -49,6 +49,49 @@ getCommonType(const llvm::SetVector<Operation *> &ops) {
   return tensorTy;
 }
 
+std::optional<llvm::SetVector<Operation *>>
+getElementwiseChain(Operation *initialOp, Value start) {
+  SetVector<Operation *> ops;
+  ops.insert(initialOp);
+
+  llvm::SmallVector<Value> queue;
+  queue.push_back(start);
+
+  while (!queue.empty()) {
+    auto v = queue.pop_back_val();
+    auto defOp = v.getDefiningOp();
+
+    if (!defOp)
+      continue;
+
+    // allow load operations and elementwise operations in ttc.generic
+    if (auto loadOp = dyn_cast<triton::LoadOp>(defOp)) {
+      // load ops terminate the chain
+      ops.insert(defOp);
+      continue;
+    }
+    // allow elementwise ops and push their operands to the queue
+    if (isa<arith::ArithDialect, math::MathDialect>(defOp->getDialect()) &&
+        defOp->hasTrait<OpTrait::Elementwise>()) {
+      ops.insert(defOp);
+    } else {
+      continue;
+    }
+
+    for (auto operand : defOp->getOperands()) {
+      queue.push_back(operand);
+    }
+  }
+  LLVM_DEBUG({
+    DBGS() << "getElementwiseChain for " << start << " found ops:\n";
+    for (Operation *op : ops) {
+      DBGS() << "  " << *op << "\n";
+    }
+  });
+
+  return ops;
+}
+
 struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
   using OpRewritePattern<triton::StoreOp>::OpRewritePattern;
 
@@ -62,51 +105,14 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
       return failure();
     }
 
-    llvm::SetVector<Operation *> opsToClone;
-    opsToClone.insert(storeOp);
-
-    llvm::SmallVector<Value> queue;
-    queue.push_back(storeOp.getValue());
-
-    bool failed = false;
-    while (!queue.empty()) {
-      auto v = queue.pop_back_val();
-      auto defOp = v.getDefiningOp();
-
-      if (!defOp)
-        continue;
-
-      // allow load operations and elementwise operations in ttc.generic
-      if (auto loadOp = dyn_cast<triton::LoadOp>(defOp)) {
-        // load ops terminate the chain
-        opsToClone.insert(defOp);
-        continue;
-      }
-      if (isa<arith::ArithDialect>(defOp->getDialect()) &&
-          defOp->hasTrait<OpTrait::Elementwise>()) {
-        opsToClone.insert(defOp);
-      } else {
-        failed = true;
-        break;
-      }
-
-      for (auto operand : defOp->getOperands()) {
-        queue.push_back(operand);
-      }
-    }
-    if (failed)
+    auto opsToClone = getElementwiseChain(storeOp, storeOp.getValue());
+    if (!opsToClone)
       return failure();
 
-    LLVM_DEBUG({
-      for (auto op : opsToClone) {
-        DBGS() << "op to clone: " << *op << "\n";
-      }
-    });
-
-    if (!isClosed(opsToClone))
+    if (!isClosed(*opsToClone))
       return failure();
 
-    auto tensorTy = getCommonType(opsToClone);
+    auto tensorTy = getCommonType(*opsToClone);
     if (!tensorTy)
       return failure();
     auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy->getEncoding());
@@ -122,7 +128,7 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     // load op appearance
     // TODO: we should do this as a set vector to avoid duplication
     SmallVector<Value> genericOpInputs;
-    for (auto op : opsToClone) {
+    for (auto op : *opsToClone) {
       if (auto loadOp = dyn_cast<triton::LoadOp>(op)) {
         genericOpInputs.push_back(loadOp.getPtr());
         if (loadOp.getMask())
@@ -176,7 +182,7 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     }
 
     rewriter.setInsertionPointToStart(entry);
-    for (auto op : llvm::reverse(opsToClone)) {
+    for (auto op : llvm::reverse(*opsToClone)) {
       auto newOp = rewriter.clone(*op, mapping);
       for (auto result : newOp->getResults()) {
         result.setType(
@@ -188,9 +194,9 @@ struct WrapElementwiseChain : public mlir::OpRewritePattern<triton::StoreOp> {
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
 
     // Empty combiners region — no scalar results.
-    rewriter.createBlock(&generic->getRegion(1));
+    // rewriter.createBlock(&generic->getRegion(1));
 
-    for (auto op : opsToClone) {
+    for (auto op : *opsToClone) {
       rewriter.eraseOp(op);
     }
     return success();
@@ -215,6 +221,17 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     auto srcs = reduceOp.getSrcs();
     if (srcs.size() != 1)
       return failure();
+
+    auto opsToClone = getElementwiseChain(reduceOp, srcs[0]);
+    if (!opsToClone || opsToClone->empty())
+      return failure();
+
+#if 0
+    if (!isClosed(*opsToClone))
+      return failure();
+#endif
+
+    llvm::errs() << "srcs[0] defining op: " << *srcs[0].getDefiningOp() << "\n";
     auto loadOp = dyn_cast_or_null<triton::LoadOp>(srcs[0].getDefiningOp());
     if (!loadOp)
       return failure();
