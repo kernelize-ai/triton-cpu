@@ -503,7 +503,6 @@ struct Fuse : public mlir::OpRewritePattern<triton::cpu::GenericOp> {
   mlir::LogicalResult
   matchAndRewrite(triton::cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
-    llvm::errs() << "fusing " << genericOp << "\n";
     // get the elementwise chain starting from this op and working backwards
 
     // TODO: this isn't compatible with the conversion of store op chains to
@@ -581,8 +580,6 @@ struct Fuse : public mlir::OpRewritePattern<triton::cpu::GenericOp> {
     rewriter.modifyOpInPlace(genericOp, [&]() {
       genericOp.getInsMutable().assign(genericOpInputs);
     });
-
-    llvm::errs() << "updated generic: " << genericOp << "\n";
 
     for (Operation *op : llvm::reverse(*opsToClone)) {
       if (op->use_empty()) {
