@@ -673,20 +673,11 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
     for (Value operand : op->getOperands()) {
       if (mapping.contains(operand))
         continue;
-      if (isa<RankedTensorType>(operand.getType())) {
-        // Tensor operand → new tiled ins block arg.
-        newIns.push_back(operand);
-        mapping.map(operand,
-                    body->addArgument(updateTensorType(operand.getType()),
-                                      operand.getLoc()));
-      } else {
-        // Scalar operand → new untiled params block arg.
-        // TODO: params block args must be appended after ins args; confirm
-        // block arg layout is [ins..., params...] before enabling this path.
-        newParams.push_back(operand);
-        mapping.map(operand,
-                    body->addArgument(operand.getType(), operand.getLoc()));
-      }
+
+      newIns.push_back(operand);
+      mapping.map(operand,
+                  body->addArgument(updateTensorType(operand.getType()),
+                                    operand.getLoc()));
     }
 
     Operation *newOp = rewriter.clone(*op, mapping);
