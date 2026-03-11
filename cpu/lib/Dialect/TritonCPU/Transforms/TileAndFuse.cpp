@@ -214,6 +214,101 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     if (reduceOp->getParentOfType<cpu::GenericOp>())
       return failure();
 
+#if 1
+    // Wrap scalar reductions in ttc.generic. Take the elementwise chain as
+    // input.
+    auto reduceResult = reduceOp.getResult();
+    if (reduceResult.size() != 1)
+      return failure();
+    if (isa<RankedTensorType>(reduceResult[0].getType()))
+      return failure();
+
+    auto srcs = reduceOp.getSrcs();
+    if (srcs.size() != 1)
+      return failure();
+
+    auto tensorTy = dyn_cast<RankedTensorType>(srcs[0].getType());
+    if (!tensorTy)
+      return failure();
+    auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy.getEncoding());
+    if (!encoding)
+      return failure();
+
+    auto shape = tensorTy.getShape();
+    SmallVector<int32_t> blockShape(shape.begin(), shape.end());
+    auto sizePerThread = encoding.getSizePerThread();
+    SmallVector<int32_t> vectorShape(sizePerThread.begin(),
+                                     sizePerThread.end());
+
+    auto updateTensorType = [&](RankedTensorType t) -> RankedTensorType {
+      return RankedTensorType::get(
+          llvm::to_vector(llvm::map_range(
+              vectorShape, [](int32_t s) { return int64_t(s); })),
+          t.getElementType(), encoding);
+    };
+
+    SmallVector<Value> ins;
+    ins.push_back(srcs[0]);
+
+    SmallVector<Type> resultTypes(reduceOp.getResultTypes().begin(),
+                                  reduceOp.getResultTypes().end());
+
+    LDBG("Creating reduction generic op, result types: " << resultTypes.size());
+
+    auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, ins,
+                                          /*params=*/ValueRange{}, blockShape,
+                                          vectorShape);
+
+    Block *body = rewriter.createBlock(&generic.getBody());
+    IRMapping bodyMapping;
+    for (Value v : ins) {
+      Type argTy = v.getType();
+      if (auto tt = dyn_cast<RankedTensorType>(argTy))
+        argTy = updateTensorType(tt);
+      bodyMapping.map(v, body->addArgument(argTy, v.getLoc()));
+    }
+
+    rewriter.setInsertionPointToStart(body);
+
+    // Clone the reduce — it now operates on the tile-sized tensor.
+    auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
+
+    SmallVector<Value> partials(newReduce->getResults().begin(),
+                                newReduce->getResults().end());
+    cpu::YieldOp::create(rewriter, loc, partials);
+
+    // Each block takes (acc, partial) and applies the same combining op as the
+    // tt.reduce combiner, replacing tt.reduce.return with ttc.yield.
+    Region &combiners = generic.getCombiners();
+    Region &reduceCombiner = reduceOp.getCombineOp();
+    Block &srcBlock = reduceCombiner.front();
+
+    for (Type resultTy : resultTypes) {
+      Block *combBlock = rewriter.createBlock(&combiners);
+      Value acc = combBlock->addArgument(resultTy, loc);
+      Value partial = combBlock->addArgument(resultTy, loc);
+
+      IRMapping combMapping;
+      // The reduce combiner block has args [lhs..., rhs...] interleaved per
+      // src. With a single src the layout is simply [lhs, rhs].
+      combMapping.map(srcBlock.getArgument(0), acc);
+      combMapping.map(srcBlock.getArgument(1), partial);
+
+      rewriter.setInsertionPointToStart(combBlock);
+      for (Operation &op : srcBlock.without_terminator())
+        rewriter.clone(op, combMapping);
+
+      // Replace tt.reduce.return with ttc.yield.
+      SmallVector<Value> yieldVals;
+      for (Value rv : srcBlock.getTerminator()->getOperands())
+        yieldVals.push_back(combMapping.lookupOrDefault(rv));
+      cpu::YieldOp::create(rewriter, loc, yieldVals);
+    }
+
+    rewriter.replaceOp(reduceOp, generic.getResults());
+
+#else
+
     // Only handle the simple case: single source tensor from a tt.load.
     // Loads are duplicated into the generic region; the original load is erased
     // only if it has no remaining users
@@ -333,6 +428,103 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 
     if (loadOp->use_empty())
       rewriter.eraseOp(loadOp);
+#endif
+    return success();
+  }
+};
+
+struct Fuse : public mlir::OpRewritePattern<triton::cpu::GenericOp> {
+  using OpRewritePattern<triton::cpu::GenericOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::cpu::GenericOp genericOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    llvm::errs() << "fusing " << genericOp << "\n";
+    // get the elementwise chain starting from this op and working backwards
+
+    // TODO: this isn't compatible with the conversion of store op chains to
+    // generic (though it might work by accident since ins[0] would be the load
+    // value currently)
+    auto opsToClone = getElementwiseChain(genericOp.getIns()[0].getDefiningOp(),
+                                          genericOp.getIns()[0]);
+    if (!opsToClone || opsToClone->empty())
+      return failure();
+
+    if (!isa<triton::LoadOp>(opsToClone->back()))
+      return failure();
+
+    auto sizePerThreadVec = genericOp.getVectorShape();
+    auto updateTensorType = [&](Type oldType) -> Type {
+      auto oldTensorType = dyn_cast<RankedTensorType>(oldType);
+      if (!oldTensorType)
+        return oldType;
+      return RankedTensorType::get(
+          llvm::to_vector(llvm::map_range(
+              sizePerThreadVec, [](int32_t s) { return int64_t(s); })),
+          oldTensorType.getElementType(), oldTensorType.getEncoding());
+    };
+
+    // For each op in the elementwise chain, clone it into the generic body.
+    // - Operands defined outside the generic become new ins (new block args).
+    // - If an op's result was already an ins to the generic, replace the
+    //   corresponding block arg with the cloned result and drop it from ins.
+
+    // Build a lookup: existing ins value → index in the ins list / block arg.
+    DenseMap<Value, unsigned> insToArgIdx;
+    for (auto [idx, v] : llvm::enumerate(genericOp.getIns()))
+      insToArgIdx[v] = idx;
+
+    SmallVector<Value> genericOpInputs = genericOp.getIns();
+    SmallVector<unsigned> argIdxToRemove;
+    Block *body = &genericOp.getBody().front();
+    rewriter.setInsertionPointToStart(body);
+    IRMapping mapping;
+    for (Operation *op : llvm::reverse(*opsToClone)) {
+      for (Value operand : op->getOperands()) {
+        if (!mapping.contains(operand)) {
+          // Operand is defined outside the generic — add as a new ins.
+          genericOpInputs.push_back(operand);
+          auto arg = body->addArgument(updateTensorType(operand.getType()),
+                                       operand.getLoc());
+          mapping.map(operand, arg);
+        }
+      }
+      auto newOp = rewriter.clone(*op, mapping);
+
+      for (auto [origResult, newResult] :
+           llvm::zip(op->getResults(), newOp->getResults())) {
+        newResult.setType(updateTensorType(newResult.getType()));
+        // If this result was previously an ins, the body already uses the
+        // corresponding block arg. Replace those uses with the cloned result
+        // and mark the block arg for removal.
+        if (auto it = insToArgIdx.find(origResult); it != insToArgIdx.end()) {
+          body->getArgument(it->second).replaceAllUsesWith(newResult);
+          argIdxToRemove.push_back(it->second);
+        }
+      }
+      mapping.map(op->getResults(), newOp->getResults());
+    }
+
+    // Remove block args and ins entries that are now produced inside the body.
+    // Process in reverse index order so earlier indices stay stable.
+    llvm::sort(argIdxToRemove);
+    for (unsigned idx : llvm::reverse(argIdxToRemove)) {
+      body->eraseArgument(idx);
+      genericOpInputs.erase(genericOpInputs.begin() + idx);
+    }
+
+    // Update the generic op's ins operand list.
+    rewriter.modifyOpInPlace(genericOp, [&]() {
+      genericOp.getInsMutable().assign(genericOpInputs);
+    });
+
+    llvm::errs() << "updated generic: " << genericOp << "\n";
+
+    for (Operation *op : llvm::reverse(*opsToClone)) {
+      if (op->use_empty()) {
+        rewriter.eraseOp(op);
+      }
+    }
 
     return success();
   }
@@ -350,10 +542,19 @@ struct TritonCPUTileAndFusePass
     mlir::RewritePatternSet patterns(context);
     constexpr int benefitDefault = 1;
 
+    // Step 1: Create the generic ops
     patterns.add<WrapElementwiseChain>(context, benefitDefault);
     patterns.add<WrapReduceOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
+      signalPassFailure();
+    }
+
+    // Step 2: Fuse generics + elementwise chains
+    mlir::RewritePatternSet fusionPatterns(context);
+
+    fusionPatterns.add<Fuse>(context, benefitDefault);
+    if (applyPatternsGreedily(m, std::move(fusionPatterns)).failed()) {
       signalPassFailure();
     }
   }
