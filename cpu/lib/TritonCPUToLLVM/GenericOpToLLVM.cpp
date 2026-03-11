@@ -19,8 +19,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
 
-    llvm::errs() << "rewrite generic op " << op << "\n";
-
     auto blockShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("blockShape");
     auto vectorShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("vectorShape");
 
@@ -35,6 +33,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     int64_t vectorSize = vectorShape[0];
     unsigned numChunks = blockSize / vectorSize;
 
+    Value result;
+    const bool hasReductions = !op.getCombiners().empty();
+
     Block *body = &op.getBody().front();
 
     // TODO: currently we unroll the generic op during lowering because
@@ -48,7 +49,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
         if (!isa<RankedTensorType>(origArg.getType())) {
           // forward constants and scalars without chunking
-          chunkedArgs.push_back(origArg);
+          assert(origArg.getType() == llvmArg.getType() &&
+                 "expected non-tensor arguments to be unchanged by type "
+                 "conversion");
+          chunkedArgs.push_back(llvmArg);
         } else {
 
           Type convertedBodyType =
@@ -78,12 +82,46 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         mapping.map(body->getArgument(j), chunkedArgs[j]);
       }
 
+      // TODO: maybe we should just look at the yield op and work backwards from
+      // there (which would actually let us match yield op values and support
+      // multiple results...)
       for (Operation &bOp : body->without_terminator()) {
-        rewriter.clone(bOp, mapping);
+        auto newOp = rewriter.clone(bOp, mapping);
+        if (isa<triton::ReduceOp>(bOp)) {
+          assert(hasReductions &&
+                 "unexpected reduce op in generic without reductions");
+          if (i == 0) {
+            result = newOp->getResult(0);
+          } else {
+            // combine with the previous reduction result using the same
+            // combiner region
+            auto *combinerBlock = &op.getCombiners().front();
+            IRMapping combMapping;
+            combMapping.map(combinerBlock->getArgument(0), result);
+            combMapping.map(combinerBlock->getArgument(1), newOp->getResult(0));
+
+            auto terminator =
+                cast<cpu::YieldOp>(combinerBlock->getTerminator());
+            auto yieldVals = terminator.getValues();
+            assert(
+                yieldVals.size() == 1 &&
+                "expected exactly one value yielded from the combiner block");
+
+            Operation *combinerOp = yieldVals.front().getDefiningOp();
+            assert(combinerOp && "expected yielded value to be defined by an "
+                                 "op in the combiner block");
+            auto newCombiner = rewriter.clone(*combinerOp, combMapping);
+            result = newCombiner->getResult(0);
+          }
+        }
       }
     }
 
-    rewriter.eraseOp(op);
+    if (result) {
+      rewriter.replaceOp(op, result);
+    } else {
+      rewriter.eraseOp(op);
+    }
     return success();
   }
 };
