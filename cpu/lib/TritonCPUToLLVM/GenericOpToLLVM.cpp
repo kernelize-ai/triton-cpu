@@ -19,6 +19,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
 
+    llvm::errs() << "rewrite generic op " << op << "\n";
+
     auto blockShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("blockShape");
     auto vectorShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("vectorShape");
 
@@ -33,7 +35,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     int64_t vectorSize = vectorShape[0];
     unsigned numChunks = blockSize / vectorSize;
 
-    Block *body = &op.getRegion(0).front();
+    Block *body = &op.getBody().front();
 
     // TODO: currently we unroll the generic op during lowering because
     // extractvalue cannot take a dynamic index. To reduce code size, we will
@@ -43,24 +45,31 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       for (auto [origArg, llvmArg] :
            llvm::zip(body->getArguments(), adaptor.getOperands())) {
-        Type convertedBodyType =
-            getTypeConverter()->convertType(origArg.getType());
 
-        Value chunk = LLVM::UndefOp::create(rewriter, loc, convertedBodyType);
+        if (!isa<RankedTensorType>(origArg.getType())) {
+          // forward constants and scalars without chunking
+          chunkedArgs.push_back(origArg);
+        } else {
 
-        for (unsigned j = 0; j < vectorSize; ++j) {
-          int64_t srcIndex = i * vectorSize + j;
+          Type convertedBodyType =
+              getTypeConverter()->convertType(origArg.getType());
 
-          Value extractedElement =
-              LLVM::ExtractValueOp::create(rewriter, loc, llvmArg, {srcIndex});
-          chunk = LLVM::InsertValueOp::create(rewriter, loc, chunk,
-                                              extractedElement, {j});
+          Value chunk = LLVM::UndefOp::create(rewriter, loc, convertedBodyType);
+
+          for (unsigned j = 0; j < vectorSize; ++j) {
+            int64_t srcIndex = i * vectorSize + j;
+
+            Value extractedElement = LLVM::ExtractValueOp::create(
+                rewriter, loc, llvmArg, {srcIndex});
+            chunk = LLVM::InsertValueOp::create(rewriter, loc, chunk,
+                                                extractedElement, {j});
+          }
+
+          Value castedChunk = UnrealizedConversionCastOp::create(
+                                  rewriter, loc, origArg.getType(), chunk)
+                                  .getResult(0);
+          chunkedArgs.push_back(castedChunk);
         }
-
-        Value castedChunk = UnrealizedConversionCastOp::create(
-                                rewriter, loc, origArg.getType(), chunk)
-                                .getResult(0);
-        chunkedArgs.push_back(castedChunk);
       }
 
       // clone the body of the generic op for this chunk only
