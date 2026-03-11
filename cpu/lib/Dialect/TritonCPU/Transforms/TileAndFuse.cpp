@@ -20,11 +20,10 @@ namespace cpu {
 namespace {
 
 static bool isClosed(const llvm::SetVector<Operation *> &ops) {
-  llvm::DenseSet<Operation *> set(ops.begin(), ops.end());
   for (Operation *op : ops) {
     for (Value r : op->getResults()) {
       for (Operation *user : r.getUsers()) {
-        if (!set.contains(user))
+        if (!ops.contains(user))
           return false;
       }
     }
@@ -84,7 +83,7 @@ getElementwiseChain(Operation *initialOp, Value start) {
   }
   LLVM_DEBUG({
     DBGS() << "getElementwiseChain for " << start << " found ops:\n";
-    for (Operation *op : ops) {
+    for (Operation *op : llvm::reverse(ops)) {
       DBGS() << "  " << *op << "\n";
     }
   });
@@ -226,7 +225,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     if (!opsToClone || opsToClone->empty())
       return failure();
 
-#if 0
+    // we want to build the closed set of tensors but allow passing scalars (and
+    // arguments to loads).how do we differentiate?
+    //
+#if 1
     if (!isClosed(*opsToClone))
       return failure();
 #endif
