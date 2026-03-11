@@ -250,7 +250,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    $ins (`(` $params^ `)`)? attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
+    $ins (` ` `(` $params^ `)`)? attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
   }];
 }
 
