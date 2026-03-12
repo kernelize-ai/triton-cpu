@@ -49,6 +49,8 @@ public:
     addIllegalDialect<triton::gpu::TritonGPUDialect>();
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addIllegalDialect<triton::cpu::TritonCPUDialect>();
+    addLegalOp<mlir::triton::cpu::GenericOp>();
+    addLegalOp<mlir::triton::cpu::YieldOp>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
     addLegalOp<mlir::triton::cpu::MaskedLoadOp,
                mlir::triton::cpu::MaskedStoreOp>();
@@ -103,9 +105,6 @@ struct ConvertTritonCPUToLLVM
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
 
-    cpu::populateGenericOpToLLVMPatterns(typeConverter, patterns, targetInfo,
-                                         benefit);
-
     cpu::populateDotOpToLLVMPatterns(typeConverter, patterns, targetInfo,
                                      benefit);
 
@@ -152,6 +151,19 @@ struct ConvertTritonCPUToLLVM
 
     TritonLLVMConversionTarget convTarget(*context);
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns))))
+      return signalPassFailure();
+
+    // Lower generic op to control flow separately to avoid breaking analysis.
+    TritonLLVMFunctionConversionTarget gTarget(*context);
+    gTarget.addIllegalOp<mlir::triton::cpu::GenericOp>();
+    gTarget.addIllegalOp<mlir::triton::cpu::YieldOp>();
+    gTarget.addLegalOp<mlir::triton::cpu::MaskedLoadOp,
+                       mlir::triton::cpu::MaskedStoreOp>();
+
+    RewritePatternSet gPatterns(context);
+    cpu::populateGenericOpToLLVMPatterns(typeConverter, gPatterns, targetInfo,
+                                         benefit);
+    if (failed(applyPartialConversion(mod, gTarget, std::move(gPatterns))))
       return signalPassFailure();
 
     // Lower CF ops separately to avoid breaking analysis.

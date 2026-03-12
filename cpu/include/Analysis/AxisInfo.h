@@ -9,12 +9,14 @@ namespace cpu {
 
 struct AxisInfoCpu {
   static void addVisitors(triton::AxisInfoVisitorList &visitors);
+  static void addNCFAVisitors(triton::AxisInfoNCFAVisitorList &visitors);
 };
 
 class ModuleAxisInfoAnalysis : public triton::ModuleAxisInfoAnalysis {
 public:
   explicit ModuleAxisInfoAnalysis(ModuleOp moduleOp)
-      : triton::ModuleAxisInfoAnalysis(moduleOp, AxisInfoCpu::addVisitors) {}
+      : triton::ModuleAxisInfoAnalysis(moduleOp, AxisInfoCpu::addVisitors,
+                                       AxisInfoCpu::addNCFAVisitors) {}
 };
 
 } // namespace cpu
