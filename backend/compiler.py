@@ -30,6 +30,7 @@ class CPUOptions:
     instrumentation_mode: str = ""
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
     matrix_instr_nonkdim: int = 16
+    tile_and_fuse: bool = os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1"
     # TODO: de-duplicate with driver
     warp_size: int = int(os.environ.get("TRITON_CPU_WARP_SIZE", 1))
     min_dot_size: int = 1
@@ -111,7 +112,7 @@ class CPUBackend(BaseBackend):
         dump_enabled = pm.enable_debug()
         num_ctas = 1
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
-        if os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1":
+        if options.tile_and_fuse is True:
             # Use upstream coalesce for tile and fuse
             # TODO we may need to modify the default vectorization size
             passes.ttgpuir.add_coalesce(pm)
@@ -130,7 +131,7 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_loop_aware_cse(pm)
 
         passes.common.add_symbol_dce(pm)
-        if os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1":
+        if options.tile_and_fuse is True:
             cpu.passes.ttgpuir.add_tile_and_fuse(pm)
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
