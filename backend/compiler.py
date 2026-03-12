@@ -1,21 +1,19 @@
-from importlib.metadata import metadata
-import tempfile
 import functools
 import hashlib
-import re
 import os
-from typing import Tuple
-from pathlib import Path
-
-from triton.backends.compiler import BaseBackend, GPUTarget, Language
-from triton._C.libtriton import ir, passes, llvm, cpu
-from triton import knobs
-from triton.runtime.build import _build
-import triton.backends.cpu.driver as cpu_driver
-
+import re
+import tempfile
 from dataclasses import dataclass
-from typing import Dict
+from importlib.metadata import metadata
+from pathlib import Path
 from types import ModuleType
+from typing import Dict, Tuple
+
+import triton.backends.cpu.driver as cpu_driver
+from triton import knobs
+from triton._C.libtriton import cpu, ir, llvm, passes
+from triton.backends.compiler import BaseBackend, GPUTarget, Language
+from triton.runtime.build import _build
 
 
 @dataclass(frozen=True)
@@ -27,13 +25,13 @@ class CPUOptions:
     debug: bool = False
     arch: str = None
     enable_fp_fusion: bool = True
-    backend_name: str = 'cpu'
+    backend_name: str = "cpu"
     sanitize_overflow: bool = True
     instrumentation_mode: str = ""
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
     matrix_instr_nonkdim: int = 16
     # TODO: de-duplicate with driver
-    warp_size: int = int(os.environ.get('TRITON_CPU_WARP_SIZE', 1))
+    warp_size: int = int(os.environ.get("TRITON_CPU_WARP_SIZE", 1))
     min_dot_size: int = 1
 
     def hash(self):
@@ -57,7 +55,7 @@ class CPUBackend(BaseBackend):
         self.binary_ext = "so"
 
     def parse_options(self, options):
-        args = {'arch': cpu.get_processor_name()}
+        args = {"arch": cpu.get_processor_name()}
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
@@ -104,7 +102,7 @@ class CPUBackend(BaseBackend):
 
         passes.common.add_symbol_dce(pm)
         passes.ttir.add_loop_unroll(pm)
-        pm.run(mod, 'make_ttir')
+        pm.run(mod, "make_ttir")
         return mod
 
     @staticmethod
@@ -113,7 +111,12 @@ class CPUBackend(BaseBackend):
         dump_enabled = pm.enable_debug()
         num_ctas = 1
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
-        cpu.passes.ttgpuir.add_coalesce(pm)
+        if os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1":
+            # Use upstream coalesce for tile and fuse
+            # TODO we may need to modify the default vectorization size
+            passes.ttgpuir.add_coalesce(pm)
+        else:
+            cpu.passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         cpu.passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
@@ -132,7 +135,7 @@ class CPUBackend(BaseBackend):
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)
-        pm.run(mod, 'make_ttgir')
+        pm.run(mod, "make_ttgir")
 
         return mod
 
@@ -152,7 +155,7 @@ class CPUBackend(BaseBackend):
         passes.gluon.add_canonicalizer(pm)
         passes.ttgpuir.add_combine_tensor_select_and_if(pm)
 
-        pm.run(mod, 'gluon_to_ttgir')
+        pm.run(mod, "gluon_to_ttgir")
         return mod
 
     @staticmethod
@@ -177,17 +180,17 @@ class CPUBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
-        pm.run(mod, 'make_llir')
+        pm.run(mod, "make_llir")
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
         llvm.init_targets()
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         cpu.attach_target_triple(llvm_mod, cpu.get_default_target_triple())
-        target_features = ''
+        target_features = ""
         llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, target_features)
 
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, '', [], options.enable_fp_fusion)
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, "", [], options.enable_fp_fusion)
         metadata["shared"] = src.get_int_attr("ttg.shared")
 
         ret = str(llvm_mod)
@@ -202,7 +205,7 @@ class CPUBackend(BaseBackend):
         metadata["name"] = names[0]
 
         flags = []
-        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, '', flags,
+        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, "", flags,
                                      options.enable_fp_fusion, False)
 
     @staticmethod
@@ -237,4 +240,4 @@ class CPUBackend(BaseBackend):
     @functools.lru_cache()
     def hash(self):
         version = 0.1
-        return f'{version}-{self.target.arch}'
+        return f"{version}-{self.target.arch}"
