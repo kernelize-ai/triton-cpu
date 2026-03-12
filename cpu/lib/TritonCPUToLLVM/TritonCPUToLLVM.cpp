@@ -5,12 +5,13 @@
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Pass/Pass.h"
 #include "triton/Analysis/Allocation.h"
-#include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Membar.h"
 
 #include "Allocation.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
+
+#include "cpu/include/Analysis/AxisInfo.h"
 #include "cpu/include/TritonCPUToLLVM/Passes.h"
 
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
@@ -95,7 +96,7 @@ struct ConvertTritonCPUToLLVM
     // because the call op has to know the shared memory base address of each
     // function
     initSharedMemory(typeConverter);
-    ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
+    cpu::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
 
     RewritePatternSet patterns(context);
     int benefit = patternBenefitPrioritizeOverLLVMConversions;
