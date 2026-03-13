@@ -24,6 +24,11 @@ void populateFuncOpConversionPattern(LLVMTypeConverter &typeConverter,
                                      const TargetInfo &targetInfo,
                                      PatternBenefit benefit);
 
+void populateGenericOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                     RewritePatternSet &patterns,
+                                     const TargetInfo &targetInfo,
+                                     PatternBenefit benefit);
+
 void populateGPUtoLLVMConversionPatterns(LLVMTypeConverter &converter,
                                          const TargetInfo &targetInfo,
                                          RewritePatternSet &patterns,

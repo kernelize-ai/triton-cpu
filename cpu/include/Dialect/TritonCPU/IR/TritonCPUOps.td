@@ -4,6 +4,7 @@
 include "TritonCPUDialect.td"
 include "mlir/Interfaces/SideEffectInterfaces.td" // Pure
 include "mlir/Interfaces/InferTypeOpInterface.td" // SameOperandsAndResultType
+include "mlir/Interfaces/ControlFlowInterfaces.td" // ReturnLike
 include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 
@@ -152,6 +153,77 @@ def TTC_MaskedStoreOp : TTC_Op<"masked_store", [
   let assemblyFormat = [{
     $ptr `,` $value `,` $mask
     attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+def TTC_YieldOp : TTC_Op<"yield", [Terminator, ReturnLike, HasParent<"GenericOp">]> {
+  let summary = "Terminator for ttc.generic";
+  let arguments = (ins);
+  let assemblyFormat = "attr-dict";
+}
+
+def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, SingleBlockImplicitTerminator<"YieldOp">]> {
+  let summary = "Tiled iteration over a tensor block with fused loads and stores";
+
+  let description = [{
+    Wraps a fused chain of tensor operations (loads, elementwise math, stores)
+    and owns the schedule for iterating over the block in tiles.
+
+    The operation logically iterates over `blockShape` in steps of `vectorShape`,
+    executing the body region once per tile. This models the pattern of splitting
+    a full-block tensor computation into a loop over sub-vectors, enabling
+    register-pressure-friendly lowering without materializing the entire block
+    at once.
+
+    Operands:
+    - `ins`: tensor-typed inputs (e.g. pointer tensors for loads and stores).
+      Each operand is sliced to `vectorShape` for each tile iteration and passed
+      as the corresponding block argument to the body region.
+    - `params`: scalar or tensor-typed pass-through values that are forwarded
+      into the body region unchanged (not tiled).
+
+    The body region receives block arguments corresponding to (in order) the
+    tiled slices of `ins` followed by the untiled `params`. It must be terminated
+    by a `ttc.yield`.
+
+    Constraints:
+    - `blockShape` and `vectorShape` must have the same rank.
+    - Each `blockShape[i]` must be a positive multiple of `vectorShape[i]`.
+
+    Example (pseudocode for a 128-element elementwise chain, tile size 16):
+    ```
+    ttc.generic %src_ptrs, %dst_ptrs {blockShape = [128], vectorShape = [16]}
+        : tensor<128x!tt.ptr<f32>>, tensor<128x!tt.ptr<f32>> {
+    ^bb0(%src_tile: tensor<16x!tt.ptr<f32>>, %dst_tile: tensor<16x!tt.ptr<f32>>):
+      %v = tt.load %src_tile : tensor<16xf32>
+      %w = math.exp %v       : tensor<16xf32>
+      tt.store %dst_tile, %w : tensor<16xf32>
+      ttc.yield
+    }
+    ```
+
+    During lowering to LLVM, the body is unrolled `blockShape / vectorShape`
+    times. For each iteration, sub-vectors are extracted from the LLVM struct
+    representation of each `ins` operand, cast back to the tile tensor type, and
+    substituted for the corresponding block arguments before cloning the body.
+  }];
+
+  let arguments = (ins
+    Variadic<TT_Type>:$ins,
+    Variadic<TT_Type>:$params,
+
+    DenseI32ArrayAttr:$blockShape,
+    DenseI32ArrayAttr:$vectorShape
+  );
+
+  let results = (outs); // TODO: support scalar results from reductions
+
+  let regions = (region AnyRegion:$body);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    $ins (`(` $params^ `)`)? attr-dict-with-keyword $body `:` functional-type(operands, results)
   }];
 }
 

@@ -3,6 +3,7 @@ add_triton_library(TritonCPUToLLVM
     DotOpToLLVM.cpp
     ElementwiseOpToLLVM.cpp
     FuncOpToLLVM.cpp
+    GenericOpToLLVM.cpp
     GPUOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
     MaskedOpsToLLVM.cpp
