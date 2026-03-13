@@ -44,15 +44,15 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     for (unsigned i = 0; i < numChunks; ++i) {
       SmallVector<Value> chunkedArgs;
 
-      for (auto [origArg, llvmArg] :
-           llvm::zip(body->getArguments(), adaptor.getOperands())) {
+      for (auto [opIdx, origArg, llvmArg] :
+           llvm::enumerate(body->getArguments(), adaptor.getOperands())) {
 
         if (!isa<RankedTensorType>(origArg.getType())) {
           // forward constants and scalars without chunking
           assert(origArg.getType() == llvmArg.getType() &&
                  "expected non-tensor arguments to be unchanged by type "
                  "conversion");
-          chunkedArgs.push_back(llvmArg);
+          chunkedArgs.push_back(op.getOperand(opIdx));
         } else {
 
           Type convertedBodyType =
@@ -82,23 +82,24 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         mapping.map(body->getArgument(j), chunkedArgs[j]);
       }
 
-      // TODO: maybe we should just look at the yield op and work backwards from
-      // there (which would actually let us match yield op values and support
-      // multiple results...)
-      for (Operation &bOp : body->without_terminator()) {
-        auto newOp = rewriter.clone(bOp, mapping);
-        if (isa<triton::ReduceOp>(bOp)) {
+      for (Operation &bOp : *body) {
+        if (auto yieldOp = dyn_cast<cpu::YieldOp>(bOp)) {
+          if (yieldOp.getValues().size() == 0)
+            continue;
+
           assert(hasReductions &&
-                 "unexpected reduce op in generic without reductions");
+                 "unexpected yield op result in generic without reductions");
+          auto yieldOpValues = llvm::to_vector(llvm::map_range(
+              yieldOp.getValues(), [&](Value v) { return mapping.lookup(v); }));
           if (i == 0) {
-            result = newOp->getResult(0);
+            result = yieldOpValues[0];
           } else {
             // combine with the previous reduction result using the same
             // combiner region
             auto *combinerBlock = &op.getCombiners().front();
             IRMapping combMapping;
             combMapping.map(combinerBlock->getArgument(0), result);
-            combMapping.map(combinerBlock->getArgument(1), newOp->getResult(0));
+            combMapping.map(combinerBlock->getArgument(1), yieldOpValues[0]);
 
             auto terminator =
                 cast<cpu::YieldOp>(combinerBlock->getTerminator());
@@ -113,6 +114,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             auto newCombiner = rewriter.clone(*combinerOp, combMapping);
             result = newCombiner->getResult(0);
           }
+        } else {
+          auto newOp = rewriter.clone(bOp, mapping);
         }
       }
     }
