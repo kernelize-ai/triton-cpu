@@ -19,84 +19,45 @@ namespace cpu {
 
 namespace {
 
-static bool isClosed(const llvm::SetVector<Operation *> &ops) {
-  for (Operation *op : ops) {
-    for (Value r : op->getResults()) {
-      for (Operation *user : r.getUsers()) {
-        if (!ops.contains(user))
-          return false;
-      }
-    }
-  }
-  return true;
+// Replace the shape of a RankedTensorType with vectorShape, preserving element
+// type and encoding. Non-tensor types are returned unchanged.
+static Type updateTensorType(Type t, ArrayRef<int32_t> vectorShape) {
+  auto tensorType = dyn_cast<RankedTensorType>(t);
+  if (!tensorType)
+    return t;
+  return RankedTensorType::get(
+      llvm::to_vector(
+          llvm::map_range(vectorShape, [](int32_t s) { return int64_t(s); })),
+      tensorType.getElementType(), tensorType.getEncoding());
 }
 
-static std::optional<RankedTensorType>
-getCommonType(const llvm::SetVector<Operation *> &ops) {
-  // assumes the op result encodings match the inputs
-  auto storeOp = cast<triton::StoreOp>(*ops.begin());
-  RankedTensorType tensorTy =
-      cast<RankedTensorType>(storeOp.getValue().getType());
-  for (Operation *op : ops) {
-    for (auto result : op->getResults()) {
-      auto resultType = cast<RankedTensorType>(result.getType());
-      if (resultType != tensorTy) {
-        return std::nullopt;
-      }
-    }
-  }
-  return tensorTy;
+// Extract blockShape (full tensor shape) and vectorShape (sizePerThread) from
+// a tensor type with BlockedEncoding.
+static std::pair<SmallVector<int32_t>, SmallVector<int32_t>>
+getBlockAndVectorShapes(RankedTensorType tensorTy,
+                        gpu::BlockedEncodingAttr encoding) {
+  auto shape = tensorTy.getShape();
+  SmallVector<int32_t> blockShape(shape.begin(), shape.end());
+  auto sizePerThread = encoding.getSizePerThread();
+  SmallVector<int32_t> vectorShape(sizePerThread.begin(), sizePerThread.end());
+  return {blockShape, vectorShape};
 }
 
-std::optional<llvm::SetVector<Operation *>>
-getElementwiseChain(Operation *initialOp, Value start) {
-  SetVector<Operation *> ops;
-  ops.insert(initialOp);
-
-  llvm::SmallVector<Value> queue;
-  queue.push_back(start);
-
-  while (!queue.empty()) {
-    auto v = queue.pop_back_val();
-    auto defOp = v.getDefiningOp();
-
-    if (!defOp)
-      continue;
-
-    // allow load operations and elementwise operations in ttc.generic
-    if (auto loadOp = dyn_cast<triton::LoadOp>(defOp)) {
-      // load ops terminate the chain
-      ops.insert(defOp);
-      continue;
-    }
-    auto opIsElementwise = [&](Operation *defOp) -> bool {
-      if (isa<arith::ArithDialect, math::MathDialect>(defOp->getDialect()) &&
-          defOp->hasTrait<OpTrait::Elementwise>())
-        return true;
-      else if (isa<triton::AddPtrOp>(defOp))
-        return true;
-      return false;
-    };
-
-    // allow elementwise ops and push their operands to the queue
-    if (opIsElementwise(defOp)) {
-      ops.insert(defOp);
-    } else {
-      continue;
-    }
-
-    for (auto operand : defOp->getOperands()) {
-      queue.push_back(operand);
-    }
+// Create the body block of a GenericOp, adding one block arg per ins value
+// with tensor types replaced to the vector (chunk) shape. Populates `mapping`
+// with ins value → block arg entries and sets the insertion point to the start
+// of the block. Returns the new block.
+static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
+                              ArrayRef<Value> ins,
+                              ArrayRef<int32_t> vectorShape,
+                              IRMapping &mapping) {
+  Block *body = rewriter.createBlock(&generic.getBody());
+  for (Value v : ins) {
+    Type argTy = updateTensorType(v.getType(), vectorShape);
+    mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
-  LLVM_DEBUG({
-    DBGS() << "getElementwiseChain for " << start << " found ops:\n";
-    for (Operation *op : llvm::reverse(ops)) {
-      DBGS() << "  " << *op << "\n";
-    }
-  });
-
-  return ops;
+  rewriter.setInsertionPointToStart(body);
+  return body;
 }
 
 struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
@@ -118,42 +79,18 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
     if (!encoding)
       return failure();
 
-    auto shape = tensorTy.getShape();
-    SmallVector<int32_t> blockShape(shape.begin(), shape.end());
-    auto sizePerThread = encoding.getSizePerThread();
-    SmallVector<int32_t> vectorShape(sizePerThread.begin(),
-                                     sizePerThread.end());
+    auto [blockShape, vectorShape] =
+        getBlockAndVectorShapes(tensorTy, encoding);
 
-    auto updateTensorType = [&](Type oldType) -> Type {
-      auto oldTensorType = dyn_cast<RankedTensorType>(oldType);
-      if (!oldTensorType)
-        return oldType;
-      return RankedTensorType::get(
-          llvm::to_vector(llvm::map_range(
-              vectorShape, [](int32_t s) { return int64_t(s); })),
-          oldTensorType.getElementType(), oldTensorType.getEncoding());
-    };
-    ;
-
-    SmallVector<Value> ins;
-    for (auto operand : storeOp->getOperands()) {
-      ins.push_back(operand);
-    }
+    SmallVector<Value> ins(storeOp->getOperands().begin(),
+                           storeOp->getOperands().end());
 
     auto generic = cpu::GenericOp::create(
-        rewriter, loc, /*resultTypes= */ TypeRange{}, ins,
+        rewriter, loc, /*resultTypes=*/TypeRange{}, ins,
         /*params=*/ValueRange{}, blockShape, vectorShape);
 
-    Block *body = rewriter.createBlock(&generic.getBody());
     IRMapping bodyMapping;
-    for (Value v : ins) {
-      Type argTy = v.getType();
-      if (auto tt = dyn_cast<RankedTensorType>(argTy))
-        argTy = updateTensorType(tt);
-      bodyMapping.map(v, body->addArgument(argTy, v.getLoc()));
-    }
-
-    rewriter.setInsertionPointToStart(body);
+    initGenericBody(rewriter, generic, ins, vectorShape, bodyMapping);
 
     rewriter.clone(*storeOp, bodyMapping);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
@@ -194,22 +131,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     if (!encoding)
       return failure();
 
-    auto shape = tensorTy.getShape();
-    SmallVector<int32_t> blockShape(shape.begin(), shape.end());
-    auto sizePerThread = encoding.getSizePerThread();
-    SmallVector<int32_t> vectorShape(sizePerThread.begin(),
-                                     sizePerThread.end());
+    auto [blockShape, vectorShape] =
+        getBlockAndVectorShapes(tensorTy, encoding);
 
-    auto updateTensorType = [&](RankedTensorType t) -> RankedTensorType {
-      return RankedTensorType::get(
-          llvm::to_vector(llvm::map_range(
-              vectorShape, [](int32_t s) { return int64_t(s); })),
-          t.getElementType(), encoding);
-    };
-
-    SmallVector<Value> ins;
-    ins.push_back(srcs[0]);
-
+    SmallVector<Value> ins = {srcs[0]};
     SmallVector<Type> resultTypes(reduceOp.getResultTypes().begin(),
                                   reduceOp.getResultTypes().end());
 
@@ -219,16 +144,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
                                           /*params=*/ValueRange{}, blockShape,
                                           vectorShape);
 
-    Block *body = rewriter.createBlock(&generic.getBody());
     IRMapping bodyMapping;
-    for (Value v : ins) {
-      Type argTy = v.getType();
-      if (auto tt = dyn_cast<RankedTensorType>(argTy))
-        argTy = updateTensorType(tt);
-      bodyMapping.map(v, body->addArgument(argTy, v.getLoc()));
-    }
-
-    rewriter.setInsertionPointToStart(body);
+    initGenericBody(rewriter, generic, ins, vectorShape, bodyMapping);
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
@@ -271,100 +188,6 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
   }
 };
 
-struct Fuse : public mlir::OpRewritePattern<triton::cpu::GenericOp> {
-  using OpRewritePattern<triton::cpu::GenericOp>::OpRewritePattern;
-
-  mlir::LogicalResult
-  matchAndRewrite(triton::cpu::GenericOp genericOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    // get the elementwise chain starting from this op and working backwards
-
-    // TODO: this isn't compatible with the conversion of store op chains to
-    // generic (though it might work by accident since ins[0] would be the load
-    // value currently)
-    auto opsToClone = getElementwiseChain(genericOp.getIns()[0].getDefiningOp(),
-                                          genericOp.getIns()[0]);
-    if (!opsToClone || opsToClone->empty())
-      return failure();
-
-    if (!isa<triton::LoadOp>(opsToClone->back()))
-      return failure();
-
-    auto sizePerThreadVec = genericOp.getVectorShape();
-    auto updateTensorType = [&](Type oldType) -> Type {
-      auto oldTensorType = dyn_cast<RankedTensorType>(oldType);
-      if (!oldTensorType)
-        return oldType;
-      return RankedTensorType::get(
-          llvm::to_vector(llvm::map_range(
-              sizePerThreadVec, [](int32_t s) { return int64_t(s); })),
-          oldTensorType.getElementType(), oldTensorType.getEncoding());
-    };
-
-    // For each op in the elementwise chain, clone it into the generic body.
-    // - Operands defined outside the generic become new ins (new block args).
-    // - If an op's result was already an ins to the generic, replace the
-    //   corresponding block arg with the cloned result and drop it from ins.
-
-    // Build a lookup: existing ins value → index in the ins list / block arg.
-    DenseMap<Value, unsigned> insToArgIdx;
-    for (auto [idx, v] : llvm::enumerate(genericOp.getIns()))
-      insToArgIdx[v] = idx;
-
-    SmallVector<Value> genericOpInputs = genericOp.getIns();
-    SmallVector<unsigned> argIdxToRemove;
-    Block *body = &genericOp.getBody().front();
-    rewriter.setInsertionPointToStart(body);
-    IRMapping mapping;
-    for (Operation *op : llvm::reverse(*opsToClone)) {
-      for (Value operand : op->getOperands()) {
-        if (!mapping.contains(operand)) {
-          // Operand is defined outside the generic — add as a new ins.
-          genericOpInputs.push_back(operand);
-          auto arg = body->addArgument(updateTensorType(operand.getType()),
-                                       operand.getLoc());
-          mapping.map(operand, arg);
-        }
-      }
-      auto newOp = rewriter.clone(*op, mapping);
-
-      for (auto [origResult, newResult] :
-           llvm::zip(op->getResults(), newOp->getResults())) {
-        newResult.setType(updateTensorType(newResult.getType()));
-        // If this result was previously an ins, the body already uses the
-        // corresponding block arg. Replace those uses with the cloned result
-        // and mark the block arg for removal.
-        if (auto it = insToArgIdx.find(origResult); it != insToArgIdx.end()) {
-          body->getArgument(it->second).replaceAllUsesWith(newResult);
-          argIdxToRemove.push_back(it->second);
-        }
-      }
-      mapping.map(op->getResults(), newOp->getResults());
-    }
-
-    // Remove block args and ins entries that are now produced inside the body.
-    // Process in reverse index order so earlier indices stay stable.
-    llvm::sort(argIdxToRemove);
-    for (unsigned idx : llvm::reverse(argIdxToRemove)) {
-      body->eraseArgument(idx);
-      genericOpInputs.erase(genericOpInputs.begin() + idx);
-    }
-
-    // Update the generic op's ins operand list.
-    rewriter.modifyOpInPlace(genericOp, [&]() {
-      genericOp.getInsMutable().assign(genericOpInputs);
-    });
-
-    for (Operation *op : llvm::reverse(*opsToClone)) {
-      if (op->use_empty()) {
-        rewriter.eraseOp(op);
-      }
-    }
-
-    return success();
-  }
-};
-
 // Returns true if defOp can be cloned into a generic body during fusion.
 // Reduction generics (cpu::GenericOp with scalar results) are not fusible —
 // their scalar outputs become params of the consumer, not tiled ins.
@@ -394,15 +217,6 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
   LDBG("fuseInputs: " << genericOp);
 
   auto sizePerThreadVec = genericOp.getVectorShape();
-  auto updateTensorType = [&](Type t) -> Type {
-    auto tt = dyn_cast<RankedTensorType>(t);
-    if (!tt)
-      return t;
-    return RankedTensorType::get(
-        llvm::to_vector(llvm::map_range(sizePerThreadVec,
-                                        [](int32_t s) { return int64_t(s); })),
-        tt.getElementType(), tt.getEncoding());
-  };
 
   // Collect fusible ops reachable from the current ins values, in
   // def-before-use order (SetVector preserves insertion order; we walk
@@ -446,15 +260,16 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
         continue;
 
       newIns.push_back(operand);
-      mapping.map(operand,
-                  body->addArgument(updateTensorType(operand.getType()),
-                                    operand.getLoc()));
+      mapping.map(operand, body->addArgument(updateTensorType(operand.getType(),
+                                                              sizePerThreadVec),
+                                             operand.getLoc()));
     }
 
     Operation *newOp = rewriter.clone(*op, mapping);
     for (auto [origResult, newResult] :
          llvm::zip(op->getResults(), newOp->getResults())) {
-      newResult.setType(updateTensorType(newResult.getType()));
+      newResult.setType(
+          updateTensorType(newResult.getType(), sizePerThreadVec));
       // If this result was previously an ins, replace its block arg with the
       // newly cloned result and mark the arg for removal.
       if (auto it = insToArgIdx.find(origResult); it != insToArgIdx.end()) {
