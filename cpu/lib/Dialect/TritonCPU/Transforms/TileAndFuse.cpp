@@ -197,6 +197,8 @@ static bool isFusible(Operation *defOp) {
   if ((isa<arith::ArithDialect, math::MathDialect>(defOp->getDialect())) &&
       defOp->hasTrait<OpTrait::Elementwise>())
     return true;
+  if (isa<triton::AddPtrOp>(defOp))
+    return true;
   if (isa<triton::LoadOp>(defOp))
     return true;
   // tt.splat broadcasts a scalar to a tensor; the scalar input becomes a param.
