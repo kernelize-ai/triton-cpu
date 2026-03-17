@@ -130,10 +130,194 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     unsigned numChunks = blockSize / vectorSize;
 
     Value result;
+    const bool hasReductions = !op.getCombiners().empty();
 
-    if (false && numChunks > 10) {
-      // TODO: for large numbers of chunks the generated IR can become quite
-      // big. Generate a dynamic loop and use alloca to store/load the tensor.
+    if (numChunks > 1) {
+      Block *body = &op.getBody().front();
+      auto i64Type = rewriter.getI64Type();
+      auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+
+      Value one = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                           rewriter.getI64IntegerAttr(1));
+      Value numChunksVal = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(numChunks));
+
+      // Step 1: hoist one alloca per tensor operand to the function entry
+      // block so it is not re-executed on each call when the generic is inside
+      // a loop.
+      SmallVector<Value> tensorAllocas(body->getNumArguments(), Value{});
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        auto funcOp = op->getParentOfType<LLVM::LLVMFuncOp>();
+        assert(funcOp && "expected generic op inside an LLVM function");
+        rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+
+        for (auto [idx, origArg, llvmArg] :
+             llvm::enumerate(body->getArguments(), adaptor.getOperands())) {
+          auto tensorTy = dyn_cast<RankedTensorType>(origArg.getType());
+          if (!tensorTy)
+            continue;
+          auto structType = cast<LLVM::LLVMStructType>(llvmArg.getType());
+          // should we get this from the structType or the typeconverter on
+          // tensorTy element type?
+          Type elemType = structType.getBody().front();
+          unsigned tensorSize = blockSize;
+          Value arraySizeVal = LLVM::ConstantOp::create(
+              rewriter, loc, i64Type, rewriter.getI64IntegerAttr(tensorSize));
+          tensorAllocas[idx] = LLVM::AllocaOp::create(rewriter, loc, ptrType,
+                                                      elemType, arraySizeVal);
+        }
+      }
+
+      // Step 2: store each struct operand into its alloca (compile-time
+      // unrolled over blockSize — only runs once per generic invocation).
+      for (auto [idx, origArg, llvmArg] :
+           llvm::enumerate(body->getArguments(), adaptor.getOperands())) {
+        auto tensorTy = dyn_cast<RankedTensorType>(origArg.getType());
+        if (!tensorTy)
+          continue;
+        auto structType = cast<LLVM::LLVMStructType>(llvmArg.getType());
+        Type elemType = structType.getBody().front();
+        // TODO: we should make sure we cannot get multiple sizes of tensors to
+        // ttc.generic
+        unsigned tensorSize = blockSize;
+        for (int64_t j = 0; j < tensorSize; ++j) {
+          Value elem =
+              LLVM::ExtractValueOp::create(rewriter, loc, llvmArg, {j});
+          Value jVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                                rewriter.getI64IntegerAttr(j));
+          Value elemPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, elemType,
+                                              tensorAllocas[idx],
+                                              ArrayRef<LLVM::GEPArg>{jVal});
+          LLVM::StoreOp::create(rewriter, loc, elem, elemPtr);
+        }
+      }
+
+      // Step 3: peel the first chunk to establish the initial `result`.
+      // emitChunkBody initializes result (null → first yield value) on the
+      // first call, so we can reuse it here by passing a null result.
+      {
+        auto firstArgs =
+            buildStaticChunkedArgs(op, adaptor, rewriter, 0, vectorSize);
+        emitChunkBody(op, rewriter, firstArgs, result);
+      }
+
+      // Step 4: build the loop for chunks 1..numChunks-1.
+      //
+      // Block layout (in source order):
+      //   currentBlock  →  loopHeader(i, [acc])  ↔  loopBody
+      //                                           ↘  afterBlock([result])
+      //
+      // loopHeader block args:
+      //   %i   : i64          — chunk index, starts at 1
+      //   %acc : <resultType> — running accumulator (only when hasReductions)
+      //
+      // afterBlock block args:
+      //   %finalResult : <resultType>  (only when hasReductions)
+
+      Block *currentBlock = rewriter.getInsertionBlock();
+      Block *afterBlock =
+          rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+
+      // Add the result arg to afterBlock before wiring branches to it.
+      Value afterResult;
+      if (hasReductions)
+        afterResult = afterBlock->addArgument(result.getType(), loc);
+
+      SmallVector<Type> headerArgTypes = {i64Type};
+      SmallVector<Location> headerArgLocs = {loc};
+      if (hasReductions) {
+        headerArgTypes.push_back(result.getType());
+        headerArgLocs.push_back(loc);
+      }
+      Block *loopHeader =
+          rewriter.createBlock(afterBlock, headerArgTypes, headerArgLocs);
+      Block *loopBody = rewriter.createBlock(afterBlock);
+
+      // currentBlock → loopHeader(1, result)
+      rewriter.setInsertionPointToEnd(currentBlock);
+      SmallVector<Value> initArgs = {one};
+      if (hasReductions)
+        initArgs.push_back(result);
+      LLVM::BrOp::create(rewriter, loc, initArgs, loopHeader);
+
+      // loopHeader: if i < numChunks goto loopBody else goto afterBlock(acc)
+      rewriter.setInsertionPointToEnd(loopHeader);
+      Value loopI = loopHeader->getArgument(0);
+      Value loopAcc = hasReductions ? loopHeader->getArgument(1) : Value{};
+      Value cond = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ult,
+                                        loopI, numChunksVal);
+      SmallVector<Value> exitArgs;
+      if (hasReductions)
+        exitArgs.push_back(loopAcc);
+      LLVM::CondBrOp::create(rewriter, loc, cond, loopBody, {}, afterBlock,
+                             exitArgs);
+
+      // loopBody: load chunk from allocas, run body, combine with loopAcc,
+      // then branch back to loopHeader.
+      rewriter.setInsertionPointToEnd(loopBody);
+      {
+        SmallVector<Value> chunkArgs;
+        for (auto [idx, origArg] : llvm::enumerate(body->getArguments())) {
+          auto tensorTy = dyn_cast<RankedTensorType>(origArg.getType());
+          if (!tensorTy) {
+            // forward constants and scalars without chunking
+            chunkArgs.push_back(op.getOperand(idx));
+          } else {
+            // Load vectorSize elements from tensorAllocas[idx] at offset
+            // loopI * vectorSize + j using a dynamic GEP, build the chunk
+            // struct, and cast it back to the original tensor type —
+            // mirroring buildStaticChunkedArgs but with dynamic GEP.
+            auto tensorAlloca = tensorAllocas[idx];
+            Type chunkStructTy = getTypeConverter()->convertType(tensorTy);
+            Type elemType =
+                getTypeConverter()->convertType(tensorTy.getElementType());
+            Value chunk = LLVM::UndefOp::create(rewriter, loc, chunkStructTy);
+
+            Value vectorSizeVal = LLVM::ConstantOp::create(
+                rewriter, loc, i64Type, rewriter.getI64IntegerAttr(vectorSize));
+            Value baseOffset =
+                LLVM::MulOp::create(rewriter, loc, loopI, vectorSizeVal);
+
+            for (unsigned j = 0; j < vectorSize; ++j) {
+              Value jVal = LLVM::ConstantOp::create(
+                  rewriter, loc, i64Type, rewriter.getI64IntegerAttr(j));
+              Value offset =
+                  LLVM::AddOp::create(rewriter, loc, baseOffset, jVal);
+              Value elemPtr = LLVM::GEPOp::create(
+                  rewriter, loc, ptrType, elemType, tensorAlloca,
+                  ArrayRef<LLVM::GEPArg>{offset});
+              Value elem =
+                  LLVM::LoadOp::create(rewriter, loc, elemType, elemPtr);
+              chunk =
+                  LLVM::InsertValueOp::create(rewriter, loc, chunk, elem, {j});
+            }
+
+            Value castedChunk = UnrealizedConversionCastOp::create(
+                                    rewriter, loc, tensorTy, chunk)
+                                    .getResult(0);
+            chunkArgs.push_back(castedChunk);
+          }
+        }
+
+        // emitChunkBody combines with `result` when result is non-null.
+        // Seed it with loopAcc so that the combine path is always taken.
+        Value chunkResult = loopAcc;
+        emitChunkBody(op, rewriter, chunkArgs, chunkResult);
+        // After the call, chunkResult holds the newly combined accumulator.
+
+        Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, one);
+        SmallVector<Value> backArgs = {nextI};
+        if (hasReductions)
+          backArgs.push_back(chunkResult);
+        LLVM::BrOp::create(rewriter, loc, backArgs, loopHeader);
+      }
+
+      // Continue emission in afterBlock; the final result comes from the
+      // block argument we added above.
+      rewriter.setInsertionPointToStart(afterBlock);
+      if (hasReductions)
+        result = afterResult;
     } else {
       for (unsigned i = 0; i < numChunks; ++i) {
         auto chunkedArgs =
