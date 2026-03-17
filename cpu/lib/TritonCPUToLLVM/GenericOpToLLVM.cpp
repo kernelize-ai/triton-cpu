@@ -49,12 +49,12 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
         if (!isa<RankedTensorType>(origArg.getType())) {
           // forward constants and scalars without chunking
-          assert(origArg.getType() == llvmArg.getType() &&
-                 "expected non-tensor arguments to be unchanged by type "
-                 "conversion");
+          assert(isa<PointerType>(origArg.getType()) ||
+                 origArg.getType() == llvmArg.getType() &&
+                     "expected non-tensor arguments to be unchanged by type "
+                     "conversion");
           chunkedArgs.push_back(op.getOperand(opIdx));
         } else {
-
           Type convertedBodyType =
               getTypeConverter()->convertType(origArg.getType());
 
