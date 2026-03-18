@@ -252,6 +252,14 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
   let assemblyFormat = [{
     $ins (` ` `(` $params^ `)`)? attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
   }];
+
+  let extraClassDeclaration = [{
+    Value getChunkOffset() { return getBody().front().getArgument(0); }
+    unsigned getNumInductionVars() { return 1; }
+    unsigned getNumRegionIterArgs() {
+      return getBody().front().getNumArguments() - getNumInductionVars();
+    }
+  }];
 }
 
 #endif

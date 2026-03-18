@@ -37,15 +37,17 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     const bool hasReductions = !op.getCombiners().empty();
 
     Block *body = &op.getBody().front();
-
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
     // TODO: currently we unroll the generic op during lowering because
     // extractvalue cannot take a dynamic index. To reduce code size, we will
     // want to keep some sort of loop here for larger blocks
     for (unsigned i = 0; i < numChunks; ++i) {
+      Value chunkOffset = b.i32_val(i);
+
       SmallVector<Value> chunkedArgs;
 
-      for (auto [opIdx, origArg, llvmArg] :
-           llvm::enumerate(body->getArguments(), adaptor.getOperands())) {
+      for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
+               body->getArguments().drop_front(), adaptor.getOperands())) {
 
         if (!isa<RankedTensorType>(origArg.getType())) {
           // forward constants and scalars without chunking
@@ -78,9 +80,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       // clone the body of the generic op for this chunk only
       IRMapping mapping;
-      for (unsigned j = 0; j < chunkedArgs.size(); j++) {
-        mapping.map(body->getArgument(j), chunkedArgs[j]);
-      }
+      mapping.map(body->getArgument(0), chunkOffset);
+      for (auto [bodyArg, chunkedArg] :
+           llvm::zip(body->getArguments().drop_front(), chunkedArgs))
+        mapping.map(bodyArg, chunkedArg);
 
       for (Operation &bOp : *body) {
         if (auto yieldOp = dyn_cast<cpu::YieldOp>(bOp)) {

@@ -52,6 +52,7 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                               ArrayRef<int32_t> vectorShape,
                               IRMapping &mapping) {
   Block *body = rewriter.createBlock(&generic.getBody());
+  body->addArgument(rewriter.getI32Type(), generic.getLoc()); // chunk offset
   for (Value v : ins) {
     Type argTy = updateTensorType(v.getType(), vectorShape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
@@ -239,7 +240,10 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
   if (opsToFuse.empty())
     return;
 
-  // Build lookup: existing ins value → block arg index (before any changes).
+  // Build lookup: existing ins value → 0-based ins index (not block arg index).
+  // The offset to convert to a block arg index is added at the two sites that
+  // access block args, keeping the newIns indexing straightforward.
+  unsigned numInductionVars = genericOp.getNumInductionVars();
   DenseMap<Value, unsigned> insToArgIdx;
   for (auto [idx, v] : llvm::enumerate(genericOp.getIns()))
     insToArgIdx[v] = idx;
@@ -275,7 +279,8 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
       // If this result was previously an ins, replace its block arg with the
       // newly cloned result and mark the arg for removal.
       if (auto it = insToArgIdx.find(origResult); it != insToArgIdx.end()) {
-        body->getArgument(it->second).replaceAllUsesWith(newResult);
+        body->getArgument(it->second + numInductionVars)
+            .replaceAllUsesWith(newResult);
         insIdxToRemove.push_back(it->second);
       }
     }
@@ -283,10 +288,11 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
   }
 
   // Remove replaced ins entries and their block args (reverse order for index
-  // stability).
+  // stability). Both use the same 0-based ins index; block arg access adds the
+  // induction var offset.
   llvm::sort(insIdxToRemove);
   for (unsigned idx : llvm::reverse(insIdxToRemove)) {
-    body->eraseArgument(idx);
+    body->eraseArgument(idx + numInductionVars);
     newIns.erase(newIns.begin() + idx);
   }
 
