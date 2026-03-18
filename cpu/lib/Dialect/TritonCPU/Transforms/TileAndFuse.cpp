@@ -205,6 +205,10 @@ static bool isFusible(Operation *defOp) {
   // tt.splat broadcasts a scalar to a tensor; the scalar input becomes a param.
   if (isa<triton::SplatOp>(defOp))
     return true;
+  // tt.make_range can be fused by rewriting make_range to
+  // ttc.make_dynamic_range, taking the chunk offset as a parameter
+  if (isa<triton::MakeRangeOp>(defOp))
+    return true;
   return false;
 }
 
@@ -261,6 +265,23 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
   IRMapping mapping;
   // Clone in topological (def-before-use) order.
   for (Operation *op : llvm::reverse(opsToFuse)) {
+    if (auto makeRangeOp = dyn_cast<triton::MakeRangeOp>(op)) {
+      // replace op with makeDynamicRange
+      auto newMakeRangeResultType =
+          updateTensorType(makeRangeOp.getResult().getType(), sizePerThreadVec);
+      auto makeDynamicRangeOp = triton::cpu::MakeDynamicRangeOp::create(
+          rewriter, makeRangeOp.getLoc(), newMakeRangeResultType,
+          genericOp.getChunkOffset());
+      mapping.map(makeRangeOp->getResults(), makeDynamicRangeOp->getResults());
+      if (auto it = insToArgIdx.find(makeRangeOp.getResult());
+          it != insToArgIdx.end()) {
+        body->getArgument(it->second + numInductionVars)
+            .replaceAllUsesWith(makeDynamicRangeOp.getResult());
+        insIdxToRemove.push_back(it->second);
+      }
+      continue;
+    }
+
     for (Value operand : op->getOperands()) {
       if (mapping.contains(operand))
         continue;

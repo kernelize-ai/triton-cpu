@@ -42,7 +42,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // extractvalue cannot take a dynamic index. To reduce code size, we will
     // want to keep some sort of loop here for larger blocks
     for (unsigned i = 0; i < numChunks; ++i) {
-      Value chunkOffset = b.i32_val(i);
+      Value chunkOffset = b.i32_val(i * vectorSize);
 
       SmallVector<Value> chunkedArgs;
 

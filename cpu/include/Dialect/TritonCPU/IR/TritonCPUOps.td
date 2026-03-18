@@ -262,4 +262,20 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
   }];
 }
 
+def TTC_MakeDynamicRangeOp : TTC_Op<"make_dynamic_range", [Pure]> {
+    let summary = "make range starting at start";
+
+    let description = [{
+        Returns a 1ID int32 tensor starting at `$start` and ending at `$start` + `$result`.getShape()[0].
+
+        Step = 1
+    }];
+
+    let arguments = (ins I32:$start);
+    let results = (outs TT_IntTensor:$result);
+
+    let assemblyFormat = "$start attr-dict `:` type($result)";
+    let hasVerifier = 1;
+}
+
 #endif
