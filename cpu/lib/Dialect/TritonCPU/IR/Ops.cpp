@@ -91,6 +91,14 @@ LogicalResult GenericOp::verify() {
   return success();
 }
 
+LogicalResult MakeDynamicRangeOp::verify() {
+  auto resultTensorTy = cast<RankedTensorType>(getResult().getType());
+  if (resultTensorTy.getShape().size() != 1)
+    return emitOpError("expects rank-1 result tensor type, got ")
+           << resultTensorTy;
+  return success();
+}
+
 } // namespace cpu
 } // namespace triton
 
