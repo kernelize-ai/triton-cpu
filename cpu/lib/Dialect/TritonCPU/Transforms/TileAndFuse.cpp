@@ -195,6 +195,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 static bool isFusible(Operation *defOp) {
   if (!defOp)
     return false;
+  if (isa<arith::ConstantOp>(defOp))
+    return true;
   if ((isa<arith::ArithDialect, math::MathDialect>(defOp->getDialect())) &&
       defOp->hasTrait<OpTrait::Elementwise>())
     return true;
@@ -280,6 +282,29 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
         insIdxToRemove.push_back(it->second);
       }
       continue;
+    }
+    if (auto constantOp = dyn_cast<arith::ConstantOp>(op)) {
+      auto tensorTy =
+          dyn_cast<RankedTensorType>(constantOp.getResult().getType());
+      if (tensorTy) {
+        auto newTensorTy = cast<RankedTensorType>(
+            updateTensorType(tensorTy, sizePerThreadVec));
+        auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
+        assert(denseAttr.isSplat() &&
+               "non-splat tensor constants not yet supported in fuseInputs");
+        auto newAttr = DenseElementsAttr::get(
+            newTensorTy, *denseAttr.getValues<Attribute>().begin());
+        auto newConstant =
+            arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
+        mapping.map(constantOp.getResult(), newConstant.getResult());
+        if (auto it = insToArgIdx.find(constantOp.getResult());
+            it != insToArgIdx.end()) {
+          body->getArgument(it->second + numInductionVars)
+              .replaceAllUsesWith(newConstant.getResult());
+          insIdxToRemove.push_back(it->second);
+        }
+        continue;
+      }
     }
 
     for (Value operand : op->getOperands()) {
