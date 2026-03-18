@@ -31,7 +31,8 @@ void CpuAxisInfoAnalysis::visitGenericOpArguments(
   auto vectorShape = genericOp.getVectorShape();
 
   for (auto [operand, argLattice] :
-       llvm::zip(genericOp->getOperands(), argLattices)) {
+       llvm::zip(genericOp->getOperands(),
+                 argLattices.drop_front(genericOp.getNumInductionVars()))) {
     const AxisInfo &outer =
         getLatticeElementFor(programPoint, operand)->getValue();
     // If the operand's axis info hasn't been computed yet, skip.
