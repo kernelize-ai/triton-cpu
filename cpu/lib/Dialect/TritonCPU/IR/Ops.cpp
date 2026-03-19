@@ -73,10 +73,16 @@ LogicalResult GenericOp::verify() {
 
   // Combiners region must have one block per scalar result.
   Region &combiners = getCombiners();
-  unsigned numResults = getNumResults();
-  if (combiners.getBlocks().size() != numResults) {
+  unsigned numScalarResults = std::accumulate(
+      getResults().begin(), getResults().end(), 0, [](int sum, Value v) {
+        if (!isa<RankedTensorType>(v.getType()))
+          return sum + 1;
+        return sum;
+      });
+  if (combiners.getBlocks().size() != numScalarResults) {
     return emitOpError("expects combiners region to have ")
-           << numResults << " block(s), got " << combiners.getBlocks().size();
+           << numScalarResults << " block(s), got "
+           << combiners.getBlocks().size();
   }
   for (auto [i, block] : llvm::enumerate(combiners.getBlocks())) {
     Type resultTy = getResultTypes()[i];
