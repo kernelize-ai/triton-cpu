@@ -13,11 +13,7 @@ from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 
 # for locating libTritonCPURuntime
-try:
-    _triton_C_dir = importlib.resources.files(triton).joinpath("_C")
-except AttributeError:
-    # resources.files() doesn't exist for Python < 3.9
-    _triton_C_dir = importlib.resources.path(triton, "_C").__enter__()
+_triton_C_dir = str(importlib.resources.files(triton).joinpath("_C"))
 
 
 @functools.lru_cache()
@@ -56,8 +52,8 @@ def system_ccflags():
 def library_dirs():
     lib_dirs = [_triton_C_dir]
     if is_macos():
-        lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
-        lib_dirs.extend([os.path.join(external_boost_path(), "lib")])
+        lib_dirs.extend([os.fspath(os.path.join(external_openmp_path(), "lib"))])
+        lib_dirs.extend([os.fspath(os.path.join(external_boost_path(), "lib"))])
     return lib_dirs
 
 
