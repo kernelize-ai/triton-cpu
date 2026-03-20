@@ -68,7 +68,7 @@ void CpuAxisInfoAnalysis::visitGenericOpArguments(
   }
 }
 
-AxisInfoAnalysis *loadAnalysis(DataFlowSolver *solver) {
+AxisInfoAnalysis *CpuAxisInfoAnalysis::loadAnalysis(DataFlowSolver *solver) {
   return solver->load<CpuAxisInfoAnalysis>();
 }
 

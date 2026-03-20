@@ -1,23 +1,26 @@
-From aa06f927cf238e3dac932973a60e4bd2a4908c80 Mon Sep 17 00:00:00 2001
+From be3b99c2754de98a68a4d1c0c673b7f65175e64b Mon Sep 17 00:00:00 2001
 From: Alex Baden <alex@kernelize.ai>
 Date: Mon, 16 Mar 2026 11:19:35 -0400
 Subject: [PATCH] Allow third party backends to extend AxisInfoAnalysis
 
 ---
- include/triton/Analysis/AxisInfo.h            | 41 +++++++++--
- lib/Analysis/AxisInfo.cpp                     | 71 +++++++------------
- .../amd/include/Analysis/AxisInfoExt.h        |  9 ++-
- third_party/amd/lib/Analysis/AxisInfoExt.cpp  |  9 ++-
- 4 files changed, 75 insertions(+), 55 deletions(-)
+ include/triton/Analysis/AxisInfo.h            | 43 +++++++++--
+ lib/Analysis/AxisInfo.cpp                     | 72 +++++++------------
+ .../amd/include/Analysis/AxisInfoExt.h        | 11 +--
+ third_party/amd/lib/Analysis/AxisInfoExt.cpp  | 10 ++-
+ 4 files changed, 77 insertions(+), 59 deletions(-)
 
 diff --git a/include/triton/Analysis/AxisInfo.h b/include/triton/Analysis/AxisInfo.h
-index f252081f43b1..5ce13e8c1c5f 100644
+index f252081f43b1..333139efeb01 100644
 --- a/include/triton/Analysis/AxisInfo.h
 +++ b/include/triton/Analysis/AxisInfo.h
-@@ -191,10 +191,39 @@ class AxisInfoVisitorList {
+@@ -191,9 +191,35 @@ class AxisInfoVisitorList {
    std::vector<std::unique_ptr<AxisInfoVisitor>> visitors;
  };
  
+-namespace axisinfo {
+-using CallbackType = std::function<void(AxisInfoVisitorList &)>;
+-} // namespace axisinfo
 +class AxisInfoAnalysis : public dataflow::SparseForwardDataFlowAnalysis<
 +                             dataflow::Lattice<AxisInfo>> {
 +protected:
@@ -43,27 +46,24 @@ index f252081f43b1..5ce13e8c1c5f 100644
 +  visitOperation(Operation *op,
 +                 ArrayRef<const dataflow::Lattice<AxisInfo> *> operands,
 +                 ArrayRef<dataflow::Lattice<AxisInfo> *> results) override;
++
++  static AxisInfoAnalysis *loadDefaultAnalysis(DataFlowSolver *solver);
++  using LoadCallback = decltype(&AxisInfoAnalysis::loadDefaultAnalysis);
 +};
-+
- namespace axisinfo {
--using CallbackType = std::function<void(AxisInfoVisitorList &)>;
-+AxisInfoAnalysis *defaultLoad(DataFlowSolver *solver);
- } // namespace axisinfo
  
-+using AnalysisLoadCallback = decltype(&axisinfo::defaultLoad);
-+
  // Module level axis info analysis based on the call graph, assuming that we do
  // not have recursive functions.
- //
-@@ -205,8 +234,9 @@ using CallbackType = std::function<void(AxisInfoVisitorList &)>;
+@@ -205,8 +231,12 @@ using CallbackType = std::function<void(AxisInfoVisitorList &)>;
  using AxisInfoMapT = DenseMap<Value, AxisInfo>;
  class ModuleAxisInfoAnalysis : public CallGraph<AxisInfoMapT> {
  public:
--  explicit ModuleAxisInfoAnalysis(ModuleOp moduleOp,
++  // AxisInfoAnalysis::LoadCallback loads the per-function analysis pass into
++  // the DataFlowSolver. This allows passes derived from AxisInfoAnalysis to
++  // re-use the module level analysis framework.
+   explicit ModuleAxisInfoAnalysis(ModuleOp moduleOp,
 -                                  axisinfo::CallbackType callback = nullptr)
-+  explicit ModuleAxisInfoAnalysis(
-+      ModuleOp moduleOp,
-+      AnalysisLoadCallback loadAnalysis = axisinfo::defaultLoad)
++                                  AxisInfoAnalysis::LoadCallback loadAnalysis =
++                                      AxisInfoAnalysis::loadDefaultAnalysis)
        : CallGraph<AxisInfoMapT>(moduleOp) {
      SmallVector<FunctionOpInterface> funcs;
      walk<WalkOrder::PreOrder, WalkOrder::PostOrder>(
@@ -82,12 +82,12 @@ index f252081f43b1..5ce13e8c1c5f 100644
  private:
 -  void initialize(FunctionOpInterface funcOp,
 -                  axisinfo::CallbackType callback = nullptr);
-+  void initialize(FunctionOpInterface funcOp, AnalysisLoadCallback);
++  void initialize(FunctionOpInterface funcOp, AxisInfoAnalysis::LoadCallback);
    void update(CallOpInterface callOp, FunctionOpInterface funcOp);
  };
  } // namespace mlir::triton
 diff --git a/lib/Analysis/AxisInfo.cpp b/lib/Analysis/AxisInfo.cpp
-index 2f609a0574aa..c56551cbbfe2 100644
+index 2f609a0574aa..5010a61ab1e5 100644
 --- a/lib/Analysis/AxisInfo.cpp
 +++ b/lib/Analysis/AxisInfo.cpp
 @@ -134,43 +134,6 @@ class BinaryOpVisitorImpl : public AxisInfoVisitorImpl<OpTy> {
@@ -184,25 +184,26 @@ index 2f609a0574aa..c56551cbbfe2 100644
  void AxisInfo::initPessimisticStateFromFunc(int argNumber,
                                              FunctionOpInterface funcOp,
                                              DimVectorT *contiguity,
-@@ -1381,6 +1356,12 @@ void AxisInfo::initDimVectorFromHint(Attribute attr, DimVectorT *vec) {
+@@ -1381,6 +1356,11 @@ void AxisInfo::initDimVectorFromHint(Attribute attr, DimVectorT *vec) {
    return AxisInfo(contiguity, divisibility, constancy, constantValue);
  }
  
-+namespace axisinfo {
-+AxisInfoAnalysis *defaultLoad(DataFlowSolver *solver) {
++AxisInfoAnalysis *
++AxisInfoAnalysis::loadDefaultAnalysis(DataFlowSolver *solver) {
 +  return solver->load<AxisInfoAnalysis>();
 +}
-+} // namespace axisinfo
 +
  unsigned ModuleAxisInfoAnalysis::getContiguity(Value value) {
    auto tensorTy = dyn_cast<RankedTensorType>(value.getType());
    if (!tensorTy)
-@@ -1479,9 +1460,9 @@ unsigned ModuleAxisInfoAnalysis::getMaskAlignment(Value mask) {
+@@ -1478,10 +1458,10 @@ unsigned ModuleAxisInfoAnalysis::getMaskAlignment(Value mask) {
+   return alignment;
  }
  
- void ModuleAxisInfoAnalysis::initialize(FunctionOpInterface funcOp,
+-void ModuleAxisInfoAnalysis::initialize(FunctionOpInterface funcOp,
 -                                        axisinfo::CallbackType callback) {
-+                                        AnalysisLoadCallback loadAnalysis) {
++void ModuleAxisInfoAnalysis::initialize(
++    FunctionOpInterface funcOp, AxisInfoAnalysis::LoadCallback loadAnalysis) {
    std::unique_ptr<DataFlowSolver> solver = createDataFlowSolver();
 -  AxisInfoAnalysis *analysis = solver->load<AxisInfoAnalysis>(callback);
 +  AxisInfoAnalysis *analysis = loadAnalysis(solver.get());
@@ -210,47 +211,49 @@ index 2f609a0574aa..c56551cbbfe2 100644
      return;
  
 diff --git a/third_party/amd/include/Analysis/AxisInfoExt.h b/third_party/amd/include/Analysis/AxisInfoExt.h
-index 5e09c246e3cd..5d5503ba3b18 100644
+index 5e09c246e3cd..6ab2c7c29fcf 100644
 --- a/third_party/amd/include/Analysis/AxisInfoExt.h
 +++ b/third_party/amd/include/Analysis/AxisInfoExt.h
-@@ -6,14 +6,19 @@
+@@ -5,15 +5,18 @@
+ 
  namespace mlir::triton::AMD {
  
- struct AxisInfoExt {
+-struct AxisInfoExt {
 -  static void addVisitors(mlir::triton::AxisInfoVisitorList &visitors);
-+  static triton::AxisInfoAnalysis *loadAnalysis(DataFlowSolver *solver);
-+};
-+
 +class AxisInfoAnalysisExt : public triton::AxisInfoAnalysis {
 +public:
 +  AxisInfoAnalysisExt(DataFlowSolver &solver);
++
++  static triton::AxisInfoAnalysis *loadAnalysis(DataFlowSolver *solver);
  };
  
  class ModuleAxisInfoAnalysis : public mlir::triton::ModuleAxisInfoAnalysis {
  public:
    explicit ModuleAxisInfoAnalysis(ModuleOp moduleOp)
-       : mlir::triton::ModuleAxisInfoAnalysis(moduleOp,
+-      : mlir::triton::ModuleAxisInfoAnalysis(moduleOp,
 -                                             AxisInfoExt::addVisitors) {}
-+                                             AxisInfoExt::loadAnalysis) {}
++      : mlir::triton::ModuleAxisInfoAnalysis(
++            moduleOp, AxisInfoAnalysisExt::loadAnalysis) {}
  };
  } // namespace mlir::triton::AMD
  
 diff --git a/third_party/amd/lib/Analysis/AxisInfoExt.cpp b/third_party/amd/lib/Analysis/AxisInfoExt.cpp
-index 52a0e20d5ac8..42602413cbfd 100644
+index 702c01e688ad..4462aa1b9f27 100644
 --- a/third_party/amd/lib/Analysis/AxisInfoExt.cpp
 +++ b/third_party/amd/lib/Analysis/AxisInfoExt.cpp
-@@ -18,8 +18,13 @@ template <typename OpTy> class CastOpAxisInfoVisitor : public AxisInfoVisitor {
+@@ -60,8 +60,14 @@ class ExtractSliceOpAxisInfoVisitor : public AxisInfoVisitor {
  };
  } // namespace
  
 -void AxisInfoExt::addVisitors(mlir::triton::AxisInfoVisitorList &visitors) {
 +AxisInfoAnalysisExt::AxisInfoAnalysisExt(DataFlowSolver &solver)
 +    : triton::AxisInfoAnalysis(solver) {
-   visitors.append<CastOpAxisInfoVisitor<amdgpu::ExtractSliceOp>>();
+   visitors.append<ExtractSliceOpAxisInfoVisitor>();
 -  return;
  }
 +
-+triton::AxisInfoAnalysis *AxisInfoExt::loadAnalysis(DataFlowSolver *solver) {
++triton::AxisInfoAnalysis *
++AxisInfoAnalysisExt::loadAnalysis(DataFlowSolver *solver) {
 +  return solver->load<AxisInfoAnalysisExt>();
 +}
 +

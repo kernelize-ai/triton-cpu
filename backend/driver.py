@@ -13,11 +13,7 @@ from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 
 # for locating libTritonCPURuntime
-try:
-    _triton_C_dir = importlib.resources.files(triton).joinpath("_C")
-except AttributeError:
-    # resources.files() doesn't exist for Python < 3.9
-    _triton_C_dir = importlib.resources.path(triton, "_C").__enter__()
+_triton_C_dir = str(importlib.resources.files(triton).joinpath("_C"))
 
 
 @functools.lru_cache()
@@ -35,11 +31,16 @@ def external_boost_path():
     return os.environ.get("TRITON_LOCAL_BOOST_PATH", "/opt/homebrew")
 
 
-dirname = os.path.dirname(os.path.realpath(__file__))
-include_dirs = [os.path.join(dirname, "include")] + [
-    os.path.join(external_openmp_path(), "include") if is_macos() else []
-] + [os.path.join(external_boost_path(), "include")]
-libdevice_dir = os.path.join(dirname, "lib")
+@functools.lru_cache()
+def include_dirs():
+    dirname = os.path.dirname(os.path.realpath(__file__))
+
+    include_dirs = [os.path.join(dirname, "include")] + [os.path.join(external_boost_path(), "include")]
+    if is_macos():
+        include_dirs.append(os.path.join(external_openmp_path(), "include"))
+    return include_dirs
+
+
 libraries = ["boost_fiber", "boost_context"]
 
 
@@ -56,8 +57,8 @@ def system_ccflags():
 def library_dirs():
     lib_dirs = [_triton_C_dir]
     if is_macos():
-        lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
-        lib_dirs.extend([os.path.join(external_boost_path(), "lib")])
+        lib_dirs.extend([os.fspath(os.path.join(external_openmp_path(), "lib"))])
+        lib_dirs.extend([os.fspath(os.path.join(external_boost_path(), "lib"))])
     return lib_dirs
 
 
@@ -394,10 +395,9 @@ class CPULauncher(object):
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
         src = make_launcher(constants, signature, metadata.shared, metadata.warp_size)
-        os.environ["CC"] = "g++"
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
-        os.environ.pop("CC")
+                                      include_dirs=include_dirs(), libraries=libraries, ccflags=system_ccflags(),
+                                      language="c++")
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
