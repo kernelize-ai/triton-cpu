@@ -13,6 +13,8 @@ public:
   CpuAxisInfoAnalysis(DataFlowSolver &solver)
       : triton::AxisInfoAnalysis(solver) {}
 
+  static AxisInfoAnalysis *loadAnalysis(DataFlowSolver *solver);
+
 protected:
   void visitNonControlFlowArguments(
       Operation *op, const RegionSuccessor & /*successor*/,
@@ -24,12 +26,11 @@ protected:
                           ArrayRef<dataflow::Lattice<AxisInfo> *> argLattices);
 };
 
-AxisInfoAnalysis *loadAnalysis(DataFlowSolver *solver);
-
 class ModuleAxisInfoAnalysis : public triton::ModuleAxisInfoAnalysis {
 public:
   explicit ModuleAxisInfoAnalysis(ModuleOp moduleOp)
-      : triton::ModuleAxisInfoAnalysis(moduleOp, loadAnalysis) {}
+      : triton::ModuleAxisInfoAnalysis(moduleOp,
+                                       CpuAxisInfoAnalysis::loadAnalysis) {}
 };
 
 } // namespace cpu
