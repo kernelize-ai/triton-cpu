@@ -194,7 +194,7 @@ def make_launcher(constants, signature, shared_mem_size, warp_size):
     arg_types += ', '
     arg_types += ', '.join(["int32_t*", "int32_t*", "int8_t*", "void*"])
 
-    src = f"""
+    src_header = f"""
 #include <stdbool.h>
 #include <Python.h>
 #include <omp.h>
@@ -203,64 +203,100 @@ def make_launcher(constants, signature, shared_mem_size, warp_size):
 #include <stdalign.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
+"""
 
+    src_openmp_launcher = f"""
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
-    assert(num_warps == 1); // only one warp supported per block, currently
+    assert(num_warps == 1); // use the fibers launcher for multiple warps/threads per warp
 
-    const int32_t warp_size = {warp_size};
+    void* cpu_barrier = NULL;
+    int8_t* shared_mem_ptr = NULL;
+
     unsigned N = gridX * gridY * gridZ;
-    const int ompMaxThreads = omp_get_max_threads();
-    const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
-
-    // TODO: only add the plus barrier when we have a barrier
-    alignas(64) unsigned char* global_smem = NULL;
-    unsigned shared_memory_aligned_per_team = 0;
-    if (shared_memory > 0) {{
-        shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
-        // allocate scratch for reductions
-        shared_memory_aligned_per_team += 64 * warp_size;
-        unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * max_threads;
-        global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
-        assert(global_smem);
-        memset(global_smem, 0, shared_memory_aligned_total);
+    if (N == 1) {{
+        int32_t launch_sz[] = {{gridX, gridY, gridZ, 1, 1, 1}};
+        int32_t launch_id[] = {{
+            0, 1, 0, 0, 0
+        }};
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+        return;
     }}
 
-    unsigned consecutive_blocks = (N + max_threads - 1) / max_threads;
+    const int available_threads = omp_get_max_threads();
+    const int max_threads = available_threads > N ? N : available_threads;
 
-    int32_t launch_sz[] = {{gridX, gridY, gridZ, warp_size, 1, 1}};
-
-    boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
-
-    #pragma omp parallel num_threads(max_threads) proc_bind(close)
-    {{
-        const int team_id = omp_get_thread_num();
-        const unsigned block_start = consecutive_blocks * team_id;
-        int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
-
-        const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
-        std::vector<boost::fibers::fiber> fibers;
-        fibers.reserve(warp_size);
-
-        boost::fibers::barrier barrier(warp_size);
-        void *cpu_barrier = &barrier;
-
-        for (int lane_id = 0; lane_id < warp_size; lane_id++) {{
-            fibers.emplace_back([&, block_start, run_end, lane_id]() {{
-                int32_t launch_id[] = {{
-                    (int32_t)block_start, (int32_t)run_end, lane_id, 0, 0
-                }};
-                (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
-            }});
-        }}
-
-        for (auto& fiber : fibers) {{
-            fiber.join();
-        }}
+    #pragma omp parallel for schedule(static) num_threads(max_threads)
+    for (unsigned i = 0; i < N; i++) {{
+        const unsigned run_end = i + 1;
+        int32_t launch_sz[] = {{gridX, gridY, gridZ, 1, 1, 1}};
+        int32_t launch_id[] = {{
+            (int32_t)i, (int32_t)run_end, /*thread_id=*/0, 0, 0
+        }};
+        (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
     }}
-
-    if (global_smem) free(global_smem);
 }}
+"""
 
+    src_fibers_launcher = f"""
+    static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+        assert(num_warps == 1); // only one warp supported per block, currently
+
+        const int32_t warp_size = {warp_size};
+        unsigned N = gridX * gridY * gridZ;
+        const int ompMaxThreads = omp_get_max_threads();
+        const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
+
+        // TODO: only add the plus barrier when we have a barrier
+        alignas(64) unsigned char* global_smem = NULL;
+        unsigned shared_memory_aligned_per_team = 0;
+        if (shared_memory > 0) {{
+            shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
+            // allocate scratch for reductions
+            shared_memory_aligned_per_team += 64 * warp_size;
+            unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * max_threads;
+            global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
+            assert(global_smem);
+            memset(global_smem, 0, shared_memory_aligned_total);
+        }}
+
+        unsigned consecutive_blocks = (N + max_threads - 1) / max_threads;
+
+        int32_t launch_sz[] = {{gridX, gridY, gridZ, warp_size, 1, 1}};
+
+        boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
+
+        #pragma omp parallel num_threads(max_threads) proc_bind(close)
+        {{
+            const int team_id = omp_get_thread_num();
+            const unsigned block_start = consecutive_blocks * team_id;
+            int8_t* shared_mem_ptr = {'(int8_t*)&global_smem[team_id * shared_memory_aligned_per_team]' if shared_mem_size > 0 else 'NULL'};
+
+            const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
+            std::vector<boost::fibers::fiber> fibers;
+            fibers.reserve(warp_size);
+
+            boost::fibers::barrier barrier(warp_size);
+            void *cpu_barrier = &barrier;
+
+            for (int lane_id = 0; lane_id < warp_size; lane_id++) {{
+                fibers.emplace_back([&, block_start, run_end, lane_id]() {{
+                    int32_t launch_id[] = {{
+                        (int32_t)block_start, (int32_t)run_end, lane_id, 0, 0
+                    }};
+                    (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
+                }});
+            }}
+
+            for (auto& fiber : fibers) {{
+                fiber.join();
+            }}
+        }}
+
+        if (global_smem) free(global_smem);
+    }}
+"""
+
+    src_body = f"""
 typedef struct _DevicePtrInfo {{
     void* dev_ptr;
     bool valid;
@@ -384,7 +420,8 @@ PyMODINIT_FUNC PyInit___triton_launcher(void) {{
   return m;
 }}
 """
-    return src
+    src_launcher = src_openmp_launcher if warp_size == 1 else src_fibers_launcher
+    return src_header + src_launcher + src_body
 
 
 class CPULauncher(object):
