@@ -136,7 +136,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     // if the value being reduced is used elsewhere ttc.generic can materialize
     // the tensor
     // TODO: parametrize?
-    const bool allowTensorMaterialization = true;
+    const bool allowTensorMaterializationFlag = true;
+    const bool srcIsLoad = isa<LoadOp>(srcs[0].getDefiningOp());
+    const bool allowTensorMaterialization =
+        allowTensorMaterializationFlag && !srcIsLoad;
     const bool srcUsedElsewhere =
         allowTensorMaterialization &&
         llvm::any_of(srcs[0].getUsers(), [&](Operation *user) {
