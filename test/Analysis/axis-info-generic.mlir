@@ -17,10 +17,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
         %x_3 = tt.addptr %x, %offsets_1 : tensor<512x!tt.ptr<f32>, #blocked>, tensor<512xi32, #blocked>
 
         // CHECK-COUNT-128: ttc.masked_load {{.*}} -> vector<4xf32>
-        ttc.generic %x_3 attributes {blockShape = array<i32: 512>, vectorShape = array<i32: 4>} {
+        ttc.generic %x_3 attributes {blockShape = array<i32: 512>, vectorShape = array<i32: 4>} body {
             ^bb0(%arg0: tensor<4x!tt.ptr<f32>, #blocked>):
                 %x_10 = tt.load %arg0 : tensor<4x!tt.ptr<f32>, #blocked>
-        } : (tensor<512x!tt.ptr<f32>, #blocked>) -> ()
+                ttc.yield
+        } combiners {}: (tensor<512x!tt.ptr<f32>, #blocked>) -> ()
         tt.return
     }
 }

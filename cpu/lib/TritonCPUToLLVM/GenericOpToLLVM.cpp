@@ -33,7 +33,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     int64_t vectorSize = vectorShape[0];
     unsigned numChunks = blockSize / vectorSize;
 
-    Block *body = &op.getRegion().front();
+    Value result;
+    const bool hasReductions = !op.getCombiners().empty();
+
+    Block *body = &op.getBody().front();
 
     // TODO: currently we unroll the generic op during lowering because
     // extractvalue cannot take a dynamic index. To reduce code size, we will
@@ -41,26 +44,36 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     for (unsigned i = 0; i < numChunks; ++i) {
       SmallVector<Value> chunkedArgs;
 
-      for (auto [origArg, llvmArg] :
-           llvm::zip(body->getArguments(), adaptor.getOperands())) {
-        Type convertedBodyType =
-            getTypeConverter()->convertType(origArg.getType());
+      for (auto [opIdx, origArg, llvmArg] :
+           llvm::enumerate(body->getArguments(), adaptor.getOperands())) {
 
-        Value chunk = LLVM::UndefOp::create(rewriter, loc, convertedBodyType);
+        if (!isa<RankedTensorType>(origArg.getType())) {
+          // forward constants and scalars without chunking
+          assert(origArg.getType() == llvmArg.getType() &&
+                 "expected non-tensor arguments to be unchanged by type "
+                 "conversion");
+          chunkedArgs.push_back(op.getOperand(opIdx));
+        } else {
 
-        for (unsigned j = 0; j < vectorSize; ++j) {
-          int64_t srcIndex = i * vectorSize + j;
+          Type convertedBodyType =
+              getTypeConverter()->convertType(origArg.getType());
 
-          Value extractedElement =
-              LLVM::ExtractValueOp::create(rewriter, loc, llvmArg, {srcIndex});
-          chunk = LLVM::InsertValueOp::create(rewriter, loc, chunk,
-                                              extractedElement, {j});
+          Value chunk = LLVM::UndefOp::create(rewriter, loc, convertedBodyType);
+
+          for (unsigned j = 0; j < vectorSize; ++j) {
+            int64_t srcIndex = i * vectorSize + j;
+
+            Value extractedElement = LLVM::ExtractValueOp::create(
+                rewriter, loc, llvmArg, {srcIndex});
+            chunk = LLVM::InsertValueOp::create(rewriter, loc, chunk,
+                                                extractedElement, {j});
+          }
+
+          Value castedChunk = UnrealizedConversionCastOp::create(
+                                  rewriter, loc, origArg.getType(), chunk)
+                                  .getResult(0);
+          chunkedArgs.push_back(castedChunk);
         }
-
-        Value castedChunk = UnrealizedConversionCastOp::create(
-                                rewriter, loc, origArg.getType(), chunk)
-                                .getResult(0);
-        chunkedArgs.push_back(castedChunk);
       }
 
       // clone the body of the generic op for this chunk only
@@ -69,12 +82,49 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         mapping.map(body->getArgument(j), chunkedArgs[j]);
       }
 
-      for (Operation &bOp : body->without_terminator()) {
-        rewriter.clone(bOp, mapping);
+      for (Operation &bOp : *body) {
+        if (auto yieldOp = dyn_cast<cpu::YieldOp>(bOp)) {
+          if (yieldOp.getValues().size() == 0)
+            continue;
+
+          assert(hasReductions &&
+                 "unexpected yield op result in generic without reductions");
+          auto yieldOpValues = llvm::to_vector(llvm::map_range(
+              yieldOp.getValues(), [&](Value v) { return mapping.lookup(v); }));
+          if (i == 0) {
+            result = yieldOpValues[0];
+          } else {
+            // combine with the previous reduction result using the same
+            // combiner region
+            auto *combinerBlock = &op.getCombiners().front();
+            IRMapping combMapping;
+            combMapping.map(combinerBlock->getArgument(0), result);
+            combMapping.map(combinerBlock->getArgument(1), yieldOpValues[0]);
+
+            auto terminator =
+                cast<cpu::YieldOp>(combinerBlock->getTerminator());
+            auto yieldVals = terminator.getValues();
+            assert(
+                yieldVals.size() == 1 &&
+                "expected exactly one value yielded from the combiner block");
+
+            Operation *combinerOp = yieldVals.front().getDefiningOp();
+            assert(combinerOp && "expected yielded value to be defined by an "
+                                 "op in the combiner block");
+            auto newCombiner = rewriter.clone(*combinerOp, combMapping);
+            result = newCombiner->getResult(0);
+          }
+        } else {
+          auto newOp = rewriter.clone(bOp, mapping);
+        }
       }
     }
 
-    rewriter.eraseOp(op);
+    if (result) {
+      rewriter.replaceOp(op, result);
+    } else {
+      rewriter.eraseOp(op);
+    }
     return success();
   }
 };
