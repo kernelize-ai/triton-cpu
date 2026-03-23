@@ -122,11 +122,13 @@ jobs:
       - name: Run python tests on CPU
         working-directory: ./triton
         run: |
-          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr) and not test_reduce1d[1-sum-float16-512]"
-          python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_generic_reduction or test_load_store_same_ptr)"
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_unary_op or test_math_op or test_abs[ or test_store_constant or test_split or test_convert_float16_to_float32 or test_optimize_thread_locality or test_full or test_const[ or test_masked_load[ or test_masked_load_scalar[ or test_vectorization[ or test_assume or test_value_specialization or test_bin_op_constexpr or test_call or test_if[ or test_map_elementwise or test_for_iv or test_if_else or test_while or test_nested_while or test_propagate_nan[m or test_static_range or test_unsplat)"
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "test_interleave and not test_interleave_scalars"
           TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr) and not test_reduce1d[1-sum-float16-512]"
-          python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
+
           TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "test_dot["
+
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
