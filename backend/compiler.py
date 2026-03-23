@@ -8,6 +8,7 @@ from importlib.metadata import metadata
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, Tuple
+import warnings
 
 import triton.backends.cpu.driver as cpu_driver
 from triton import knobs
@@ -29,11 +30,17 @@ class CPUOptions:
     sanitize_overflow: bool = True
     instrumentation_mode: str = ""
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
+    supported_fp8_dtypes: Tuple[str] = ()
     matrix_instr_nonkdim: int = 16
     tile_and_fuse: bool = os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1"
     # TODO: de-duplicate with driver
     warp_size: int = int(os.environ.get("TRITON_CPU_WARP_SIZE", 1))
     min_dot_size: int = 1
+
+    def __post_init__(self):
+        if (self.num_warps != 1):
+            warnings.warn("Only 1 warp per block is supported on CPU. Resetting num_warps = 1")
+            object.__setattr__(self, 'num_warps', 1)
 
     def hash(self):
         hash_dict = dict(self.__dict__)
@@ -111,6 +118,7 @@ class CPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         dump_enabled = pm.enable_debug()
         num_ctas = 1
+
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
         if options.tile_and_fuse is True:
             # Use upstream coalesce for tile and fuse
