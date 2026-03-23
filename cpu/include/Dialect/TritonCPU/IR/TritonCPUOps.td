@@ -276,6 +276,13 @@ def TTC_MakeDynamicRangeOp : TTC_Op<"make_dynamic_range", [Pure]> {
 
     let assemblyFormat = "$start attr-dict `:` type($result)";
     let hasVerifier = 1;
+
+    let extraClassDeclaration = [{
+        int32_t getEnd() {
+            auto resultTy = cast<RankedTensorType>(getResult().getType());
+            return resultTy.getShape()[0];
+        }
+    }];
 }
 
 #endif
