@@ -25,3 +25,22 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
         tt.return
     }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [1], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shared = 0 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
+    tt.func public @load_scalar(%x_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
+        ttc.generic %x_ptr attributes {blockShape = array<i32: 1024>, vectorShape = array<i32: 4>} body {
+            ^bb0(%tileOffset: i32, %ptr: !tt.ptr<f32>):
+                %offsets = ttc.make_dynamic_range %tileOffset : tensor<4xi32, #blocked>
+                %ptrs = tt.splat %ptr : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>, #blocked>
+                %offset_ptrs = tt.addptr %ptrs, %offsets : tensor<4x!tt.ptr<f32>, #blocked>, tensor<4xi32, #blocked>
+                // CHECK-COUNT-2: ttc.masked_load {{.*}} -> vector<4xf32>
+                %ret = tt.load %offset_ptrs : tensor<4x!tt.ptr<f32>, #blocked>
+                ttc.yield
+        } combiners {}: (!tt.ptr<f32>) -> ()
+
+        tt.return
+    }
+}

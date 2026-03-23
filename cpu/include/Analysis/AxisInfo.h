@@ -10,8 +10,7 @@ namespace cpu {
 
 class CpuAxisInfoAnalysis : public triton::AxisInfoAnalysis {
 public:
-  CpuAxisInfoAnalysis(DataFlowSolver &solver)
-      : triton::AxisInfoAnalysis(solver) {}
+  CpuAxisInfoAnalysis(DataFlowSolver &solver);
 
   static AxisInfoAnalysis *loadAnalysis(DataFlowSolver *solver);
 
