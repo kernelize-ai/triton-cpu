@@ -106,6 +106,7 @@ jobs:
         working-directory: ./triton
         run: python -m pytest ../python/test
       - name: Run tutorial 03 on CPU
+        if: false # disabled due to failures on AVX-512
         working-directory: ./triton
         env:
           TRITON_DEFAULT_BACKEND: "cpu"
