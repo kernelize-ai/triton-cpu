@@ -133,12 +133,27 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     if (!encoding)
       return failure();
 
+    // if the value being reduced is used elsewhere ttc.generic can materialize
+    // the tensor
+    // TODO: parametrize?
+    const bool allowTensorMaterializationFlag = true;
+    const bool srcIsLoad = isa<LoadOp>(srcs[0].getDefiningOp());
+    const bool allowTensorMaterialization =
+        allowTensorMaterializationFlag && !srcIsLoad;
+    const bool srcUsedElsewhere =
+        allowTensorMaterialization &&
+        llvm::any_of(srcs[0].getUsers(), [&](Operation *user) {
+          return user != reduceOp.getOperation(); // or just != reduceOp?
+        });
+
     auto [blockShape, vectorShape] =
         getBlockAndVectorShapes(tensorTy, encoding);
 
     SmallVector<Value> ins = {srcs[0]};
     SmallVector<Type> resultTypes(reduceOp.getResultTypes().begin(),
                                   reduceOp.getResultTypes().end());
+    if (srcUsedElsewhere)
+      resultTypes.push_back(tensorTy);
 
     LDBG("Creating reduction generic op, result types: " << resultTypes.size());
 
@@ -154,6 +169,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 
     SmallVector<Value> partials(newReduce->getResults().begin(),
                                 newReduce->getResults().end());
+    if (srcUsedElsewhere)
+      partials.push_back(bodyMapping.lookup(srcs[0]));
     cpu::YieldOp::create(rewriter, loc, partials);
 
     // Each block takes (acc, partial) and applies the same combining op as the
@@ -162,7 +179,9 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     Region &reduceCombiner = reduceOp.getCombineOp();
     Block &srcBlock = reduceCombiner.front();
 
-    for (Type resultTy : resultTypes) {
+    // Only scalar (reduction) results need combiner blocks. The tensor result
+    // (if present) uses scatter semantics and has no combiner.
+    for (Type resultTy : reduceOp.getResultTypes()) {
       Block *combBlock = rewriter.createBlock(&combiners);
       Value acc = combBlock->addArgument(resultTy, loc);
       Value partial = combBlock->addArgument(resultTy, loc);
@@ -184,7 +203,17 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
       cpu::YieldOp::create(rewriter, loc, yieldVals);
     }
 
-    rewriter.replaceOp(reduceOp, generic.getResults());
+    // Replace uses of srcs[0] outside the generic with the materialized tensor
+    // result. Must go through the rewriter and exclude the generic's own
+    // operand so the generic still receives the original value as its ins.
+    if (srcUsedElsewhere)
+      rewriter.replaceUsesWithIf(
+          srcs[0], generic.getResult(1), [&](OpOperand &use) {
+            return use.getOwner() != generic.getOperation();
+          });
+
+    // Replace reduceOp with the scalar reduction result (generic result 0).
+    rewriter.replaceOp(reduceOp, generic.getResult(0));
 
     return success();
   }
