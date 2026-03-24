@@ -40,6 +40,11 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit);
 
+void populateMakeDynamicRangeOpToLLVMPattern(LLVMTypeConverter &typeConverter,
+                                             const TargetInfoBase &targetInfo,
+                                             RewritePatternSet &patterns,
+                                             PatternBenefit benefit);
+
 } // namespace cpu
 } // namespace triton
 } // namespace mlir

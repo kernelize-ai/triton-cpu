@@ -252,6 +252,37 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
   let assemblyFormat = [{
     $ins (` ` `(` $params^ `)`)? attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
   }];
+
+  let extraClassDeclaration = [{
+    Value getChunkOffset() { return getBody().front().getArgument(0); }
+    unsigned getNumInductionVars() { return 1; }
+    unsigned getNumRegionIterArgs() {
+      return getBody().front().getNumArguments() - getNumInductionVars();
+    }
+  }];
+}
+
+def TTC_MakeDynamicRangeOp : TTC_Op<"make_dynamic_range", [Pure]> {
+    let summary = "make range starting at start";
+
+    let description = [{
+        Returns a 1ID int32 tensor starting at `$start` and ending at `$start` + `$result`.getShape()[0].
+
+        Step = 1
+    }];
+
+    let arguments = (ins I32:$start);
+    let results = (outs TT_IntTensor:$result);
+
+    let assemblyFormat = "$start attr-dict `:` type($result)";
+    let hasVerifier = 1;
+
+    let extraClassDeclaration = [{
+        int32_t getEnd() {
+            auto resultTy = cast<RankedTensorType>(getResult().getType());
+            return resultTy.getShape()[0];
+        }
+    }];
 }
 
 #endif

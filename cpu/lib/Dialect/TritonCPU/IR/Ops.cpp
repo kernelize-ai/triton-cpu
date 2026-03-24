@@ -57,6 +57,20 @@ LogicalResult GenericOp::verify() {
     }
   }
 
+  // Body must exist and have the implicit induction variable arguments.
+  Region &body = getBody();
+  if (body.empty())
+    return emitOpError("expects a non-empty body region");
+  Block &bodyBlock = body.front();
+  unsigned numInductionVars = getNumInductionVars();
+  if (bodyBlock.getNumArguments() < numInductionVars)
+    return emitOpError("body block must have at least ")
+           << numInductionVars << " argument(s) for induction variable(s)";
+  for (unsigned i = 0; i < numInductionVars; ++i) {
+    if (!bodyBlock.getArgument(i).getType().isInteger(32))
+      return emitOpError("body induction variable ") << i << " must be i32";
+  }
+
   // Combiners region must have one block per scalar result.
   Region &combiners = getCombiners();
   unsigned numResults = getNumResults();
@@ -74,6 +88,14 @@ LogicalResult GenericOp::verify() {
     }
   }
 
+  return success();
+}
+
+LogicalResult MakeDynamicRangeOp::verify() {
+  auto resultTensorTy = cast<RankedTensorType>(getResult().getType());
+  if (resultTensorTy.getShape().size() != 1)
+    return emitOpError("expects rank-1 result tensor type, got ")
+           << resultTensorTy;
   return success();
 }
 

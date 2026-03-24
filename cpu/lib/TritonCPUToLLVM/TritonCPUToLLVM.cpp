@@ -144,6 +144,9 @@ struct ConvertTritonCPUToLLVM
     mlir::triton::populateAssertOpToLLVMPattern(typeConverter, patterns,
                                                 targetInfo, benefit);
 
+    mlir::triton::cpu::populateMakeDynamicRangeOpToLLVMPattern(
+        typeConverter, targetInfo, patterns, benefit);
+
     mlir::triton::populateMakeRangeOpToLLVMPattern(typeConverter, targetInfo,
                                                    patterns, benefit);
     mlir::triton::populateInstrumentationToLLVMPatterns(typeConverter, patterns,
