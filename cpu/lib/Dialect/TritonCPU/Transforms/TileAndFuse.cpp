@@ -1,6 +1,7 @@
 #include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 
@@ -195,6 +196,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 static bool isFusible(Operation *defOp) {
   if (!defOp)
     return false;
+  if (isa<arith::ConstantOp>(defOp))
+    return true;
   if ((isa<arith::ArithDialect, math::MathDialect>(defOp->getDialect())) &&
       defOp->hasTrait<OpTrait::Elementwise>())
     return true;
@@ -210,6 +213,24 @@ static bool isFusible(Operation *defOp) {
   if (isa<triton::MakeRangeOp>(defOp))
     return true;
   return false;
+}
+
+// If v is a block argument of an scf.for (i.e. an iter_arg), return the
+// corresponding initial value passed to the loop. Otherwise return v unchanged.
+// This lets the fusion worklist see through loop-carried values to their
+// defining ops (e.g. constants used as iter_arg initialisers).
+static Value getIterArgInit(Value v) {
+  auto blockArg = dyn_cast<BlockArgument>(v);
+  if (!blockArg)
+    return v;
+  auto forOp = dyn_cast<scf::ForOp>(blockArg.getOwner()->getParentOp());
+  if (!forOp)
+    return v;
+  unsigned argIdx = blockArg.getArgNumber();
+  unsigned numIV = forOp.getNumInductionVars();
+  if (argIdx < numIV || (argIdx - numIV) >= forOp.getInitArgs().size())
+    return v;
+  return forOp.getInitArgs()[argIdx - numIV];
 }
 
 // Fuse ops that produce the ins values of genericOp into its body.
@@ -233,7 +254,9 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
                               genericOp.getIns().end());
   while (!worklist.empty()) {
     Value v = worklist.pop_back_val();
-    Operation *defOp = v.getDefiningOp();
+    // See through scf.for iter_args to their initial values so we can fuse
+    // the ops that produce those values (e.g. constants used as initialisers).
+    Operation *defOp = getIterArgInit(v).getDefiningOp();
     if (!defOp || !isFusible(defOp) || opsToFuse.contains(defOp))
       continue;
     opsToFuse.insert(defOp);
@@ -249,8 +272,15 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
   // access block args, keeping the newIns indexing straightforward.
   unsigned numInductionVars = genericOp.getNumInductionVars();
   DenseMap<Value, unsigned> insToArgIdx;
-  for (auto [idx, v] : llvm::enumerate(genericOp.getIns()))
+  for (auto [idx, v] : llvm::enumerate(genericOp.getIns())) {
     insToArgIdx[v] = idx;
+    // If v is an scf.for iter_arg, also map its initial value so that when the
+    // defining op of the init is cloned its result is recognised as replacing
+    // this ins slot.
+    Value init = getIterArgInit(v);
+    if (init != v)
+      insToArgIdx[init] = idx;
+  }
 
   SmallVector<Value> newIns(genericOp.getIns().begin(),
                             genericOp.getIns().end());
@@ -262,9 +292,35 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
   // Insert cloned ops before the first existing body op.
   rewriter.setInsertionPointToStart(body);
 
+  // Sort opsToFuse into true topological order (defs before uses).
+  // The worklist DFS can insert the same dependency via two different paths
+  // (diamond-shaped graphs), so reversing the insertion order is not
+  // guaranteed to give a valid topo order.  We do an explicit post-order DFS.
+  SmallVector<Operation *> sortedOps;
+  {
+    DenseSet<Operation *> visited;
+    std::function<void(Operation *)> visit = [&](Operation *op) {
+      if (!opsToFuse.contains(op) || visited.contains(op))
+        return;
+      visited.insert(op);
+      for (Value operand : op->getOperands()) {
+        if (auto *def = operand.getDefiningOp())
+          visit(def);
+        // Also follow scf.for iter_arg initialisers.
+        Value init = getIterArgInit(operand);
+        if (init != operand)
+          if (auto *def = init.getDefiningOp())
+            visit(def);
+      }
+      sortedOps.push_back(op);
+    };
+    for (Operation *op : opsToFuse)
+      visit(op);
+  }
+
   IRMapping mapping;
   // Clone in topological (def-before-use) order.
-  for (Operation *op : llvm::reverse(opsToFuse)) {
+  for (Operation *op : sortedOps) {
     if (auto makeRangeOp = dyn_cast<triton::MakeRangeOp>(op)) {
       // replace op with makeDynamicRange
       auto newMakeRangeResultType =
@@ -280,6 +336,29 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
         insIdxToRemove.push_back(it->second);
       }
       continue;
+    }
+    if (auto constantOp = dyn_cast<arith::ConstantOp>(op)) {
+      auto tensorTy =
+          dyn_cast<RankedTensorType>(constantOp.getResult().getType());
+      if (tensorTy) {
+        auto newTensorTy = cast<RankedTensorType>(
+            updateTensorType(tensorTy, sizePerThreadVec));
+        auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
+        assert(denseAttr.isSplat() &&
+               "non-splat tensor constants not yet supported in fuseInputs");
+        auto newAttr = DenseElementsAttr::get(
+            newTensorTy, *denseAttr.getValues<Attribute>().begin());
+        auto newConstant =
+            arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
+        mapping.map(constantOp.getResult(), newConstant.getResult());
+        if (auto it = insToArgIdx.find(constantOp.getResult());
+            it != insToArgIdx.end()) {
+          body->getArgument(it->second + numInductionVars)
+              .replaceAllUsesWith(newConstant.getResult());
+          insIdxToRemove.push_back(it->second);
+        }
+        continue;
+      }
     }
 
     for (Value operand : op->getOperands()) {
