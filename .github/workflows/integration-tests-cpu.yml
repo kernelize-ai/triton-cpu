@@ -153,3 +153,11 @@ jobs:
 
           mkdir -p ~/.ccache
           du -h -d 1 ~/.ccache
+
+      - name: Upload kernel artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernels
+          path: ${{ env.HOME }}/.triton/cache
+          retention-days: 14
