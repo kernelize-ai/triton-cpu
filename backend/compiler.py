@@ -16,6 +16,16 @@ from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton.runtime.build import _build
 
 
+@functools.lru_cache()
+def get_cpu_features():
+    return cpu.get_processor_features()
+
+
+@functools.lru_cache()
+def get_cpu_name():
+    return cpu.get_processor_name()
+
+
 @dataclass(frozen=True)
 class CPUOptions:
     num_warps: int = 1
@@ -24,6 +34,7 @@ class CPUOptions:
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
     arch: str = None
+    features: str = ""
     enable_fp_fusion: bool = True
     backend_name: str = "cpu"
     sanitize_overflow: bool = True
@@ -56,7 +67,11 @@ class CPUBackend(BaseBackend):
         self.binary_ext = "so"
 
     def parse_options(self, options):
-        args = {"arch": cpu.get_processor_name()}
+        # TODO: can we use knobs here?
+        feature_override = os.environ.get("TRITON_CPU_TARGET_FEATURES")
+        target_features = feature_override if feature_override else get_cpu_features()
+
+        args = {"arch": get_cpu_name(), "features": target_features}
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
@@ -188,10 +203,9 @@ class CPUBackend(BaseBackend):
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         cpu.attach_target_triple(llvm_mod, cpu.get_default_target_triple())
-        target_features = ""
-        llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, target_features)
+        llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, options.features)
 
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, "", [], options.enable_fp_fusion)
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, options.features, [], options.enable_fp_fusion)
         metadata["shared"] = src.get_int_attr("ttg.shared")
 
         ret = str(llvm_mod)
@@ -206,7 +220,7 @@ class CPUBackend(BaseBackend):
         metadata["name"] = names[0]
 
         flags = []
-        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, "", flags,
+        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, options.features, flags,
                                      options.enable_fp_fusion, False)
 
     @staticmethod
