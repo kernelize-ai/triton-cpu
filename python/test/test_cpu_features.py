@@ -37,7 +37,7 @@ def test_cpu_features(device):
     features_no_avx2 = features + ",-avx2"
 
     shape = 64
-    x = numpy_random(shape, dtype="int16")
+    x = numpy_random(shape, dtype_str="int16")
     x_tri = to_triton(x, device=device)
     z_tri = to_triton(numpy_random((1, ), dtype_str="int16"), device=device, dst_type="int16")
     compiled = kernel[(1, )](x_tri, z_tri, BLOCK=shape)
