@@ -34,6 +34,7 @@ class CPUOptions:
     cluster_dims: tuple = (1, 1, 1)
     debug: bool = False
     arch: str = None
+    features: str = ""
     enable_fp_fusion: bool = True
     backend_name: str = "cpu"
     sanitize_overflow: bool = True
@@ -66,7 +67,7 @@ class CPUBackend(BaseBackend):
         self.binary_ext = "so"
 
     def parse_options(self, options):
-        args = {"arch": get_target_name()}
+        args = {"arch": get_target_name(), "features": get_target_features()}
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
@@ -198,10 +199,9 @@ class CPUBackend(BaseBackend):
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         cpu.attach_target_triple(llvm_mod, cpu.get_default_target_triple())
-        target_features = get_target_features()
-        llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, target_features)
+        llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, options.features)
 
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, target_features, [], options.enable_fp_fusion)
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, options.features, [], options.enable_fp_fusion)
         metadata["shared"] = src.get_int_attr("ttg.shared")
 
         ret = str(llvm_mod)
@@ -216,7 +216,7 @@ class CPUBackend(BaseBackend):
         metadata["name"] = names[0]
 
         flags = []
-        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, get_target_features(), flags,
+        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, options.features, flags,
                                      options.enable_fp_fusion, False)
 
     @staticmethod
