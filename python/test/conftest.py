@@ -8,7 +8,7 @@ def pytest_configure(config):
 
 
 def pytest_addoption(parser):
-    parser.addoption("--device", action="store", default="cuda")
+    parser.addoption("--device", action="store", default="cpu")
 
 
 @pytest.fixture

@@ -4,9 +4,14 @@ import pytest
 import triton
 import triton.language as tl
 
-from triton._internal_testing import (numpy_random, to_triton)
+from triton._internal_testing import (numpy_random, to_triton, get_current_target)
 
 import triton.backends.cpu.compiler as cpu_compiler
+
+
+def is_cpu():
+    target = get_current_target()
+    return False if target is None else target.backend == "cpu"
 
 
 @functools.lru_cache()
@@ -22,19 +27,20 @@ def kernel(X, Z, BLOCK: tl.constexpr):
     tl.store(Z, z)
 
 
-@pytest.mark.skipif(not is_x86(), reason="Cpu feature string test only supported on x86")
+@pytest.mark.skipif(not is_cpu(), reason="CPU feature string test only supported on cpu backend")
+@pytest.mark.skipif(not is_x86(), reason="CPU feature string test only supported on x86")
 def test_cpu_features(device, monkeypatch):
-
+    pytest.skip_if
     features = cpu_compiler.get_target_features()
 
     if len(features) == 0:
-        pytest.skip("No cpu feature string on current platform")
+        pytest.skip("No CPU feature string on current platform")
 
     avx2_features = [f for f in features.split(',') if 'avx2' in f and f.startswith('+')]
     if len(avx2_features) == 0:
         pytest.skip("AVX2 not supported on current platform")
 
-    features_no_avx2 = features + ",-avx2"
+    features_no_avx2 = features + ",-avx2,-avx"
     monkeypatch.setenv("TRITON_CPU_TARGET_FEATURES", features_no_avx2)
 
     shape = 64

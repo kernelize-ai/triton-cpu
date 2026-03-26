@@ -17,12 +17,12 @@ from triton.runtime.build import _build
 
 
 @functools.lru_cache()
-def get_target_features():
+def get_cpu_features():
     return cpu.get_processor_features()
 
 
 @functools.lru_cache()
-def get_target_name():
+def get_cpu_name():
     return cpu.get_processor_name()
 
 
@@ -69,9 +69,9 @@ class CPUBackend(BaseBackend):
     def parse_options(self, options):
         # TODO: can we use knobs here?
         feature_override = os.environ.get("TRITON_CPU_TARGET_FEATURES")
-        target_features = feature_override if feature_override else get_target_features()
+        target_features = feature_override if feature_override else get_cpu_features()
 
-        args = {"arch": get_target_name(), "features": target_features}
+        args = {"arch": get_cpu_name(), "features": target_features}
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
