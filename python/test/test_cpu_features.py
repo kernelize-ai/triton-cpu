@@ -30,7 +30,7 @@ def kernel(X, Z, BLOCK: tl.constexpr):
 @pytest.mark.skipif(not is_cpu(), reason="CPU feature string test only supported on cpu backend")
 @pytest.mark.skipif(not is_x86(), reason="CPU feature string test only supported on x86")
 def test_cpu_features(device, monkeypatch):
-    features = cpu_compiler.get_target_features()
+    features = cpu_compiler.get_cpu_features()
 
     if len(features) == 0:
         pytest.skip("No CPU feature string on current platform")
