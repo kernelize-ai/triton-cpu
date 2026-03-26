@@ -17,8 +17,13 @@ from triton.runtime.build import _build
 
 
 @functools.lru_cache()
-def get_processor_features():
+def get_target_features():
     return cpu.get_processor_features()
+
+
+@functools.lru_cache()
+def get_target_name():
+    return cpu.get_processor_name()
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,7 @@ class CPUBackend(BaseBackend):
         self.binary_ext = "so"
 
     def parse_options(self, options):
-        args = {"arch": cpu.get_processor_name()}
+        args = {"arch": get_target_name()}
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
@@ -193,7 +198,7 @@ class CPUBackend(BaseBackend):
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         cpu.attach_target_triple(llvm_mod, cpu.get_default_target_triple())
-        target_features = get_processor_features()
+        target_features = get_target_features()
         llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, target_features)
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, target_features, [], options.enable_fp_fusion)
@@ -211,7 +216,7 @@ class CPUBackend(BaseBackend):
         metadata["name"] = names[0]
 
         flags = []
-        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, "", flags,
+        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, get_target_features(), flags,
                                      options.enable_fp_fusion, False)
 
     @staticmethod
