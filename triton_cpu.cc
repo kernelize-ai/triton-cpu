@@ -73,6 +73,16 @@ void init_triton_cpu(py::module &&m) {
   m.def("get_processor_name",
         []() { return llvm::sys::getHostCPUName().str(); });
 
+  m.def("get_processor_features", []() {
+    std::string features;
+    for (auto [i, F] : llvm::enumerate(llvm::sys::getHostCPUFeatures())) {
+      if (i > 0)
+        features += ",";
+      features += (F.second ? "+" : "-") + F.first().str();
+    }
+    return features;
+  });
+
   m.def("attach_target_triple",
         [](llvm::Module *module, const std::string &triple) {
           module->setTargetTriple(llvm::Triple(triple));

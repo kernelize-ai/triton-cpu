@@ -16,6 +16,11 @@ from triton.backends.compiler import BaseBackend, GPUTarget, Language
 from triton.runtime.build import _build
 
 
+@functools.lru_cache()
+def get_processor_features():
+    return cpu.get_processor_features()
+
+
 @dataclass(frozen=True)
 class CPUOptions:
     num_warps: int = 1
@@ -188,10 +193,10 @@ class CPUBackend(BaseBackend):
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         cpu.attach_target_triple(llvm_mod, cpu.get_default_target_triple())
-        target_features = ""
+        target_features = get_processor_features()
         llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, target_features)
 
-        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, "", [], options.enable_fp_fusion)
+        llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, target_features, [], options.enable_fp_fusion)
         metadata["shared"] = src.get_int_attr("ttg.shared")
 
         ret = str(llvm_mod)
