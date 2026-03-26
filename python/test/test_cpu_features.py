@@ -23,7 +23,7 @@ def kernel(X, Z, BLOCK: tl.constexpr):
 
 
 @pytest.mark.skipif(not is_x86(), reason="Cpu feature string test only supported on x86")
-def test_cpu_features(device):
+def test_cpu_features(device, monkeypatch):
 
     features = cpu_compiler.get_target_features()
 
@@ -35,7 +35,7 @@ def test_cpu_features(device):
         pytest.skip("AVX2 not supported on current platform")
 
     features_no_avx2 = features + ",-avx2"
-    os.environ.set("TRITON_CPU_TARGET_FEATURES", features_no_avx2)
+    monkeypatch.setenv("TRITON_CPU_TARGET_FEATURES", features_no_avx2)
 
     shape = 64
     x = numpy_random(shape, dtype_str="int16")
