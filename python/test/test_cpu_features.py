@@ -22,7 +22,7 @@ def kernel(X, Z, BLOCK: tl.constexpr):
     tl.store(Z, z)
 
 
-@pytest.mark.skipif(not is_x86_cpu(), reason="Cpu feature test only supported on x86")
+@pytest.mark.skipif(not is_x86(), reason="Cpu feature string test only supported on x86")
 def test_cpu_features(device):
 
     features = cpu_compiler.get_target_features()
