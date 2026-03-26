@@ -1,5 +1,5 @@
 diff --git a/bin/RegisterTritonDialects.h b/bin/RegisterTritonDialects.h
-index eb07a50acd..fc739e87b6 100644
+index 3937157f3c..6de2ee26d4 100644
 --- a/bin/RegisterTritonDialects.h
 +++ b/bin/RegisterTritonDialects.h
 @@ -39,6 +39,10 @@
@@ -13,8 +13,8 @@ index eb07a50acd..fc739e87b6 100644
  #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
  #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
  #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
-@@ -175,6 +179,14 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
-     }
+@@ -156,6 +160,14 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
+     plugin.registerDialects(registry);
    }
  
 +  // CPU (TODO: integrate with the above framework)
@@ -28,7 +28,7 @@ index eb07a50acd..fc739e87b6 100644
    registry.insert<
        mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
        mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect,
-@@ -186,5 +198,5 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
+@@ -167,5 +179,5 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
        mlir::triton::amdgpu::TritonAMDGPUDialect,
        mlir::triton::proton::ProtonDialect,
        mlir::triton::proton::gpu::ProtonGPUDialect, mlir::ROCDL::ROCDLDialect,
