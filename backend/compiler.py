@@ -67,7 +67,11 @@ class CPUBackend(BaseBackend):
         self.binary_ext = "so"
 
     def parse_options(self, options):
-        args = {"arch": get_target_name(), "features": get_target_features()}
+        # TODO: can we use knobs here?
+        feature_override = os.environ.get("TRITON_CPU_TARGET_FEATURES")
+        target_features = feature_override if feature_override else get_target_features()
+
+        args = {"arch": get_target_name(), "features": target_features}
         if "enable_fp_fusion" not in options:
             args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(

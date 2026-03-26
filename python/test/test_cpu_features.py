@@ -35,6 +35,7 @@ def test_cpu_features(device):
         pytest.skip("AVX2 not supported on current platform")
 
     features_no_avx2 = features + ",-avx2"
+    os.environ.set("TRITON_CPU_TARGET_FEATURES", features_no_avx2)
 
     shape = 64
     x = numpy_random(shape, dtype_str="int16")
@@ -42,5 +43,5 @@ def test_cpu_features(device):
     z_tri = to_triton(numpy_random((1, ), dtype_str="int16"), device=device, dst_type="int16")
     compiled = kernel[(1, )](x_tri, z_tri, BLOCK=shape)
 
-    asm = compiled.asm
+    asm = compiled.asm['asm']
     assert "ymm" not in asm, "AVX2 instructions found despite -avx2"
