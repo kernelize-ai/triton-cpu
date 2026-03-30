@@ -157,7 +157,7 @@ jobs:
 
       - name: Upload kernel artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kernels
           path: ~/.triton/cache
