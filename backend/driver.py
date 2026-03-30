@@ -16,6 +16,11 @@ from triton.backends.compiler import GPUTarget
 _triton_C_dir = str(importlib.resources.files(triton).joinpath("_C"))
 
 
+def _driver_use_nexus() -> bool:
+    """Match compiler.py Nexus gating."""
+    return os.environ.get("TRITON_CPU_USE_NEXUS", "0") == "1"
+
+
 @functools.lru_cache()
 def is_macos():
     return platform.system() == "Darwin"
@@ -92,6 +97,43 @@ class CpuUtils(object):
         return {
             "max_num_regs": os.cpu_count() * 4, "max_shared_mem": 1024 * 1024 * 1024, "multiprocessor_count":
             os.cpu_count(), "warpSize": 1
+        }
+
+
+class NexusCpuUtils:
+    """
+    Load Triton CPU kernel shared libraries through Nexus (``Device.load_library``).
+    Returns ``(library, kernel, n_regs, n_spills, n_max_threads)`` so ``CompiledKernel``
+    can treat ``function`` as a Nexus ``Kernel`` handle for the Nexus launcher.
+    """
+
+    def unload_module(self, lib):
+        # Nexus libraries are reference-counted; nothing to dlclose from Python.
+        pass
+
+    def load_binary(self, name, kernel, shared_mem, device):
+        import nexus
+        device_idx = int(os.environ.get("TRITON_CPU_NEXUS_DEVICE", "0"))
+        rt = nexus.get_runtime("cpu")
+        dev = rt.get_device(device_idx)
+        # Keep temp file persistent: library may be JIT-compiled lazily on first run.
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".so", delete=False) as f:
+            f.write(kernel)
+            f.flush()
+            os.fsync(f.fileno())
+            os.stat(f.name)
+            library = dev.load_library(f.name)
+        if not library:
+            raise RuntimeError("Nexus: load_library failed (empty library handle)")
+        kern = library.get_kernel(name)
+        return (library, kern, 1, 0, 2**12)
+
+    def get_device_properties(self, *args):
+        return {
+            "max_num_regs": os.cpu_count() * 4,
+            "max_shared_mem": 1024 * 1024 * 1024,
+            "multiprocessor_count": os.cpu_count(),
+            "warpSize": int(os.environ.get("TRITON_CPU_WARP_SIZE", 1)),
         }
 
 
@@ -404,6 +446,54 @@ class CPULauncher(object):
         self.launch(gridX, gridY, gridZ, stream, function, *args)
 
 
+class NexusCPULauncher:
+    """
+    Python launcher for Nexus CPU: no generated C++ extension; uses ``Schedule`` /
+    ``Command`` (Core API: ``Device`` → ``Library`` → ``Kernel`` → ``Schedule`` → ``Command``).
+    ``function`` is the Nexus ``Kernel`` object returned from :meth:`NexusCpuUtils.load_binary`.
+    """
+
+    def __init__(self, src, metadata):
+        self.src = src
+        self.metadata = metadata
+
+    def __call__(self, gridX, gridY, gridZ, stream, kernel_handle, *args):
+        import nexus
+
+        packed_metadata = args[0]
+        launch_metadata = args[1]
+        enter_hook = args[2]
+        exit_hook = args[3]
+        kernel_args = args[4:]
+
+        num_warps = getattr(self.metadata, "num_warps", 1)
+        warp_size = getattr(self.metadata, "warp_size", int(os.environ.get("TRITON_CPU_WARP_SIZE", 1)))
+        shared_mem = packed_metadata[2] if packed_metadata is not None else self.metadata.shared
+
+        device_idx = int(os.environ.get("TRITON_CPU_NEXUS_DEVICE", "0"))
+
+        if enter_hook is not None:
+            enter_hook(launch_metadata)
+
+        rt = nexus.get_runtime("cpu")
+        dev = rt.get_device(device_idx)
+
+        sched = dev.create_schedule()
+        cmd = sched.create_command(kernel_handle)
+        runtime_arg_idx = 0
+        for (_, ty), val in zip(self.src.signature.items(), kernel_args):
+            if ty == "constexpr":
+                continue
+            st = cmd.set_arg(runtime_arg_idx, val)
+            runtime_arg_idx += 1
+
+        block_x = max(1, int(warp_size) * int(num_warps))
+        st = cmd.finalize([int(gridX), int(gridY), int(gridZ)], [block_x, 1, 1], int(shared_mem))
+        sched.run(blocking=True)
+        if exit_hook is not None:
+            exit_hook(launch_metadata)
+
+
 class CPUDeviceInterface:
 
     class HooksTimeAccessor:
@@ -469,10 +559,17 @@ class CPUDriver(DriverBase):
             return False
 
     def __init__(self):
-        self.utils = CpuUtils()
         import torch
-        self.get_current_stream = lambda idx: torch.cpu.Stream()
-        self.launcher_cls = CPULauncher
+
+        if _driver_use_nexus():
+            self.utils = NexusCpuUtils()
+            self.launcher_cls = NexusCPULauncher
+            # Nexus launch path creates its own stream inside ``Schedule.run``; stream handle from Torch is unused.
+            self.get_current_stream = lambda idx: None
+        else:
+            self.utils = CpuUtils()
+            self.launcher_cls = CPULauncher
+            self.get_current_stream = lambda idx: torch.cpu.Stream()
 
     def get_device_interface(self):
         return CPUDeviceInterface()
