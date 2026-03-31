@@ -472,6 +472,8 @@ static bool isFusible(Operation *defOp) {
     return true;
   if (isa<triton::ExpandDimsOp>(defOp))
     return true;
+  if (isa<triton::gpu::ConvertLayoutOp>(defOp))
+    return true;
   // tt.make_range can be fused by rewriting make_range to
   // ttc.make_dynamic_range, taking the chunk offset as a parameter
   if (isa<triton::MakeRangeOp>(defOp))
