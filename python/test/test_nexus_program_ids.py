@@ -1,4 +1,5 @@
 import os
+
 os.environ["TRITON_CPU_USE_NEXUS"] = "1"
 
 import torch
@@ -31,6 +32,7 @@ def test_nexus_program_ids():
     grid = lambda _: (grid_size, grid_size, grid_size)
     kernel[grid](output, GRID_SIZE=grid_size)
     assert torch.all(output == 1)
+
 
 if __name__ == "__main__":
     test_nexus_program_ids()
