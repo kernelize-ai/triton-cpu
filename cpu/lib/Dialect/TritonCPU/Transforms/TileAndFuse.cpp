@@ -504,15 +504,14 @@ static bool isFusible(Operation *defOp) {
     return true;
   if (isa<triton::BroadcastOp>(defOp))
     return true;
+#if 0
+  if (isa<triton::ExpandDimsOp>(defOp))
+      return true;
+#endif
   // tt.make_range can be fused by rewriting make_range to
   // ttc.make_dynamic_range, taking the chunk offset as a parameter
   if (isa<triton::MakeRangeOp>(defOp))
     return true;
-#if 0
-  // TODO: allow convert layout to be fused - but if the op is used elsewhere we should probably make a copy
-  if (isa<triton::gpu::ConvertLayoutOp>(defOp))
-      return true;
-#endif
   return false;
 }
 
@@ -662,18 +661,17 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
       }
     }
 #if 0
-    if (auto cvtOp = dyn_cast<triton::gpu::ConvertLayoutOp>(op)) {
-        // update the result type
-        auto inTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
-        auto outTy = cast<RankedTensorType>(cvtOp.getResult().getType());
-
-        mapping.map(cvtOp.getSrc(), body->addArgument(updateTensorType(inTy, sizePerThreadVec), cvtOp.getLoc()));
-
-        auto newCvt = triton::gpu::ConvertLayoutOp::create(rewriter, cvtOp.getLoc(), updateTensorType(outTy, sizePerThreadVec), mapping.lookup(cvtOp.getSrc()));
-        mapping.map(cvtOp.getResult(), newCvt.getResult());
+    // TODO: this works, but we also can't fuse the chain above this because we lose the information about which vector shape value to use....
+    if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+        uint32_t axis = expandDimsOp.getAxis();
+        Value operand = expandDimsOp.getSrc();
+        newIns.push_back(operand);
+        SmallVector<int32_t, 1> sizePerThreadAtAxis{sizePerThreadVec[axis]};
+        mapping.map(operand, body->addArgument(updateTensorType(operand.getType(),
+                                                                sizePerThreadAtAxis),
+                                               operand.getLoc()));
     }
 #endif
-
     for (Value operand : op->getOperands()) {
       if (mapping.contains(operand))
         continue;
