@@ -219,6 +219,237 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
   }
 };
 
+// Convert dot op nested in scf::ForOp loop to ttc.generic
+struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  struct KLoopDotInfo {
+    triton::DotOp dotOp;
+    unsigned cIterArgIdx;
+    SmallVector<std::pair<unsigned, Value>>
+        ptrArgs; // loop carried ptr values for A and B tile
+  };
+
+  static std::optional<KLoopDotInfo> matchKLoopWithDot(scf::ForOp forOp) {
+    if (forOp->getParentOfType<cpu::GenericOp>())
+      return std::nullopt;
+
+    triton::DotOp dotOp;
+    for (auto &op : *forOp.getBody()) {
+      if (auto d = dyn_cast<triton::DotOp>(&op)) {
+        if (dotOp)
+          return std::nullopt; // TODO: handle multiple dots?
+        dotOp = d;
+      }
+    }
+    if (!dotOp)
+      return std::nullopt;
+
+    // Dot result must have BlockedEncoding so we can derive
+    // blockShape/vectorShape.
+    auto resultTy = dyn_cast<RankedTensorType>(dotOp.getType());
+    if (!resultTy || !isa<gpu::BlockedEncodingAttr>(resultTy.getEncoding()))
+      return std::nullopt;
+
+    // C operand must be an iter_arg of this loop (not a constant or external
+    // value).
+    auto cArg = dyn_cast<BlockArgument>(dotOp.getC());
+    if (!cArg || cArg.getOwner() != forOp.getBody())
+      return std::nullopt;
+    unsigned numIVs = forOp.getNumInductionVars();
+    unsigned cArgNum = cArg.getArgNumber();
+    if (cArgNum < numIVs)
+      return std::nullopt;
+    unsigned cIterArgIdx = cArgNum - numIVs;
+
+    // C's init value must be a zero-splat constant — we reconstruct it at tile
+    // size inside the generic body.
+    auto cInitOp =
+        forOp.getInitArgs()[cIterArgIdx].getDefiningOp<arith::ConstantOp>();
+    if (!cInitOp)
+      return std::nullopt;
+    auto dense = dyn_cast<DenseElementsAttr>(cInitOp.getValue());
+    if (!dense || !dense.isSplat())
+      return std::nullopt;
+    if (auto fp = dyn_cast<FloatAttr>(dense.getSplatValue<Attribute>()))
+      if (!fp.getValue().isZero())
+        return std::nullopt;
+
+    // The yield must carry the dot result back as the updated C value.
+    auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+    if (yieldOp.getOperands()[cIterArgIdx] != dotOp.getResult())
+      return std::nullopt;
+
+    // Find pointer iter_args that are advanced by tt.addptr each iteration.
+    SmallVector<std::pair<unsigned, Value>> ptrArgs;
+    for (unsigned i = 0, e = forOp.getInitArgs().size(); i < e; ++i) {
+      if (i == cIterArgIdx)
+        continue;
+      Value iterArgVal = forOp.getBody()->getArgument(numIVs + i);
+      auto addPtrOp =
+          yieldOp.getOperands()[i].getDefiningOp<triton::AddPtrOp>();
+      if (!addPtrOp || addPtrOp.getPtr() != iterArgVal)
+        continue;
+      ptrArgs.push_back({i, addPtrOp.getOffset()});
+    }
+    if (ptrArgs.empty())
+      return std::nullopt;
+
+    return KLoopDotInfo{dotOp, cIterArgIdx, ptrArgs};
+  }
+
+  mlir::LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+
+#if 1
+    auto info = matchKLoopWithDot(forOp);
+    if (!info)
+      return failure();
+
+    Location loc = forOp.getLoc();
+    triton::DotOp dotOp = info->dotOp;
+    auto resultTy = cast<RankedTensorType>(dotOp.getType());
+    auto encoding = cast<gpu::BlockedEncodingAttr>(resultTy.getEncoding());
+
+    // TODO: this vector shape may be too small?
+    auto [blockShape, vectorShape] =
+        getBlockAndVectorShapes(resultTy, encoding);
+
+    SmallVector<Value> ins;
+
+    // add iter arg initializations to generic operand list first so we can keep
+    // track of them later
+    for (auto [argIdx, stride] : info->ptrArgs) {
+      ins.push_back(forOp.getInitArgs()[argIdx]); // initial value
+      ins.push_back(stride);                      // value to advance by
+    }
+    for (auto &op : *forOp.getBody()) {
+      if (isa<scf::YieldOp>(op))
+        continue;
+      for (Value operand : op.getOperands()) {
+        // Skip values defined inside the loop body (intermediate results,
+        // the induction variable, and iter_args).
+        if (operand.getParentBlock() == forOp.getBody())
+          continue;
+        ins.push_back(operand);
+      }
+    }
+    ins.push_back(forOp.getLowerBound());
+    ins.push_back(forOp.getUpperBound());
+    ins.push_back(forOp.getStep());
+
+    auto generic = cpu::GenericOp::create(rewriter, loc, TypeRange{resultTy},
+                                          ins, /*params= */ ValueRange{},
+                                          blockShape, vectorShape);
+
+    IRMapping outerMapping;
+    initGenericBody(rewriter, generic, ins, vectorShape, outerMapping);
+
+    // setup arguments for the K loop
+    SmallVector<Value> tilePtrInits, tilePtrStrides;
+    for (auto [argIdx, stride] : info->ptrArgs) {
+      tilePtrInits.push_back(outerMapping.lookup(forOp.getInitArgs()[argIdx]));
+      tilePtrStrides.push_back(outerMapping.lookup(stride));
+    }
+    Value kLb = outerMapping.lookup(forOp.getLowerBound());
+    Value kUb = outerMapping.lookup(forOp.getUpperBound());
+    Value kStep = outerMapping.lookup(forOp.getStep());
+
+    // copy the accumulator - TODO support slicing non-constant accumulators
+    auto tileAccTy =
+        cast<RankedTensorType>(updateTensorType(resultTy, vectorShape));
+    auto cInitConst = forOp.getInitArgs()[info->cIterArgIdx]
+                          .getDefiningOp<arith::ConstantOp>();
+    auto origSplat = cast<DenseElementsAttr>(cInitConst.getValue());
+    Value tileAcc = arith::ConstantOp::create(
+        rewriter, loc,
+        DenseElementsAttr::get(tileAccTy,
+                               *origSplat.getValues<Attribute>().begin()));
+
+    // clone the K loop
+    unsigned numIVs = forOp.getNumInductionVars();
+    auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+
+    SmallVector<Value> kIterInits = {tileAcc};
+    kIterInits.append(tilePtrInits);
+    auto kFor = scf::ForOp::create(rewriter, loc, kLb, kUb, kStep, kIterInits);
+
+    IRMapping loopMapping;
+    // map generic operand arguments to block arguments
+    for (auto [i, v] : llvm::enumerate(ins))
+      loopMapping.map(v, outerMapping.lookup(v));
+
+    // map existing loop induction var to new induction var and existing loop
+    // carried accumulator value to new loop region argument
+    loopMapping.map(forOp.getInductionVar(), kFor.getInductionVar());
+    loopMapping.map(forOp.getBody()->getArgument(numIVs + info->cIterArgIdx),
+                    kFor.getRegionIterArgs()[0]);
+
+    // map existing loop body arguments to cloned loop body arguments
+    for (auto [pairIdx, p] : llvm::enumerate(info->ptrArgs)) {
+      auto [argIdx, stride] = p;
+      loopMapping.map(forOp.getBody()->getArgument(numIVs + argIdx),
+                      kFor.getRegionIterArgs()[1 + pairIdx]);
+    }
+
+    // clone all loop body ops except yield
+    rewriter.setInsertionPointToStart(kFor.getBody());
+    for (auto &op : forOp.getBody()->without_terminator()) {
+      rewriter.clone(op, loopMapping);
+    }
+
+    Value newAcc = loopMapping.lookup(dotOp.getResult());
+    // new loop yields new accumulator + updated per-tile ptrs
+    SmallVector<Value> kYields = {newAcc};
+    for (auto [argIdx, stride] : info->ptrArgs)
+      kYields.push_back(loopMapping.lookup(yieldOp.getOperands()[argIdx]));
+    scf::YieldOp::create(rewriter, loc, kYields);
+
+    // yield the accumulated tile results from the newly created generic
+    rewriter.setInsertionPointAfter(kFor);
+    cpu::YieldOp::create(rewriter, loc, ValueRange{kFor.getResult(0)});
+
+    rewriter.replaceAllUsesWith(forOp.getResult(info->cIterArgIdx),
+                                generic.getResult(0));
+    rewriter.eraseOp(forOp);
+    return success();
+
+#else
+    Location loc = dotOp.getLoc();
+
+    if (dotOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    auto resultTensorTy = cast<RankedTensorType>(dotOp.getType());
+    auto encoding =
+        dyn_cast<gpu::BlockedEncodingAttr>(resultTensorTy.getEncoding());
+    if (!encoding)
+      return failure();
+
+    auto [blockShape, vectorShape] =
+        getBlockAndVectorShapes(resultTensorTy, encoding);
+
+    SmallVector<Value> ins(dotOp->getOperands().begin(),
+                           dotOp->getOperands().end());
+
+    auto generic = cpu::GenericOp::create(
+        rewriter, loc, /*resultTypes=*/TypeRange{resultTensorTy}, ins,
+        /*params=*/ValueRange{}, blockShape, vectorShape);
+
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, vectorShape, bodyMapping);
+    auto newDot = rewriter.clone(*dotOp, bodyMapping);
+    for (Value result : newDot->getResults())
+      result.setType(updateTensorType(result.getType(), vectorShape));
+    cpu::YieldOp::create(rewriter, loc, newDot->getResults());
+
+    rewriter.replaceOp(dotOp, generic.getResults());
+#endif
+    return success();
+  }
+};
+
 // Returns true if defOp can be cloned into a generic body during fusion.
 // Reduction generics (cpu::GenericOp with scalar results) are not fusible —
 // their scalar outputs become params of the consumer, not tiled ins.
@@ -237,10 +468,17 @@ static bool isFusible(Operation *defOp) {
   // tt.splat broadcasts a scalar to a tensor; the scalar input becomes a param.
   if (isa<triton::SplatOp>(defOp))
     return true;
+  if (isa<triton::BroadcastOp>(defOp))
+    return true;
   // tt.make_range can be fused by rewriting make_range to
   // ttc.make_dynamic_range, taking the chunk offset as a parameter
   if (isa<triton::MakeRangeOp>(defOp))
     return true;
+#if 0
+  // TODO: allow convert layout to be fused - but if the op is used elsewhere we should probably make a copy
+  if (isa<triton::gpu::ConvertLayoutOp>(defOp))
+      return true;
+#endif
   return false;
 }
 
@@ -389,6 +627,18 @@ static void fuseInputs(IRRewriter &rewriter, cpu::GenericOp genericOp) {
         continue;
       }
     }
+#if 0
+    if (auto cvtOp = dyn_cast<triton::gpu::ConvertLayoutOp>(op)) {
+        // update the result type
+        auto inTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
+        auto outTy = cast<RankedTensorType>(cvtOp.getResult().getType());
+
+        mapping.map(cvtOp.getSrc(), body->addArgument(updateTensorType(inTy, sizePerThreadVec), cvtOp.getLoc()));
+
+        auto newCvt = triton::gpu::ConvertLayoutOp::create(rewriter, cvtOp.getLoc(), updateTensorType(outTy, sizePerThreadVec), mapping.lookup(cvtOp.getSrc()));
+        mapping.map(cvtOp.getResult(), newCvt.getResult());
+    }
+#endif
 
     for (Value operand : op->getOperands()) {
       if (mapping.contains(operand))
@@ -453,6 +703,7 @@ struct TritonCPUTileAndFusePass
     // Step 1: Create the generic ops
     patterns.add<WrapStores>(context, benefitDefault);
     patterns.add<WrapReduceOp>(context, benefitDefault);
+    patterns.add<WrapKLoopWithDotOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
