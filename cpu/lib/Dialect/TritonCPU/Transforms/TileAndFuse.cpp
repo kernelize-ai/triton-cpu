@@ -26,6 +26,8 @@ static Type updateTensorType(Type t, ArrayRef<int32_t> vectorShape) {
   auto tensorType = dyn_cast<RankedTensorType>(t);
   if (!tensorType)
     return t;
+  assert(tensorType.getShape().size() == vectorShape.size() &&
+         "expected tensor shape and vector shape to be the same during update");
   return RankedTensorType::get(
       llvm::to_vector(
           llvm::map_range(vectorShape, [](int32_t s) { return int64_t(s); })),
@@ -396,7 +398,16 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     // clone all loop body ops except yield
     rewriter.setInsertionPointToStart(kFor.getBody());
     for (auto &op : forOp.getBody()->without_terminator()) {
-      rewriter.clone(op, loopMapping);
+      auto *cloned = rewriter.clone(op, loopMapping);
+      for (Value result : cloned->getResults()) {
+        // TODO: if we copy in 1D tensor types this won't work...
+        if (auto resultTensorTy =
+                dyn_cast<RankedTensorType>(result.getType())) {
+          assert(resultTensorTy.getShape().size() == 2 &&
+                 "expected only rank-2 tensors in K loop");
+          result.setType(updateTensorType(result.getType(), vectorShape));
+        }
+      }
     }
 
     Value newAcc = loopMapping.lookup(dotOp.getResult());
@@ -412,6 +423,29 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
 
     rewriter.replaceAllUsesWith(forOp.getResult(info->cIterArgIdx),
                                 generic.getResult(0));
+
+    // erase unused generic op arguments
+    // TODO: is this really needed? what if instead of populating generic
+    // operands up front we created empty operands and then updated them at the
+    // end as we added ops into the block?
+    SmallVector<Value> newIns(generic.getIns().begin(), generic.getIns().end());
+    SmallVector<unsigned> argsToErase;
+    Block *body = &generic.getBody().front();
+    for (auto [idx, pair] : llvm::enumerate(
+             llvm::zip(generic.getIns(), body->getArguments().drop_front()))) {
+      auto [operand, arg] = pair;
+      if (arg.use_empty())
+        argsToErase.push_back(idx);
+    }
+    llvm::sort(argsToErase);
+    for (auto idx : llvm::reverse(argsToErase)) {
+      // offset by 1 since there is one induction variable (tile offset)
+      body->eraseArgument(1 + idx);
+      newIns.erase(newIns.begin() + idx);
+    }
+    rewriter.modifyOpInPlace(generic,
+                             [&]() { generic.getInsMutable().assign(newIns); });
+
     rewriter.eraseOp(forOp);
     return success();
 
