@@ -2,9 +2,12 @@ import os
 
 os.environ["TRITON_CPU_USE_NEXUS"] = "1"
 
+import pytest
 import torch
 import triton
 import triton.language as tl
+
+pytest.importorskip("nexus")
 
 
 def test_nexus_program_ids():
