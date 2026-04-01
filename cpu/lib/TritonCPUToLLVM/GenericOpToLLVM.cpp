@@ -478,20 +478,52 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         // restore insertion point to loopHeader before creating the cond_br
         rewriter.setInsertionPointToEnd(loopHeader);
 
-#if 0
-        TypeConverter::SignatureConversion entryConversion(
-            bodyEntry->getNumArguments());
-        for (auto [i, argTy] : llvm::enumerate(bodyEntry->getArgumentTypes())) {
-          Type convertedTy = getTypeConverter()->convertType(argTy);
-          entryConversion.addInputs(i, convertedTy ? convertedTy : argTy);
-        }
-        bodyEntry = rewriter.applySignatureConversion(bodyEntry, entryConversion);
-#endif
-
         // tileOffset (i32) followed by the LLVM-converted operands.
         SmallVector<Value> entryArgs = {tileOffset};
-        entryArgs.append(adaptor.getOperands().begin(),
-                         adaptor.getOperands().end());
+
+        for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
+                 body->getArguments().drop_front(), adaptor.getOperands())) {
+          if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
+            // TODO: de-dupe with above
+            Type tileStructTy =
+                getTypeConverter()->convertType(origArg.getType());
+            auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
+            Type elemTy = structTy.getBody()[0];
+            Value tileStruct =
+                LLVM::UndefOp::create(rewriter, loc, tileStructTy);
+            for (unsigned j = 0; j < vectorSize; ++j) {
+              Value globalIdx =
+                  LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
+              Value gep = LLVM::GEPOp::create(
+                  rewriter, loc,
+                  LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
+                  ptrArg, ValueRange{globalIdx});
+              Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
+              tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
+                                                       tileStruct, elem, {j});
+            }
+#if 1
+            entryArgs.push_back(tileStruct);
+#else
+            entryArgs.push_back(UnrealizedConversionCastOp::create(
+                                   rewriter, loc, origArg.getType(), tileStruct)
+                                   .getResult(0));
+#endif
+          } else {
+            assert(!isa<RankedTensorType>(origArg.getType()) &&
+                   "tensor types are not allowed in compile-time generated "
+                   "generic tile loops");
+            // forward the type from the generic body to the loop body
+            assert(isa<PointerType>(origArg.getType()) ||
+                   origArg.getType() == llvmArg.getType() &&
+                       "expected non-tensor arguments to be unchanged by type "
+                       "conversion");
+            entryArgs.push_back(llvmArg);
+          }
+        }
+
+        // entryArgs.append(adaptor.getOperands().begin(),
+        //                  adaptor.getOperands().end());
         LLVM::CondBrOp::create(rewriter, loc, cond, bodyEntry, entryArgs,
                                afterBlock, /*exitArgs=*/{});
 
