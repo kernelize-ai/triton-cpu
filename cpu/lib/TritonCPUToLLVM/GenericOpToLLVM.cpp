@@ -5,6 +5,8 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 
 #include "PatternTritonGPUOpToLLVM.h"
 
@@ -12,6 +14,59 @@ using namespace mlir;
 using namespace mlir::triton;
 
 namespace {
+
+// Compute the LLVM struct field index for the j-th logical element of a tile
+// with the given tensor type.  For a #blocked layout the struct may have
+// padding entries (when sizePerThread[i] > tileShape[i]).  Elements are
+// enumerated in order[0]-fastest order (the same order the type-converter
+// uses), so position j does NOT necessarily land at struct field j.
+//
+// Example: tensor<1x8xf32, #blocked1{sizePerThread=[4,4], order=[1,0]}> has
+// 32 struct fields.  The 8 real elements (row=0, col=0..7) are at fields
+// {0,1,2,3,16,17,18,19} rather than {0..7}.
+static unsigned getBlockedStructPos(RankedTensorType tileType, unsigned j) {
+  auto enc =
+      dyn_cast<mlir::triton::gpu::BlockedEncodingAttr>(tileType.getEncoding());
+  if (!enc || tileType.getRank() != 2)
+    return j;
+
+  auto ll = triton::gpu::toLinearLayout(tileType);
+
+#if 1
+  return j;
+
+#else
+  auto shape = tileType.getShape();
+  int64_t d0 = shape[0], d1 = shape[1];
+  auto spt = enc.getSizePerThread();
+  unsigned s0 = spt[0], s1 = spt[1];
+  auto order = enc.getOrder(); // order[0] = fastest dim
+
+  unsigned row, col;
+  if (order[0] == 1) {
+    // dim 1 fastest → enumerate row-major (dim0 outer, dim1 inner)
+    row = j / d1;
+    col = j % d1;
+  } else {
+    // dim 0 fastest → enumerate col-major (dim1 outer, dim0 inner)
+    col = j / d0;
+    row = j % d0;
+  }
+
+  unsigned num_reps1 = llvm::divideCeil((uint64_t)d1, s1);
+  unsigned rep0 = row / s0, within_r = row % s0;
+  unsigned rep1 = col / s1, within_c = col % s1;
+
+  if (order[0] == 1) {
+    // dim1 inner: rep1 varies faster than rep0
+    return (rep0 * num_reps1 + rep1) * s0 * s1 + within_r * s1 + within_c;
+  } else {
+    // dim0 inner: rep0 varies faster than rep1
+    unsigned num_reps0 = llvm::divideCeil((uint64_t)d0, s0);
+    return (rep1 * num_reps0 + rep0) * s0 * s1 + within_c * s0 + within_r;
+  }
+#endif
+}
 
 struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   using ConvertOpToLLVMPattern<cpu::GenericOp>::ConvertOpToLLVMPattern;
@@ -219,6 +274,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
+    MLIRContext *ctx = op.getContext();
 
     auto blockShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("blockShape");
     auto vectorShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("vectorShape");
@@ -253,7 +309,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // TODO: we should probably check that generic results are only used by
     // other generics or we will run into conversion problems
     SmallVector<Value> tensorAccPtrs;
-    SmallVector<Type> tensorElemTys;
+    SmallVector<RankedTensorType> tensorAccTys;
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto func = op->getParentOfType<LLVM::LLVMFuncOp>();
     assert(func && "expected generic op to be inside an LLVM function");
@@ -262,8 +318,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     for (Type resultTy :
          llvm::drop_begin(op.getResultTypes(), numCombinerBlocks)) {
       auto tensorTy = cast<RankedTensorType>(resultTy);
-      Type elemTy = getTypeConverter()->convertType(tensorTy.getElementType());
-      tensorElemTys.push_back(elemTy);
+      tensorAccTys.push_back(tensorTy);
 
       // Use a thread-local global rather than an alloca to hold the tile
       // cache. Allocas of this size (blockSize * sizeof(elem)) overflow the
@@ -271,6 +326,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       // Thread-local globals are allocated once per thread, reused across
       // kernel invocations, and are safe for parallel execution since each
       // thread gets its own copy.
+      Type elemTy = getTypeConverter()->convertType(tensorTy.getElementType());
       auto globalArrayTy = LLVM::LLVMArrayType::get(elemTy, blockSize);
       std::string globalName;
       unsigned nameIdx = tensorAccPtrs.size();
@@ -320,24 +376,49 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     // Store each tile's results into the alloca'd arrays. tileOffset is the
     // starting global element index for this tile (i * vectorSize).
+    // TODO: a few things.
+    // (1) we cannot flatten the vector size here, really. if we do flatten it
+    // then we need to convert back to (x, y) coords. maybe we can do that with
+    // a linear layout? (2) because we're working in x,y space we want the
+    // global tensor register index for our (x,y) coord. so we need to invert
+    // the global linear layout, give it our (x,y) coord, and get back a
+    // register index for the gep
     auto scatterTiles = [&](ArrayRef<Value> tiles, Value tileOffset) {
       assert(allUsersAreGeneric &&
              "all users of generic op must be generic ops to support scattered "
              "tile materialization");
-      for (auto [tile, accPtr, elemTy] :
-           llvm::zip(tiles, tensorAccPtrs, tensorElemTys)) {
+      for (auto [tile, accPtr, tensorTy] :
+           llvm::zip(tiles, tensorAccPtrs, tensorAccTys)) {
         Type tileStructTy = getTypeConverter()->convertType(tile.getType());
         Value llvmTile = UnrealizedConversionCastOp::create(rewriter, loc,
                                                             tileStructTy, tile)
                              .getResult(0);
+
+        Type elemTy =
+            getTypeConverter()->convertType(tensorTy.getElementType());
+        auto ll = triton::gpu::toLinearLayout(tensorTy);
+        auto llFlat = ll.flattenOuts();
+
+        Value zero = b.i32_val(0);
+        StringAttr kBlock = str_attr("block");
+        StringAttr kWarp = str_attr("warp");
+        StringAttr kLane = str_attr("lane");
+        StringAttr kRegister = str_attr("register");
+
         for (unsigned j = 0; j < (unsigned)vectorSize; ++j) {
-          Value elem =
-              LLVM::ExtractValueOp::create(rewriter, loc, llvmTile, {j});
-          Value idx =
+          Value registerIdx =
               LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
+          auto offset = applyLinearLayout(loc, rewriter, llFlat,
+                                          {{kRegister, registerIdx},
+                                           {kLane, zero},
+                                           {kWarp, zero},
+                                           {kBlock, zero}});
+          assert(offset.size() == 1);
           Value gep = LLVM::GEPOp::create(
               rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-              elemTy, accPtr, ValueRange{idx});
+              elemTy, accPtr, ValueRange{offset.front().second});
+          Value elem =
+              LLVM::ExtractValueOp::create(rewriter, loc, llvmTile, {j});
           LLVM::StoreOp::create(rewriter, loc, elem, gep);
         }
       }
@@ -484,7 +565,46 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
                  body->getArguments().drop_front(), adaptor.getOperands())) {
           if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
+            auto operandTensorType =
+                cast<RankedTensorType>(op.getOperand(opIdx).getType());
+            auto ll = triton::gpu::toLinearLayout(operandTensorType);
+            auto llFlat = ll.flattenOuts();
+
+            StringAttr kBlock = str_attr("block");
+            StringAttr kWarp = str_attr("warp");
+            StringAttr kLane = str_attr("lane");
+            StringAttr kRegister = str_attr("register");
+
+#if 1
+            Type tileStructTy =
+                getTypeConverter()->convertType(origArg.getType());
+            auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
+            Type elemTy = structTy.getBody()[0];
+            Value tileStruct =
+                LLVM::UndefOp::create(rewriter, loc, tileStructTy);
+            Value zero = b.i32_val(0);
+            for (unsigned j = 0; j < vectorSize; ++j) {
+              Value registerIdx =
+                  LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
+              auto offset = applyLinearLayout(loc, rewriter, llFlat,
+                                              {{kRegister, registerIdx},
+                                               {kLane, zero},
+                                               {kWarp, zero},
+                                               { kBlock,
+                                                 zero }});
+              assert(offset.size() == 1);
+              Value gep = LLVM::GEPOp::create(
+                  rewriter, loc,
+                  LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
+                  ptrArg, ValueRange{offset.front().second});
+              Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
+              tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
+                                                       tileStruct, elem, {j});
+            }
+            entryArgs.push_back(tileStruct);
+#else
             // TODO: de-dupe with above
+            auto inlineTileOrigTy = cast<RankedTensorType>(origArg.getType());
             Type tileStructTy =
                 getTypeConverter()->convertType(origArg.getType());
             auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
@@ -499,15 +619,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                   LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
                   ptrArg, ValueRange{globalIdx});
               Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
-              tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
-                                                       tileStruct, elem, {j});
+              unsigned structPos = getBlockedStructPos(inlineTileOrigTy, j);
+              tileStruct = LLVM::InsertValueOp::create(
+                  rewriter, loc, tileStruct, elem, {structPos});
             }
-#if 1
             entryArgs.push_back(tileStruct);
-#else
-            entryArgs.push_back(UnrealizedConversionCastOp::create(
-                                   rewriter, loc, origArg.getType(), tileStruct)
-                                   .getResult(0));
 #endif
           } else {
             assert(!isa<RankedTensorType>(origArg.getType()) &&
