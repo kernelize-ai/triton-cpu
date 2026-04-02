@@ -477,19 +477,20 @@ class NexusCPULauncher:
 
         rt = nexus.get_runtime("cpu")
         dev = rt.get_device(device_idx)
-
-        sched = dev.create_schedule()
-        cmd = sched.create_command(kernel_handle)
+        if not hasattr(self, "sched"):
+            self.sched = dev.create_schedule()
+        if not hasattr(self, "cmd"):
+            self.cmd = self.sched.create_command(kernel_handle)
         runtime_arg_idx = 0
         for (_, ty), val in zip(self.src.signature.items(), kernel_args):
             if ty == "constexpr":
                 continue
-            st = cmd.set_arg(runtime_arg_idx, val)
+            st = self.cmd.set_arg(runtime_arg_idx, val)
             runtime_arg_idx += 1
 
         block_x = max(1, int(warp_size) * int(num_warps))
-        st = cmd.finalize([int(gridX), int(gridY), int(gridZ)], [block_x, 1, 1], int(shared_mem))
-        sched.run(blocking=True)
+        st = self.cmd.finalize([int(gridX), int(gridY), int(gridZ)], [block_x, 1, 1], int(shared_mem))
+        self.sched.run(blocking=True)
         if exit_hook is not None:
             exit_hook(launch_metadata)
 
