@@ -102,10 +102,31 @@ jobs:
       - name: CCache Stats
         run: ccache --print-stats
 
+      # Run one test.
+      - name: Run one test
+        working-directory: ./triton
+        env:
+          PYTHONFAULTHANDLER: "1"
+          PYTHONDEVMODE: "1"
+        run: python -m pytest ../python/test/test_program_ids.py -v
+
+      # Run one test.
+      - name: Run nexus test
+        working-directory: ./triton
+        env:
+          PYTHONFAULTHANDLER: "1"
+          PYTHONDEVMODE: "1"
+        run: python -m pytest ../python/test/test_nexus_program_ids.py -v
+
       # Local tests.
       - name: Run local tests
         working-directory: ./triton
-        run: python -m pytest ../python/test
+        env:
+          NEXUS_LOG_ENABLE: "1"
+          PYTHONFAULTHANDLER: "1"
+          PYTHONDEVMODE: "1"
+        run: python -m pytest ../python/test/test_nexus_program_ids.py ../python/test/test_program_ids.py -v
+
       - name: Run tutorial 03 on CPU
         working-directory: ./triton
         env:
