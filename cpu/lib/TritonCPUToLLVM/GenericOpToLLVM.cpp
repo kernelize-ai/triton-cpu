@@ -149,13 +149,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       break; // only one ttc.yield per generic body
     }
 
-#if 0
-    if (failed(rewriter.convertRegionTypes(bodyEntry->getParent(), *typeConverter))) {
-      // TODO: better error handling here
-      assert(false && "could not convert body types");
-    }
-#endif
-
     return bodyEntry;
   }
 
