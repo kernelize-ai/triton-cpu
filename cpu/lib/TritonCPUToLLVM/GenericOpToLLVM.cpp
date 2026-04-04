@@ -568,7 +568,19 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             auto operandTensorType =
                 cast<RankedTensorType>(op.getOperand(opIdx).getType());
             auto ll = triton::gpu::toLinearLayout(operandTensorType);
-            auto llFlat = ll.flattenOuts();
+            auto llFlat = ll.flattenOuts().invert();
+            llvm::errs() << "llFlat = " << llFlat << "\n";
+            auto tileFreeVarMasks = getFreeVariableMasks(operandTensorType);
+            uint32_t regMask = tileFreeVarMasks.lookup(str_attr("register"));
+            unsigned totalRegsPerTile =
+                triton::gpu::getTotalElemsPerThread(operandTensorType);
+            unsigned tileStride = totalRegsPerTile / (unsigned)vectorSize;
+
+            // Scale tileOffset from element-space to register-space
+            Value regBase = tileStride == 1
+                                ? tileOffset
+                                : LLVM::MulOp::create(rewriter, loc, tileOffset,
+                                                      b.i32_val(tileStride));
 
             StringAttr kBlock = str_attr("block");
             StringAttr kWarp = str_attr("warp");
@@ -585,7 +597,28 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             Value zero = b.i32_val(0);
             for (unsigned j = 0; j < vectorSize; ++j) {
               Value registerIdx =
-                  LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
+                  LLVM::AddOp::create(rewriter, loc, regBase, b.i32_val(j));
+              {
+#if 1
+                auto offset = llFlat.apply(
+                    {{ *llFlat.getInDimNames().begin(),
+                       j }});
+                assert(!offset.empty() && offset.front().first == kRegister);
+                llvm::errs() << j << " = " << offset.front().second << "\n";
+#else
+                auto offset = llFlat.apply(
+                    {{kRegister, j}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
+                assert(offset.size() == 1);
+                llvm::errs() << j << " = " << offset.front().second << "\n";
+#endif
+              }
+#if 1
+              auto offset =
+                  applyLinearLayout(loc, rewriter, llFlat,
+                                    {{ *llFlat.getInDimNames().begin(),
+                                       registerIdx }});
+              assert(!offset.empty() && offset.front().first == kRegister);
+#else
               auto offset = applyLinearLayout(loc, rewriter, llFlat,
                                               {{kRegister, registerIdx},
                                                {kLane, zero},
@@ -593,9 +626,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                                { kBlock,
                                                  zero }});
               assert(offset.size() == 1);
+#endif
+              // ll offset is in bytes so use a 1 byte gep
               Value gep = LLVM::GEPOp::create(
                   rewriter, loc,
-                  LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
+                  LLVM::LLVMPointerType::get(rewriter.getContext()), i8_ty,
                   ptrArg, ValueRange{offset.front().second});
               Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
               tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
