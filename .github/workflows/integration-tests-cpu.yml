@@ -106,13 +106,6 @@ jobs:
         working-directory: ./triton
         run: python -m pytest ../python/test --ignore=../python/test/nexus
 
-      # Nexus-backed CPU path (separate process from local tests above)
-      - name: Run Nexus tests
-        working-directory: ./triton
-        env:
-          NEXUS_LOG_ENABLE: "1"
-        run: python -m pytest ../python/test/nexus
-
       - name: Run tutorial 03 on CPU
         working-directory: ./triton
         env:
@@ -155,6 +148,21 @@ jobs:
       - name: Run C++ unittests
         working-directory: ./triton
         run: make test-cpp
+
+      # Nexus-backed CPU path (separate process from local tests above)
+      - name: Run Nexus tests
+        working-directory: ./triton
+        env:
+          NEXUS_LOG_ENABLE: "1"
+        run: python -m pytest ../python/test/nexus
+
+      - name: Run tutorial 01 with nexus
+        working-directory: ./triton
+        env:
+          TRITON_DEFAULT_BACKEND: "cpu"
+          TRITON_CPU_USE_NEXUS: "1"
+        run: python python/tutorials/01-vector-add.py
+
       - name: Inspect cache directories
         run: |
           mkdir -p ~/.triton
