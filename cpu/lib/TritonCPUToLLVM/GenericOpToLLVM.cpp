@@ -310,9 +310,17 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           return true;
         });
 
+    // TODO: cleanup this conditional soup
+    const bool genericHasTensorOutputs =
+        llvm::any_of(op->getResults(), [](Value result) {
+          return isa<RankedTensorType>(result.getType());
+        });
     const bool allUsersAreGeneric =
-        llvm::all_of(op->getUsers(),
-                     [](Operation *user) { return isa<cpu::GenericOp>(user); });
+        genericHasTensorOutputs
+            ? llvm::all_of(
+                  op->getUsers(),
+                  [](Operation *user) { return isa<cpu::GenericOp>(user); })
+            : true;
 
     // Store each tile's results into the alloca'd arrays. tileOffset is the
     // starting global element index for this tile (i * vectorSize).
@@ -391,6 +399,15 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       Value one = b.i32_val(1);
       Value numChunksVal = b.i32_val(numChunks);
 
+      if (hasReductions) {
+        // peel the first chunk to establish an initial "result" for reductions
+        auto firstArgs =
+            buildStaticChunkedArgs(op, adaptor, rewriter, 0, vectorSize);
+        auto firstTiles = cloneTileBody(op, rewriter, firstArgs,
+                                        /*tileOffset=*/b.i32_val(0), result);
+        scatterTiles(firstTiles, b.i32_val(0));
+      }
+
       Block *currentBlock = rewriter.getInsertionBlock();
       Block *afterBlock =
           rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
@@ -411,16 +428,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       Block *loopHeader =
           rewriter.createBlock(afterBlock, headerArgTypes, headerArgLocs);
+      Block *loopBody;
+      if (hasReductions)
+        loopBody = rewriter.createBlock(afterBlock);
 
       // currentBlock -> loopHeader(startI [, initAcc])
       rewriter.setInsertionPointToEnd(currentBlock);
       if (hasReductions) {
-        // peel the first chunk to establish an initial "result" for reductions
-        auto firstArgs =
-            buildStaticChunkedArgs(op, adaptor, rewriter, 0, vectorSize);
-        auto firstTiles = cloneTileBody(op, rewriter, firstArgs,
-                                        /*tileOffset=*/b.i32_val(0), result);
-        scatterTiles(firstTiles, b.i32_val(0));
         LLVM::BrOp::create(rewriter, loc,
                            SmallVector<Value>{b.i32_val(1), result},
                            loopHeader);
@@ -439,7 +453,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                         loopI, numChunksVal);
 
       if (hasReductions) {
-        Block *loopBody = rewriter.createBlock(afterBlock);
+        assert(loopBody);
         SmallVector<Value> exitArgs = {loopAcc};
         LLVM::CondBrOp::create(rewriter, loc, cond, loopBody, {}, afterBlock,
                                exitArgs);
@@ -505,71 +519,27 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
                  body->getArguments().drop_front(), adaptor.getOperands())) {
           if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
-            auto operandTensorType =
-                cast<RankedTensorType>(op.getOperand(opIdx).getType());
-            auto ll = triton::gpu::toLinearLayout(operandTensorType);
-            auto llFlat = ll.flattenOuts().invert();
-            llvm::errs() << "llFlat = " << llFlat << "\n";
-            auto tileFreeVarMasks = getFreeVariableMasks(operandTensorType);
-            uint32_t regMask = tileFreeVarMasks.lookup(str_attr("register"));
-            unsigned totalRegsPerTile =
-                triton::gpu::getTotalElemsPerThread(operandTensorType);
-            unsigned tileStride = totalRegsPerTile / (unsigned)vectorSize;
-
-            // Scale tileOffset from element-space to register-space
-            Value regBase = tileStride == 1
-                                ? tileOffset
-                                : LLVM::MulOp::create(rewriter, loc, tileOffset,
-                                                      b.i32_val(tileStride));
-
-            StringAttr kBlock = str_attr("block");
-            StringAttr kWarp = str_attr("warp");
-            StringAttr kLane = str_attr("lane");
-            StringAttr kRegister = str_attr("register");
-
+            // The scatter path (scatterTiles) stores element (row, col) at
+            // accPtr[row * blockCols + col], i.e. row-major order.  For
+            // consumer tile i with tileOffset = i * vectorSize, the j-th
+            // element sits at flat index tileOffset + j:
+            //   row = i / colTiles,  col = (i % colTiles) * vc + j
+            //   row * blockCols + col = i * vc + j = tileOffset + j
+            // This identity holds for any producer/consumer tile shape, so
+            // no layout inversion or stride scaling is needed.
             Type tileStructTy =
                 getTypeConverter()->convertType(origArg.getType());
             auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
             Type elemTy = structTy.getBody()[0];
             Value tileStruct =
                 LLVM::UndefOp::create(rewriter, loc, tileStructTy);
-            Value zero = b.i32_val(0);
             for (unsigned j = 0; j < vectorSize; ++j) {
-              Value registerIdx =
-                  LLVM::AddOp::create(rewriter, loc, regBase, b.i32_val(j));
-              {
-#if 1
-                auto offset = llFlat.apply(
-                    {{ *llFlat.getInDimNames().begin(),
-                       j }});
-                assert(!offset.empty() && offset.front().first == kRegister);
-                llvm::errs() << j << " = " << offset.front().second << "\n";
-#else
-                auto offset = llFlat.apply(
-                    {{kRegister, j}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
-                assert(offset.size() == 1);
-                llvm::errs() << j << " = " << offset.front().second << "\n";
-#endif
-              }
-#if 1
-              auto offset =
-                  applyLinearLayout(loc, rewriter, llFlat,
-                                    {{ *llFlat.getInDimNames().begin(),
-                                       registerIdx }});
-              assert(!offset.empty() && offset.front().first == kRegister);
-#else
-              auto offset = applyLinearLayout(loc, rewriter, llFlat,
-                                              {{kRegister, registerIdx},
-                                               {kLane, zero},
-                                               {kWarp, zero},
-                                               {kBlock, zero}});
-              assert(offset.size() == 1);
-#endif
-              // ll offset is in bytes so use a 1 byte gep
+              Value idx =
+                  LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
               Value gep = LLVM::GEPOp::create(
                   rewriter, loc,
-                  LLVM::LLVMPointerType::get(rewriter.getContext()), i8_ty,
-                  ptrArg, ValueRange{offset.front().second});
+                  LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
+                  ptrArg, ValueRange{idx});
               Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
               tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
                                                        tileStruct, elem, {j});
