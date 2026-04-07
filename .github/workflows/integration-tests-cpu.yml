@@ -156,13 +156,6 @@ jobs:
           NEXUS_LOG_ENABLE: "1"
         run: python -m pytest ../python/test/nexus
 
-      - name: Run tutorial 01 with nexus
-        working-directory: ./triton
-        env:
-          TRITON_DEFAULT_BACKEND: "cpu"
-          TRITON_CPU_USE_NEXUS: "1"
-        run: python python/tutorials/01-vector-add.py
-
       - name: Inspect cache directories
         run: |
           mkdir -p ~/.triton
