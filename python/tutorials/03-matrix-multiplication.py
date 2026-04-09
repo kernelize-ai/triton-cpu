@@ -223,7 +223,7 @@ def get_cpu_autotune_config():
         #{'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 4, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
         #{'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
         #{'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
-        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 16, 'GROUP_SIZE_M': 1},
     ]
     return [triton.Config(s | {'matrix_instr_nonkdim': 16}, num_warps=1, num_stages=2) for s in sizes]
 

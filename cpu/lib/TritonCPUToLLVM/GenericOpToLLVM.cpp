@@ -175,26 +175,32 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
         auto yieldOpValues = llvm::to_vector(llvm::map_range(
             yieldOp.getValues(), [&](Value v) { return mapping.lookup(v); }));
-        if (!result) {
-          result = yieldOpValues[0];
-        } else {
-          // combine with the previous reduction result using the same
-          // combiner region
-          auto *combinerBlock = &op.getCombiners().front();
-          IRMapping combMapping;
-          combMapping.map(combinerBlock->getArgument(0), result);
-          combMapping.map(combinerBlock->getArgument(1), yieldOpValues[0]);
+        // TODO: this is messy. we should really differentiate the reductions
+        // path
+        if (hasReductions) {
+          if (!result) {
+            result = yieldOpValues[0];
+          } else {
+            // combine with the previous reduction result using the same
+            // combiner region
+            auto *combinerBlock = &op.getCombiners().front();
+            IRMapping combMapping;
+            combMapping.map(combinerBlock->getArgument(0), result);
+            combMapping.map(combinerBlock->getArgument(1), yieldOpValues[0]);
 
-          auto terminator = cast<cpu::YieldOp>(combinerBlock->getTerminator());
-          auto yieldVals = terminator.getValues();
-          assert(yieldVals.size() == 1 &&
-                 "expected exactly one value yielded from the combiner block");
+            auto terminator =
+                cast<cpu::YieldOp>(combinerBlock->getTerminator());
+            auto yieldVals = terminator.getValues();
+            assert(
+                yieldVals.size() == 1 &&
+                "expected exactly one value yielded from the combiner block");
 
-          Operation *combinerOp = yieldVals.front().getDefiningOp();
-          assert(combinerOp && "expected yielded value to be defined by an "
-                               "op in the combiner block");
-          auto newCombiner = rewriter.clone(*combinerOp, combMapping);
-          result = newCombiner->getResult(0);
+            Operation *combinerOp = yieldVals.front().getDefiningOp();
+            assert(combinerOp && "expected yielded value to be defined by an "
+                                 "op in the combiner block");
+            auto newCombiner = rewriter.clone(*combinerOp, combMapping);
+            result = newCombiner->getResult(0);
+          }
         }
 
         // materialzied tensor values are currently added to yield op after
@@ -381,7 +387,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // tensors within the body of the generic. If we only have 1 chunk then
     // there's no need to generate the runtime loop and we "unroll" regardless
     // of the input type
-    if (requiresTensorArgMaterialization || numChunks == 1) {
+    if (requiresTensorArgMaterialization /*|| numChunks == 1*/) {
       assert(allUsersAreGeneric && "generics materializing tensors for other "
                                    "ops should not be unrolled");
       for (unsigned i = 0; i < numChunks; ++i) {
@@ -519,27 +525,43 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
                  body->getArguments().drop_front(), adaptor.getOperands())) {
           if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
-            // The scatter path (scatterTiles) stores element (row, col) at
-            // accPtr[row * blockCols + col], i.e. row-major order.  For
-            // consumer tile i with tileOffset = i * vectorSize, the j-th
-            // element sits at flat index tileOffset + j:
-            //   row = i / colTiles,  col = (i % colTiles) * vc + j
-            //   row * blockCols + col = i * vc + j = tileOffset + j
-            // This identity holds for any producer/consumer tile shape, so
-            // no layout inversion or stride scaling is needed.
             Type tileStructTy =
                 getTypeConverter()->convertType(origArg.getType());
             auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
             Type elemTy = structTy.getBody()[0];
             Value tileStruct =
                 LLVM::UndefOp::create(rewriter, loc, tileStructTy);
+
+            llvm::errs() << "operand = " << op.getOperand(opIdx) << "\n";
+            auto operandType =
+                cast<RankedTensorType>(op.getOperand(opIdx).getType());
+            llvm::errs() << "operand type = " << operandType << "\n";
+            auto ll = triton::gpu::toLinearLayout(operandType);
+            llvm::errs() << "ll = " << ll << "\n";
+            auto llFlat = ll.flattenOuts();
+            llvm::errs() << "llFlat = " << llFlat << "\n";
+            Value zero = b.i32_val(0);
+            StringAttr kBlock = str_attr("block");
+            StringAttr kWarp = str_attr("warp");
+            StringAttr kLane = str_attr("lane");
+            StringAttr kRegister = str_attr("register");
             for (unsigned j = 0; j < vectorSize; ++j) {
-              Value idx =
+              Value registerIdx =
                   LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
+              auto offsetPrint = llFlat.apply(
+                  {{kRegister, j}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
+              assert(offsetPrint.size() == 1);
+              llvm::errs() << j << " = " << offsetPrint.front().second << "\n";
+              auto offset = applyLinearLayout(loc, rewriter, llFlat,
+                                              {{kRegister, registerIdx},
+                                               {kLane, zero},
+                                               {kWarp, zero},
+                                               {kBlock, zero}});
+              assert(offset.size() == 1);
               Value gep = LLVM::GEPOp::create(
                   rewriter, loc,
                   LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
-                  ptrArg, ValueRange{idx});
+                  ptrArg, ValueRange{offset.front().second});
               Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
               tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
                                                        tileStruct, elem, {j});

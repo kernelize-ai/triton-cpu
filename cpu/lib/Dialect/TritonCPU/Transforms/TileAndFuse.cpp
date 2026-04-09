@@ -7,6 +7,8 @@
 
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
+#include "triton/Analysis/Utility.h"
+
 #define DEBUG_TYPE "tritoncpu-tile-and-fuse"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
@@ -101,6 +103,162 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
 
     rewriter.replaceOp(storeOp, generic.getResults());
     return success();
+  }
+};
+
+// TODO: rename cvtChangesVectorSize or some such?
+static bool shouldWrapCvt(triton::gpu::ConvertLayoutOp cvtOp) {
+  auto sourceType = cast<RankedTensorType>(cvtOp.getSrc().getType());
+  auto destEncoding =
+      cast<RankedTensorType>(cvtOp.getResult().getType()).getEncoding();
+
+  // TODO: will the convert layout fold away if this is true? maybe this entire
+  // function is not necessary
+  const bool areLayoutsEquivalent = triton::gpu::areLayoutsEquivalent(
+      sourceType.getShape(),
+      cast<triton::gpu::LayoutEncodingTrait>(sourceType.getEncoding()),
+      cast<triton::gpu::LayoutEncodingTrait>(destEncoding));
+  return !areLayoutsEquivalent;
+}
+
+struct WrapConvertLayoutOp
+    : public mlir::OpRewritePattern<triton::gpu::ConvertLayoutOp> {
+  using OpRewritePattern<triton::gpu::ConvertLayoutOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::gpu::ConvertLayoutOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *ctx = op.getContext();
+
+    // Don't re-wrap reductions already inside a ttc.generic.
+    if (op->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    if (shouldWrapCvt(op)) {
+      auto operand = op.getSrc();
+
+      auto tensorTy = cast<RankedTensorType>(operand.getType());
+      auto encoding =
+          dyn_cast<gpu::BlockedEncodingAttr>(tensorTy.getEncoding());
+      if (!encoding)
+        return failure();
+
+      auto convertedTensorTy = cast<RankedTensorType>(op.getResult().getType());
+
+      LinearLayout conversion = minimalCvtLayout(tensorTy, convertedTensorTy);
+      LinearLayout srcLayout = triton::gpu::toLinearLayout(tensorTy);
+      LinearLayout dstLayout = triton::gpu::toLinearLayout(convertedTensorTy);
+      llvm::errs() << "conversion layout = " << conversion << "\n";
+      llvm::errs() << "src layout = " << srcLayout << "\n";
+      llvm::errs() << "dst layout = " << dstLayout << "\n";
+      auto dims = llvm::to_vector(conversion.getInDimNames());
+      assert(dims.size() == 1 &&
+             "expected only register-dim layout conversion");
+      auto kRegister = StringAttr::get(ctx, "register");
+      auto bases = conversion.getBases();
+      auto &regBase = bases[kRegister];
+
+      int identityStartReg = -1;
+      for (int idx = (int)regBase.size() - 1; idx >= 0; --idx) {
+        assert(regBase[idx].size() == 1);
+        if ((1 << idx) != regBase[idx][0]) {
+          identityStartReg = 1 << idx;
+          break;
+        }
+      }
+
+      // TODO: feed identityStartReg back into the src layout to find x,y coords
+      // and use as vector size.
+      auto kBlock = StringAttr::get(ctx, "block");
+      auto kWarp = StringAttr::get(ctx, "warp");
+      auto kLane = StringAttr::get(ctx, "lane");
+#if 0
+      auto srcMapping = srcLayout.apply({{kRegister, identityStartReg}, {kBlock, 0}, {kWarp, 0}, {kLane, 0}});
+      for (auto [k, v] : srcMapping)
+        llvm::errs() << k << " = " << v << "\n";
+
+    auto dstMapping = dstLayout.apply({{kRegister, identityStartReg}, {kBlock, 0}, {kWarp, 0}, {kLane, 0}});
+    for (auto [k, v] : dstMapping)
+        llvm::errs() << k << " = " << v << "\n";
+#endif
+
+      // numBits = log2(identityStartReg), e.g. log2(128) = 7
+      int numBits = llvm::Log2_32(identityStartReg);
+
+      // For a layout, sum basis contributions across the first numBits register
+      // bits per output dimension. Since all contributions are distinct powers
+      // of 2, the sum equals the max reachable coordinate, so tile extent = sum
+      // + 1.
+      auto tileFootprint = [&](const LinearLayout &layout) {
+        int numOutDims = layout.getNumOutDims();
+        SmallVector<int32_t> extents(numOutDims, 0);
+        for (int i = 0; i < numBits; ++i) {
+          ArrayRef<int32_t> basisVec = layout.getBasis(kRegister, i);
+          for (int d = 0; d < numOutDims; ++d)
+            extents[d] += basisVec[d];
+        }
+        for (auto &e : extents)
+          ++e; // 0..max → size = max + 1
+        return extents;
+      };
+
+      auto srcExtents = tileFootprint(srcLayout);
+      auto dstExtents = tileFootprint(dstLayout);
+
+      SmallVector<int32_t> tileSize(srcExtents.size());
+      for (auto [d, _] : llvm::enumerate(tileSize))
+        tileSize[d] = std::max(srcExtents[d], dstExtents[d]);
+
+      // only wrap blocked->blocked conversions
+      if (!isa<triton::gpu::BlockedEncodingAttr>(
+              convertedTensorTy.getEncoding()))
+        return failure();
+
+      auto [srcBlockShape, srcVectorShape] =
+          getBlockAndVectorShapes(tensorTy, encoding);
+      auto [destBlockShape, destVectorShape] = getBlockAndVectorShapes(
+          convertedTensorTy, cast<triton::gpu::BlockedEncodingAttr>(
+                                 convertedTensorTy.getEncoding()));
+
+#if 1
+      auto vectorShape = srcBlockShape;
+      auto blockShape = srcBlockShape;
+#else
+
+      assert(llvm::all_of(llvm::zip(srcBlockShape, destBlockShape),
+                          [](auto pair) -> bool {
+                            auto [s, d] = pair;
+                            return s == d;
+                          }) &&
+             "expected cvt src and dest block shapes to be equal");
+      auto blockShape = srcBlockShape;
+
+      auto vectorShape = llvm::to_vector(llvm::map_range(
+          llvm::zip(srcVectorShape, destVectorShape), [](auto pair) {
+            auto [s, d] = pair;
+            return std::max(s, d);
+          }));
+#endif
+      SmallVector<Value> ins(op->getOperands().begin(),
+                             op->getOperands().end());
+      auto generic = cpu::GenericOp::create(
+          rewriter, loc, /*resultTypes=*/TypeRange{op.getType()}, ins,
+          /*params=*/ValueRange{}, blockShape, vectorShape);
+
+      IRMapping bodyMapping;
+      initGenericBody(rewriter, generic, ins, vectorShape, bodyMapping);
+
+      auto newCvt = rewriter.clone(*op, bodyMapping);
+      // newCvt->getResult(0).setType(
+      // updateTensorType(op.getResult().getType(), vectorShape));
+      cpu::YieldOp::create(rewriter, loc, newCvt->getResults());
+
+      rewriter.replaceOp(op, generic.getResult(0));
+      return success();
+    }
+
+    return failure();
   }
 };
 
@@ -456,6 +614,10 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
 static bool isFusible(Operation *defOp) {
   if (!defOp)
     return false;
+  if (auto cvtOp = dyn_cast<triton::gpu::ConvertLayoutOp>(defOp)) {
+    // only fuse cvt ops which are not wrapped
+    return !shouldWrapCvt(cvtOp);
+  }
   if (isa<arith::ConstantOp>(defOp))
     return true;
   if ((isa<arith::ArithDialect, math::MathDialect>(defOp->getDialect())) &&
@@ -471,8 +633,6 @@ static bool isFusible(Operation *defOp) {
   if (isa<triton::BroadcastOp>(defOp))
     return true;
   if (isa<triton::ExpandDimsOp>(defOp))
-    return true;
-  if (isa<triton::gpu::ConvertLayoutOp>(defOp))
     return true;
   // tt.make_range can be fused by rewriting make_range to
   // ttc.make_dynamic_range, taking the chunk offset as a parameter
@@ -953,6 +1113,7 @@ struct TritonCPUTileAndFusePass
     // Step 1: Create the generic ops
     patterns.add<WrapStores>(context, benefitDefault);
     patterns.add<WrapReduceOp>(context, benefitDefault);
+    patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
     patterns.add<WrapKLoopWithDotOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
