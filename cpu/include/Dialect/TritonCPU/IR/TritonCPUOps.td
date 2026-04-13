@@ -254,11 +254,13 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
   }];
 
   let extraClassDeclaration = [{
-    Value getChunkOffset() { return getBody().front().getArgument(0); }
-    unsigned getNumInductionVars() { return 1; }
+    Value getChunkOffset(unsigned dim) { return getBody().front().getArgument(dim); }
+    unsigned getNumInductionVars() { return getBlockShape().size(); }
     unsigned getNumRegionIterArgs() {
       return getBody().front().getNumArguments() - getNumInductionVars();
     }
+
+    Attribute getEncoding();
   }];
 }
 

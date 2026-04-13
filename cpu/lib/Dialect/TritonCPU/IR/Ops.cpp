@@ -55,6 +55,19 @@ LogicalResult GenericOp::verify() {
     }
   }
 
+  // all operands must have the same encoding
+  Attribute tensorEncoding;
+  for (auto operand : getOperands()) {
+    if (auto tensorTy = dyn_cast<RankedTensorType>(operand.getType())) {
+      if (tensorEncoding && tensorEncoding != tensorTy.getEncoding())
+        return emitOpError("expects all tensor operands to have the same "
+                           "encoding, got ")
+               << tensorTy.getEncoding() << " with previous encoding "
+               << tensorEncoding;
+      tensorEncoding = tensorTy.getEncoding();
+    }
+  }
+
   // Body must exist and have the implicit induction variable arguments.
   Region &body = getBody();
   if (body.empty())
@@ -93,6 +106,16 @@ LogicalResult GenericOp::verify() {
   }
 
   return success();
+}
+
+// since all tensor operands must have the same encoding we can iterate generic
+// op operands and return the first tensor encoding
+Attribute GenericOp::getEncoding() {
+  for (const auto &operand : getOperands()) {
+    if (auto tensorTy = dyn_cast<RankedTensorType>(operand.getType()))
+      return tensorTy.getEncoding();
+  }
+  return Attribute{};
 }
 
 LogicalResult MakeDynamicRangeOp::verify() {
