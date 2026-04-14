@@ -32,21 +32,31 @@ class TileInfo {
 public:
   using TileShapeT = SmallVector<int32_t>;
 
-  TileInfo() = default;
+  TileInfo() = default; // uninitialized (bottom)
   explicit TileInfo(TileShapeT tiledShape)
-      : tiledShape(std::move(tiledShape)) {}
+      : tiledShape(std::move(tiledShape)), initialized(true) {}
+
+  static TileInfo getNoTile() {
+    TileInfo t;
+    t.initialized = true;
+    return t;
+  }
 
   static TileInfo getPessimisticValueState(Value v) {
     auto t = dyn_cast<RankedTensorType>(v.getType());
     if (!t)
-      return {};
+      return getNoTile();
     return TileInfo(TileShapeT(t.getShape()));
   }
 
   static TileInfo join(const TileInfo &lhs, const TileInfo &rhs) {
-    if (lhs.tiledShape.empty())
+    if (lhs.isUninitialized())
       return rhs;
-    if (rhs.tiledShape.empty())
+    if (rhs.isUninitialized())
+      return lhs;
+    if (lhs.isEmpty())
+      return rhs;
+    if (rhs.isEmpty())
       return lhs;
     assert(lhs.tiledShape.size() == rhs.tiledShape.size());
     TileShapeT result;
@@ -56,7 +66,7 @@ public:
   }
 
   bool operator==(const TileInfo &other) const {
-    return tiledShape == other.tiledShape;
+    return initialized == other.initialized && tiledShape == other.tiledShape;
   }
 
   // decltype?
@@ -66,7 +76,8 @@ public:
     return tiledShape[index];
   }
 
-  bool isEmpty() const { return tiledShape.empty(); }
+  bool isUninitialized() const { return !initialized; }
+  bool isEmpty() const { return initialized && tiledShape.empty(); }
   unsigned getRank() const { return tiledShape.size(); }
 
   void print(raw_ostream &os) const {
@@ -77,6 +88,7 @@ public:
 
 private:
   TileShapeT tiledShape;
+  bool initialized = false;
 };
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
@@ -114,9 +126,8 @@ protected:
     for (auto [i, result] : llvm::enumerate(defOp->getResults())) {
       auto resultLattice = getLatticeElement(result);
       // Wait for all the results to be initialized.
-      // TODO we probably need to differentiate between initialized and empty
-      // if (resultLattice->getValue().isEmpty())
-      // return;
+      if (resultLattice->getValue().isUninitialized())
+        return;
       lattices[i] = resultLattice->getValue().join(lattices[i],
                                                    resultLattice->getValue());
     }
@@ -134,7 +145,12 @@ protected:
     return;
   }
 
-  void setToExitState(dataflow::Lattice<TileInfo> *lattice) override { // no-op
+  void setToExitState(dataflow::Lattice<TileInfo> *lattice) override {
+    // Non-tensors have no tile shape — mark initialized so they don't block
+    // visitBranchOperand's wait-for-all-results check.
+    if (!isa<RankedTensorType>(lattice->getAnchor().getType()))
+      propagateIfChanged(lattice, lattice->join(TileInfo::getNoTile()));
+    // Tensors: leave uninitialized; downstream demands will populate.
   }
 
   void
@@ -162,7 +178,26 @@ protected:
 private:
   void propagateTileShape(dataflow::Lattice<TileInfo> *lattice,
                           TileInfo::TileShapeT shape) {
-    propagateIfChanged(lattice, lattice->join(TileInfo(std::move(shape))));
+    propagateIfChanged(lattice, lattice->join(TileInfo(shape)));
+    // If this is an scf.for iter_arg, also eagerly propagate to the
+    // corresponding yield operand. visitOperation for scf.yield is only
+    // triggered when yield's *results* change, but yield has no results —
+    // so it is never re-triggered after iter_args are populated. We close
+    // the loop-back edge here instead.
+    if (auto blockArg = dyn_cast<BlockArgument>(lattice->getAnchor())) {
+      auto forOp = dyn_cast<scf::ForOp>(blockArg.getOwner()->getParentOp());
+      if (!forOp)
+        return;
+      unsigned argIdx = blockArg.getArgNumber();
+      unsigned numIVs = forOp.getNumInductionVars();
+      if (argIdx < numIVs)
+        return; // induction variable, not an iter_arg
+      unsigned iterIdx = argIdx - numIVs;
+      auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+      Value yieldOperand = yieldOp.getOperand(iterIdx);
+      auto *yieldLattice = getLatticeElement(yieldOperand);
+      propagateIfChanged(yieldLattice, yieldLattice->join(TileInfo(shape)));
+    }
   }
 };
 
@@ -208,7 +243,7 @@ LogicalResult TileInfoAnalysis::visitOperation(
 
   assert(results.size() == 1 && "only single-result ops supported");
   const TileInfo &resultTileInfo = results[0]->getValue();
-  if (resultTileInfo.isEmpty())
+  if (resultTileInfo.isUninitialized())
     return success();
 
   if (auto expandOp = dyn_cast<triton::ExpandDimsOp>(op)) {
@@ -858,7 +893,8 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
         if (!lattice)
           llvm_unreachable("Latice not found.");
         auto tileShape = lattice->getValue();
-        llvm::errs() << "tile shape = " << tileShape << "\n";
+        // llvm::errs() << "op = " << op << "\n";
+        // llvm::errs() << "tile shape = " << tileShape << "\n";
 
         if (auto resultTensorTy =
                 dyn_cast<RankedTensorType>(result.getType())) {
