@@ -61,7 +61,11 @@ public:
     assert(lhs.tiledShape.size() == rhs.tiledShape.size());
     TileShapeT result;
     for (auto [l, r] : llvm::zip(lhs.tiledShape, rhs.tiledShape))
-      result.push_back(std::max(l, r)); // max = less tiled = safer
+      result.push_back(
+          std::min(l, r)); // min: 0 (not-tiled) wins over any tile size
+    // TODO: what about if l ==0 || r == 0 ? 0 : max()? or maybe we should just
+    // pick 0 or assert equality
+    // TODO: also why do we have both empty and 0?
     return TileInfo(result);
   }
 
@@ -80,7 +84,21 @@ public:
   bool isEmpty() const { return initialized && tiledShape.empty(); }
   unsigned getRank() const { return tiledShape.size(); }
 
+  bool dimIsTiled(const unsigned dim) const {
+    assert(!isUninitialized() && dim < tiledShape.size());
+    return tiledShape[dim] != 0;
+  }
+
+  // initialized but not tiled returns true, all other returns false
+  bool isNotTiled() const {
+    return llvm::all_of(tiledShape, [](int64_t t) { return t == 0; });
+  }
+
   void print(raw_ostream &os) const {
+    if (isUninitialized()) {
+      os << "UNINITIALIZED";
+      return;
+    }
     os << "[";
     llvm::interleaveComma(tiledShape, os);
     os << "]";
@@ -135,6 +153,17 @@ protected:
     if (auto forOp = dyn_cast<scf::ForOp>(defOp)) {
       auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
       propagateToYield(yieldOp, lattices);
+      // Also propagate result lattices back to the iter_arg initial values so
+      // that tile shapes escape the loop to upstream chains. Use
+      // propagateTileShape (not bare propagateIfChanged) so that if an init
+      // arg is a generic body block arg, the extra ins-value propagation fires
+      // and the tile shape crosses the generic region boundary too.
+      for (auto [i, lat] : llvm::enumerate(lattices)) {
+        if (lat.isUninitialized() || lat.isEmpty())
+          continue;
+        auto *initLattice = getLatticeElement(forOp.getInitArgs()[i]);
+        propagateTileShape(initLattice, llvm::to_vector(lat.getTiledShape()));
+      }
     } else if (auto ifOp = dyn_cast<scf::IfOp>(defOp)) {
       propagateToYield(ifOp.thenYield(), lattices);
       if (!ifOp.getElseRegion().empty())
@@ -185,18 +214,48 @@ private:
     // so it is never re-triggered after iter_args are populated. We close
     // the loop-back edge here instead.
     if (auto blockArg = dyn_cast<BlockArgument>(lattice->getAnchor())) {
-      auto forOp = dyn_cast<scf::ForOp>(blockArg.getOwner()->getParentOp());
-      if (!forOp)
-        return;
+      Block *block = blockArg.getOwner();
       unsigned argIdx = blockArg.getArgNumber();
-      unsigned numIVs = forOp.getNumInductionVars();
-      if (argIdx < numIVs)
-        return; // induction variable, not an iter_arg
-      unsigned iterIdx = argIdx - numIVs;
-      auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
-      Value yieldOperand = yieldOp.getOperand(iterIdx);
-      auto *yieldLattice = getLatticeElement(yieldOperand);
-      propagateIfChanged(yieldLattice, yieldLattice->join(TileInfo(shape)));
+
+      // scf.for iter_arg: close the loop-back edge to the yield operand.
+      // visitOperation for scf.yield is only triggered when yield's *results*
+      // change, but yield has no results, so we eagerly propagate here.
+      if (auto forOp = dyn_cast<scf::ForOp>(block->getParentOp())) {
+        unsigned numIVs = forOp.getNumInductionVars();
+        if (argIdx < numIVs)
+          return; // induction variable, not an iter_arg
+        unsigned iterIdx = argIdx - numIVs;
+        // Close the loop-back edge: iter_arg → yield operand.
+        auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+        Value yieldOperand = yieldOp.getOperand(iterIdx);
+        auto *yieldLattice = getLatticeElement(yieldOperand);
+        propagateIfChanged(yieldLattice, yieldLattice->join(TileInfo(shape)));
+        // Also propagate to the corresponding scf.for result so that
+        // visitBranchOperand is triggered. Without this the K-loop results
+        // stay UNINITIALIZED and visitBranchOperand (which waits for all
+        // results) never fires, blocking propagation out of the loop.
+        auto *resultLattice = getLatticeElement(forOp.getResult(iterIdx));
+        propagateIfChanged(resultLattice, resultLattice->join(TileInfo(shape)));
+        return;
+      }
+
+      // cpu::GenericOp body block arg: eagerly propagate to the corresponding
+      // ins value. visitNonControlFlowArguments is only called at region-entry
+      // initialisation and is not re-triggered when individual block arg
+      // lattices change later, so the tile shape would otherwise never escape
+      // the generic body to reach the ops outside it (e.g. make_range →
+      // expand_dims → generic ins).
+      if (auto genericOp = dyn_cast<cpu::GenericOp>(block->getParentOp())) {
+        unsigned numIVs = genericOp.getNumInductionVars();
+        if (argIdx < numIVs)
+          return; // induction variable
+        unsigned insIdx = argIdx - numIVs;
+        if (insIdx >= genericOp.getIns().size())
+          return;
+        Value insVal = genericOp.getIns()[insIdx];
+        auto *insLattice = getLatticeElement(insVal);
+        propagateIfChanged(insLattice, insLattice->join(TileInfo(shape)));
+      }
     }
   }
 };
@@ -225,12 +284,13 @@ LogicalResult TileInfoAnalysis::visitOperation(
     auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
     auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
 
-    // A [M, K]: tile M from encoding, K is full (reduction dim)
-    propagateTileShape(operands[0],
-                       {tileShapeMN[0], (int32_t)aTy.getShape()[1]});
-    // B [K, N]: K is full (reduction dim), tile N from encoding
-    propagateTileShape(operands[1],
-                       {(int32_t)bTy.getShape()[0], tileShapeMN[1]});
+    // A [M, K]: tile M from encoding, K is not tiled (reduction dim)
+    propagateTileShape(operands[0], {tileShapeMN[0], 0});
+    // B [K, N]: K is not tiled (reduction dim), tile N from encoding
+    propagateTileShape(operands[1], {0, tileShapeMN[1]});
+    // C [M, N]: accumulator has the same tile shape as the result
+    if (operands.size() > 2)
+      propagateTileShape(operands[2], {tileShapeMN[0], tileShapeMN[1]});
     return success();
   }
 
@@ -288,10 +348,11 @@ static Type updateTensorType(Type t, ArrayRef<int32_t> vectorShape) {
     return t;
   assert(tensorType.getShape().size() == vectorShape.size() &&
          "expected tensor shape and vector shape to be the same during update");
-  return RankedTensorType::get(
-      llvm::to_vector(
-          llvm::map_range(vectorShape, [](int32_t s) { return int64_t(s); })),
-      tensorType.getElementType(), tensorType.getEncoding());
+  SmallVector<int64_t> newShape;
+  for (auto [origDim, tileDim] : llvm::zip(tensorType.getShape(), vectorShape))
+    newShape.push_back(tileDim == 0 ? origDim : (int64_t)tileDim);
+  return RankedTensorType::get(newShape, tensorType.getElementType(),
+                               tensorType.getEncoding());
 }
 
 // Extract blockShape (full tensor shape) and vectorShape (sizePerThread) from
@@ -1165,18 +1226,35 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
       unsigned dim =
           sliceEncoding ? numInductionVars - 1 - sliceEncoding.getDim() : 0;
 #endif
-      auto newMakeRangeResultType =
-          updateTensorType(makeRangeTensorTy, tiledShape);
-      auto makeDynamicRangeOp = triton::cpu::MakeDynamicRangeOp::create(
-          rewriter, makeRangeOp.getLoc(), newMakeRangeResultType,
-          genericOp.getChunkOffset(dim));
-      LDBG("Rewrite make range to dynamic make range with type "
-           << newMakeRangeResultType);
-      mapping.map(makeRangeOp->getResults(), makeDynamicRangeOp->getResults());
+
+      auto *lattice = solver.lookupState<dataflow::Lattice<TileInfo>>(
+          makeRangeOp.getResult());
+      assert(lattice && "expected make range op lattice");
+      auto tileInfo = lattice->getValue();
+      llvm::errs() << "make range op from solver: " << lattice->getValue()
+                   << "\n";
+
+      Operation *newOp;
+      if (tileInfo.isNotTiled()) {
+        // clone without changing type?
+        newOp = rewriter.clone(*op, mapping);
+      } else {
+        auto newMakeRangeResultType =
+            updateTensorType(makeRangeTensorTy, tileInfo.getTiledShape());
+        llvm::errs() << "new make range type: " << newMakeRangeResultType
+                     << "\n";
+        newOp = triton::cpu::MakeDynamicRangeOp::create(
+            rewriter, makeRangeOp.getLoc(), newMakeRangeResultType,
+            genericOp.getChunkOffset(dim));
+        LDBG("Rewrite make range to dynamic make range with type "
+             << newMakeRangeResultType);
+      }
+
+      mapping.map(makeRangeOp->getResults(), newOp->getResults());
       if (auto it = insToArgIdx.find(makeRangeOp.getResult());
           it != insToArgIdx.end()) {
         body->getArgument(it->second + numInductionVars)
-            .replaceAllUsesWith(makeDynamicRangeOp.getResult());
+            .replaceAllUsesWith(newOp->getResult(0));
         insIdxToRemove.push_back(it->second);
       }
       continue;
@@ -1338,6 +1416,37 @@ struct TritonCPUTileAndFusePass
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }
+
+    // Debug helper: run the solver on each function and annotate every op
+    // result with its tile info as a "ttcpu.tile_info" string attribute.
+    // Remove before submitting.
+    m.walk([&](triton::FuncOp funcOp) {
+      SymbolTableCollection symbolTable;
+      DataFlowSolver solver;
+      solver.load<dataflow::DeadCodeAnalysis>();
+      solver.load<dataflow::SparseConstantPropagation>();
+      solver.load<TileInfoAnalysis>(symbolTable);
+      if (failed(solver.initializeAndRun(funcOp)))
+        return;
+      funcOp.walk([&](Operation *op) {
+        for (auto [i, result] : llvm::enumerate(op->getResults())) {
+          auto *lattice =
+              solver.lookupState<dataflow::Lattice<TileInfo>>(result);
+          std::string s;
+          llvm::raw_string_ostream os(s);
+          if (!lattice)
+            os << "no-lattice";
+          else
+            lattice->getValue().print(os);
+          op->setAttr(("ttcpu.tile_info." + llvm::Twine(i)).str(),
+                      StringAttr::get(context, s));
+        }
+      });
+    });
+
+    llvm::errs() << "### MODULE BEFORE FUSION ###\n";
+    m.dump();
+    llvm::errs() << "### END MODULE BEFORE FUSION ###\n";
 
     // Step 2: Fuse elementwise ops and loads into each generic, bottom-up.
     SmallVector<cpu::GenericOp> worklist;
