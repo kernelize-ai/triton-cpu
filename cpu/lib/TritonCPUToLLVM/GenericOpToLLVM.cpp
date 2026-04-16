@@ -18,6 +18,11 @@ namespace {
 struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   using ConvertOpToLLVMPattern<cpu::GenericOp>::ConvertOpToLLVMPattern;
 
+  GenericOpConversion(LLVMTypeConverter &converter,
+                      const TargetInfoBase &targetInfo, PatternBenefit benefit)
+      : ConvertOpToLLVMPattern<cpu::GenericOp>(converter, benefit),
+        targetInfo(targetInfo) {}
+
   // NOTE: Tensors materialized by generic ops and used by other generic ops
   // are lowered to alloca'd arrays to avoid loop-carried vector phi nodes
   // (which would overflow the stack for large block sizes). The alloca is
@@ -61,7 +66,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     SmallVector<Value> chunkedArgs;
 
     for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
-             body->getArguments().drop_front(), adaptor.getOperands())) {
+             body->getArguments().drop_front(op.getNumInductionVars()),
+             adaptor.getOperands())) {
 
       if (!isa<RankedTensorType>(origArg.getType())) {
         // forward constants and scalars without chunking
@@ -159,11 +165,15 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     Block *body = &op.getBody().front();
     const bool hasReductions = !op.getCombiners().empty();
 
+    assert(op.getVectorShape().size() == 1 &&
+           "clone tile body not yet supported for 2D generics");
+
     // clone the body of the generic op for this chunk only
     IRMapping mapping;
     mapping.map(body->getArgument(0), tileOffset);
     for (auto [bodyArg, chunkedArg] :
-         llvm::zip(body->getArguments().drop_front(), chunkedArgs))
+         llvm::zip(body->getArguments().drop_front(op.getNumInductionVars()),
+                   chunkedArgs))
       mapping.map(bodyArg, chunkedArg);
 
     SmallVector<Value> tensorTiles;
@@ -302,8 +312,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     Block *body = &op.getBody().front();
 
     const bool requiresTensorArgMaterialization = llvm::any_of(
-        llvm::enumerate(llvm::zip(body->getArguments().drop_front(),
-                                  adaptor.getOperands())),
+        llvm::enumerate(
+            llvm::zip(body->getArguments().drop_front(op.getNumInductionVars()),
+                      adaptor.getOperands())),
         [this, &op](auto pair) {
           auto [opIdx, argPair] = pair;
           auto [origArg, llvmArg] = argPair;
@@ -350,7 +361,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
         Type elemTy =
             getTypeConverter()->convertType(tensorTy.getElementType());
+        llvm::errs() << "scatter tensor ty = " << tensorTy << "\n";
         auto ll = triton::gpu::toLinearLayout(tensorTy);
+        llvm::errs() << "scatter ll = " << ll << "\n";
         auto llFlat = ll.flattenOuts();
 
         Value zero = b.i32_val(0);
@@ -370,9 +383,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           assert(offset.size() == 1);
           Value gep = LLVM::GEPOp::create(
               rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-              elemTy, accPtr, ValueRange{offset.front().second});
+              elemTy, accPtr, ValueRange{registerIdx});
           Value elem =
               LLVM::ExtractValueOp::create(rewriter, loc, llvmTile, {j});
+          targetInfo.printf(rewriter, "scatter %d (%d) = %f",
+                            {registerIdx, b.i32_val(j), elem});
           LLVM::StoreOp::create(rewriter, loc, elem, gep);
         }
       }
@@ -425,8 +440,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       if (hasReductions)
         afterResult = afterBlock->addArgument(result.getType(), loc);
 
-      SmallVector<Type> headerArgTypes = {i32_ty};
-      SmallVector<Location> headerArgLocs = {loc};
+      SmallVector<Type> headerArgTypes(1, i32_ty);
+      SmallVector<Location> headerArgLocs(1, loc);
       if (hasReductions) {
         headerArgTypes.push_back(result.getType());
         headerArgLocs.push_back(loc);
@@ -453,8 +468,80 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       rewriter.setInsertionPointToEnd(loopHeader);
       Value loopI = loopHeader->getArgument(0);
       Value loopAcc = hasReductions ? loopHeader->getArgument(1) : Value{};
+
+      // TODO: we should not have both tile offsets and tile offset. we need to
+      // unify this somehow, or decide that we only allow multi-dimensional
+      // generic loops with tensor operand inputs.
       Value tileOffset =
           LLVM::MulOp::create(rewriter, loc, loopI, b.i32_val(vectorSize));
+
+      Attribute genericTensorEncoding = op.getEncoding();
+      SmallVector<Value> tileOffsets;
+      // TODO: we need to be making the decision about the generic op body
+      // encoding during tile and fuse, not here
+      if (genericTensorEncoding) {
+        Value zero = b.i32_val(0);
+        StringAttr kBlock = str_attr("block");
+        StringAttr kWarp = str_attr("warp");
+        StringAttr kLane = str_attr("lane");
+        StringAttr kRegister = str_attr("register");
+
+        SmallVector<int64_t> blockShape64(op.getBlockShape().begin(),
+                                          op.getBlockShape().end());
+        auto ll =
+            triton::gpu::toLinearLayout(blockShape64, genericTensorEncoding);
+        llvm::errs() << "generic tensor encoding layout = " << ll << "\n";
+        for (unsigned x = 0; x < numChunks * vectorSize; x += vectorSize) {
+          auto outs =
+              ll.apply({{kRegister, x}, {kWarp, 0}, {kLane, 0}, {kBlock, 0}});
+          for (auto [d, v] : outs)
+            llvm::errs() << d << "(" << x << ") = " << v << "\n";
+        }
+
+        auto coords = applyLinearLayout(loc, rewriter, ll,
+                                        {{kRegister, tileOffset},
+                                         {kLane, zero},
+                                         {kWarp, zero},
+                                         {kBlock, zero}});
+        assert(coords.size() == op.getNumInductionVars());
+        for (unsigned i = 0; i < op.getNumInductionVars(); i++) {
+          tileOffsets.push_back(coords[i].second);
+        }
+      } else if (op.getResults().size() > 0 &&
+                 isa<RankedTensorType>(op.getResult(0).getType())) {
+        auto resultTenorEncoding =
+            cast<RankedTensorType>(op.getResult(0).getType());
+        Value zero = b.i32_val(0);
+        StringAttr kBlock = str_attr("block");
+        StringAttr kWarp = str_attr("warp");
+        StringAttr kLane = str_attr("lane");
+        StringAttr kRegister = str_attr("register");
+
+        auto ll = triton::gpu::toLinearLayout(resultTenorEncoding);
+        llvm::errs() << "generic tensor result encoding layout = " << ll
+                     << "\n";
+        for (unsigned x = 0; x < numChunks * vectorSize; x += vectorSize) {
+          auto outs =
+              ll.apply({{kRegister, x}, {kWarp, 0}, {kLane, 0}, {kBlock, 0}});
+          for (auto [d, v] : outs)
+            llvm::errs() << d << "(" << x << ") = " << v << "\n";
+        }
+
+        auto coords = applyLinearLayout(loc, rewriter, ll,
+                                        {{kRegister, tileOffset},
+                                         {kLane, zero},
+                                         {kWarp, zero},
+                                         {kBlock, zero}});
+        assert(coords.size() == op.getNumInductionVars());
+        for (unsigned i = 0; i < op.getNumInductionVars(); i++) {
+          tileOffsets.push_back(coords[i].second);
+        }
+      } else {
+        for (unsigned i = 0; i < op.getNumInductionVars(); i++) {
+          tileOffsets.push_back(tileOffset);
+        }
+      }
+
       Value cond = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ult,
                                         loopI, numChunksVal);
 
@@ -468,7 +555,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         rewriter.setInsertionPointToEnd(loopBody);
         SmallVector<Value> tileArgs;
         for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
-                 body->getArguments().drop_front(), adaptor.getOperands())) {
+                 body->getArguments().drop_front(op.getNumInductionVars()),
+                 adaptor.getOperands())) {
           if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
             // Load this tile's elements from the alloca produced by the prior
             // generic and pack them into the tile struct.
@@ -520,10 +608,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         rewriter.setInsertionPointToEnd(loopHeader);
 
         // tileOffset (i32) followed by the LLVM-converted operands.
-        SmallVector<Value> entryArgs = {tileOffset};
+        SmallVector<Value> entryArgs = tileOffsets;
+        targetInfo.printf(rewriter, "loop %d --> %d, %d",
+                          {loopI, entryArgs[0], entryArgs[1]});
 
         for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
-                 body->getArguments().drop_front(), adaptor.getOperands())) {
+                 body->getArguments().drop_front(op.getNumInductionVars()),
+                 adaptor.getOperands())) {
           if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
             Type tileStructTy =
                 getTypeConverter()->convertType(origArg.getType());
@@ -561,8 +652,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
               Value gep = LLVM::GEPOp::create(
                   rewriter, loc,
                   LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
-                  ptrArg, ValueRange{offset.front().second});
+                  ptrArg, ValueRange{registerIdx});
               Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
+              targetInfo.printf(rewriter, "gather %d (%d) = %f",
+                                {registerIdx, b.i32_val(j), elem});
               tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
                                                        tileStruct, elem, {j});
             }
@@ -609,6 +702,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       rewriter.eraseOp(op);
     return success();
   }
+
+  const TargetInfoBase &targetInfo;
 };
 
 } // namespace
@@ -616,5 +711,5 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 void mlir::triton::cpu::populateGenericOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const TargetInfo &targetInfo, PatternBenefit benefit) {
-  patterns.add<GenericOpConversion>(typeConverter, benefit);
+  patterns.add<GenericOpConversion>(typeConverter, targetInfo, benefit);
 }
