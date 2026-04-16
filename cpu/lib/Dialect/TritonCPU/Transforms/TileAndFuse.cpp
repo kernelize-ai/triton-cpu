@@ -335,23 +335,45 @@ setTiledShapeForOperand(Operation *op,
 }
 
 // Create the body block of a GenericOp, adding one block arg per ins value
-// with tensor types replaced to the vector (chunk) shape. Populates `mapping`
-// with ins value → block arg entries and sets the insertion point to the start
-// of the block. Returns the new block.
-static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
-                              ArrayRef<Value> ins,
-                              ArrayRef<int32_t> vectorShape,
-                              IRMapping &mapping) {
+// with tensor types replaced to the tile shape returned by `getTileShape`.
+// Populates `mapping` with ins value → block arg entries and sets the
+// insertion point to the start of the body. Returns the new block.
+//
+// `getTileShape` is called for each tensor-typed ins value and returns the
+// tiled shape to use for its block arg. Defaults to returning `vectorShape`
+// for all values (existing behaviour).
+static Block *
+initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
+                ArrayRef<Value> ins, ArrayRef<int32_t> vectorShape,
+                IRMapping &mapping,
+                llvm::function_ref<ArrayRef<int32_t>(Value, ArrayRef<int32_t>)>
+                    getTileShape = nullptr) {
   Block *body = rewriter.createBlock(&generic.getBody());
   for (unsigned i = 0; i < vectorShape.size(); i++)
     body->addArgument(rewriter.getI32Type(),
                       generic.getLoc()); // chunk offset per vector shape dim
   for (Value v : ins) {
-    Type argTy = updateTensorType(v.getType(), vectorShape);
+    ArrayRef<int32_t> shape =
+        (getTileShape && isa<RankedTensorType>(v.getType()))
+            ? getTileShape(v, vectorShape)
+            : ArrayRef<int32_t>(vectorShape);
+    Type argTy = updateTensorType(v.getType(), shape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
   rewriter.setInsertionPointToStart(body);
   return body;
+}
+
+// Query the tiled shape for `v` from `solver`. Falls back to `vectorShape` if
+// the lattice is absent, uninitialized, or empty (e.g. scalars / no-tile).
+static SmallVector<int32_t>
+getTileShapeFromSolver(const DataFlowSolver &solver, Value v,
+                       ArrayRef<int32_t> vectorShape) {
+  auto *lattice = solver.lookupState<dataflow::Lattice<TileInfo>>(v);
+  if (lattice && !lattice->getValue().isUninitialized() &&
+      !lattice->getValue().isEmpty())
+    return llvm::to_vector(lattice->getValue().getTiledShape());
+  return llvm::to_vector(vectorShape);
 }
 
 struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
@@ -834,7 +856,13 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
                                           blockShape, vectorShape);
 
     IRMapping outerMapping;
-    initGenericBody(rewriter, generic, ins, vectorShape, outerMapping);
+    SmallVector<int32_t> tileShapeBuf;
+    initGenericBody(
+        rewriter, generic, ins, vectorShape, outerMapping,
+        [&](Value v, ArrayRef<int32_t> vectorShape) -> ArrayRef<int32_t> {
+          tileShapeBuf = getTileShapeFromSolver(solver, v, vectorShape);
+          return tileShapeBuf;
+        });
 
     // setup arguments for the K loop
     SmallVector<Value> tilePtrInits, tilePtrStrides;
@@ -1097,6 +1125,19 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
       insToArgIdx[init] = idx;
   }
 
+  SymbolTableCollection symbolTable;
+  DataFlowSolver solver;
+  solver.load<dataflow::DeadCodeAnalysis>();
+  solver.load<dataflow::SparseConstantPropagation>();
+  solver.load<TileInfoAnalysis>(symbolTable);
+  // Run on the enclosing function so that sortedOps and any values defined
+  // outside the genericOp's immediate parent (e.g. function arguments) are
+  // all visited and their operand lattices populated.
+  auto funcOp = genericOp->getParentOfType<triton::FuncOp>();
+  assert(funcOp && "expected genericOp to be inside a func");
+  if (failed(solver.initializeAndRun(funcOp)))
+    llvm_unreachable("solver should not fail!");
+
   SmallVector<Value> newIns(genericOp.getIns().begin(),
                             genericOp.getIns().end());
   SmallVector<Value> newParams(genericOp.getParams().begin(),
@@ -1169,6 +1210,18 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
       if (mapping.contains(operand))
         continue;
       newIns.push_back(operand);
+
+      auto *lattice = solver.lookupState<dataflow::Lattice<TileInfo>>(operand);
+      if (!lattice)
+        llvm_unreachable("Latice not found.");
+      auto tileShape = lattice->getValue();
+      llvm::errs() << "tile shape from solver: " << tileShape << "\n";
+      llvm::errs() << " vs tiledShape: ";
+      auto tiledShape = tiledShapes.lookup(operand);
+      for (auto s : tiledShape)
+        llvm::errs() << s << " ";
+      llvm::errs() << "\n";
+
       mapping.map(operand, body->addArgument(
                                updateTensorType(operand.getType(),
                                                 tiledShapes.lookup(operand)),
@@ -1179,6 +1232,18 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
     for (auto [origResult, newResult] :
          llvm::zip(op->getResults(), newOp->getResults())) {
       auto tiledShape = tiledShapes.lookup(origResult);
+      auto *lattice =
+          solver.lookupState<dataflow::Lattice<TileInfo>>(origResult);
+      if (!lattice)
+        llvm_unreachable("Latice not found.");
+      auto tileShape = lattice->getValue();
+
+      llvm::errs() << "tile shape from solver: " << tileShape << "\n";
+      llvm::errs() << " vs tiledShape: ";
+      for (auto s : tiledShape)
+        llvm::errs() << s << " ";
+      llvm::errs() << "\n";
+
       newResult.setType(updateTensorType(newResult.getType(),
                                          tiledShapes.lookup(origResult)));
       LDBG("Update result type to " << newResult.getType());
