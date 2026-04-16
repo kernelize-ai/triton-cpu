@@ -264,33 +264,28 @@ LogicalResult TileInfoAnalysis::visitOperation(
     Operation *op, ArrayRef<dataflow::Lattice<TileInfo> *> operands,
     ArrayRef<const dataflow::Lattice<TileInfo> *> results) {
 
-  if (auto dotOp = dyn_cast<triton::DotOp>(op)) {
-    TileInfo::TileShapeT tileShapeMN;
-    if (auto attr = op->getAttrOfType<DenseI32ArrayAttr>("ttcpu.tile_shape")) {
-      tileShapeMN.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
-      // propagate the tile shape signaled by the attribute to dot op results
-      auto *resLattice = getLatticeElement(dotOp.getResult());
-      propagateIfChanged(resLattice, resLattice->join(TileInfo(tileShapeMN)));
-    } else {
-      // dot ops are anchor ops - propagate the result tiled shape to the
-      // operands
-      auto resTy = cast<RankedTensorType>(dotOp.getResult().getType());
-      auto enc = dyn_cast<gpu::BlockedEncodingAttr>(resTy.getEncoding());
-      if (!enc)
-        return success();
-      tileShapeMN.assign(enc.getSizePerThread()); // [M_tile, N_tile]
-      assert(tileShapeMN.size() == 2 && "only rank 2 dot op results supported");
-    }
-    auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
-    auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
+  // handle anchor ops
+  if (auto attr = op->getAttrOfType<DenseI32ArrayAttr>("ttcpu.tile_shape")) {
+    TileInfo::TileShapeT tileShape(attr.asArrayRef().begin(),
+                                   attr.asArrayRef().end());
 
-    // A [M, K]: tile M from encoding, K is not tiled (reduction dim)
-    propagateTileShape(operands[0], {tileShapeMN[0], 0});
-    // B [K, N]: K is not tiled (reduction dim), tile N from encoding
-    propagateTileShape(operands[1], {0, tileShapeMN[1]});
-    // C [M, N]: accumulator has the same tile shape as the result
-    if (operands.size() > 2)
-      propagateTileShape(operands[2], {tileShapeMN[0], tileShapeMN[1]});
+    if (auto dotOp = dyn_cast<triton::DotOp>(op)) {
+      // Also seed the result so downstream ops (convert_layout, etc.)
+      // propagate.
+      auto *resLattice = getLatticeElement(dotOp.getResult());
+      propagateIfChanged(resLattice, resLattice->join(TileInfo(tileShape)));
+      // A [M,K]: K not tiled (reduction dim)
+      propagateTileShape(operands[0], {tileShape[0], 0});
+      // B [K,N]: K not tiled
+      propagateTileShape(operands[1], {0, tileShape[1]});
+      // C [M,N]: accumulator fully tiled
+      if (operands.size() > 2)
+        propagateTileShape(operands[2], tileShape);
+    } else {
+      // uniformly tiled anchor ops
+      for (auto *opLattice : operands)
+        propagateTileShape(opLattice, tileShape);
+    }
     return success();
   }
 
@@ -484,7 +479,10 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, vectorShape, bodyMapping);
 
-    rewriter.clone(*storeOp, bodyMapping);
+    auto newStore = rewriter.clone(*storeOp, bodyMapping);
+    newStore->setAttr(
+        "ttcpu.tile_shape",
+        DenseI32ArrayAttr::get(rewriter.getContext(), vectorShape));
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
 
     rewriter.replaceOp(storeOp, generic.getResults());
@@ -891,8 +889,6 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     auto [blockShape, vectorShape] =
         getBlockAndVectorShapes(resultTy, encoding);
 
-    // TODO: run the dataflow analysis on the dot op
-    // need to seed the analysis with the tile info for the dot op too
     dotOp->setAttr("ttcpu.tile_shape",
                    DenseI32ArrayAttr::get(rewriter.getContext(), vectorShape));
 
