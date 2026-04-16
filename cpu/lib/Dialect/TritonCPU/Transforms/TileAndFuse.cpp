@@ -437,6 +437,21 @@ getTileShapeFromSolver(const DataFlowSolver &solver, Value v,
   return llvm::to_vector(vectorShape);
 }
 
+static Type updateTensorTypeFromSolver(const DataFlowSolver &solver, Value v) {
+  auto tensorType = dyn_cast<RankedTensorType>(v.getType());
+  if (!tensorType)
+    return v.getType();
+
+  SmallVector<int32_t> origShape32(tensorType.getShape().begin(),
+                                   tensorType.getShape().end());
+  SmallVector<int64_t> newShape;
+  auto tileShape = getTileShapeFromSolver(solver, v, origShape32);
+  for (auto [origDim, tileDim] : llvm::zip(tensorType.getShape(), tileShape))
+    newShape.push_back(tileDim == 0 ? origDim : (int64_t)tileDim);
+  return RankedTensorType::get(newShape, tensorType.getElementType(),
+                               tensorType.getEncoding());
+}
+
 struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
   using OpRewritePattern<triton::StoreOp>::OpRewritePattern;
 
@@ -1214,7 +1229,6 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
     LDBG("Fuse op " << *op);
     if (auto makeRangeOp = dyn_cast<triton::MakeRangeOp>(op)) {
       // replace op with makeDynamicRange
-      auto tiledShape = tiledShapes.lookup(makeRangeOp.getResult());
 
       auto makeRangeTensorTy =
           cast<RankedTensorType>(makeRangeOp.getResult().getType());
@@ -1263,9 +1277,8 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
       auto tensorTy =
           dyn_cast<RankedTensorType>(constantOp.getResult().getType());
       if (tensorTy) {
-        auto tiledShape = tiledShapes.lookup(constantOp.getResult());
-        auto newTensorTy =
-            cast<RankedTensorType>(updateTensorType(tensorTy, tiledShape));
+        auto newTensorTy = cast<RankedTensorType>(
+            updateTensorTypeFromSolver(solver, constantOp.getResult()));
         auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
         assert(denseAttr.isSplat() &&
                "non-splat tensor constants not yet supported in fuseInputs");
@@ -1300,10 +1313,9 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
         llvm::errs() << s << " ";
       llvm::errs() << "\n";
 
-      mapping.map(operand, body->addArgument(
-                               updateTensorType(operand.getType(),
-                                                tiledShapes.lookup(operand)),
-                               operand.getLoc()));
+      mapping.map(operand,
+                  body->addArgument(updateTensorTypeFromSolver(solver, operand),
+                                    operand.getLoc()));
     }
 
     Operation *newOp = rewriter.clone(*op, mapping);
@@ -1322,8 +1334,8 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
         llvm::errs() << s << " ";
       llvm::errs() << "\n";
 
-      newResult.setType(updateTensorType(newResult.getType(),
-                                         tiledShapes.lookup(origResult)));
+      newResult.setType(updateTensorTypeFromSolver(solver, origResult));
+
       LDBG("Update result type to " << newResult.getType());
       if (auto it = insToArgIdx.find(origResult); it != insToArgIdx.end()) {
         BlockArgument bodyArg =
@@ -1332,7 +1344,7 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
         // The generic may have broadcast 1-dims to the full vectorShape in the
         // body arg type (e.g. tensor<1x4xi32> fused from tensor<1x64xi32> but
         // body arg is tensor<4x4xi32>). Insert a broadcast to match.
-        if (bodyArg.getType() != newResult.getType()) {
+        if (false && bodyArg.getType() != newResult.getType()) {
           replacement = triton::BroadcastOp::create(
               rewriter, op->getLoc(), bodyArg.getType(), replacement);
         }
