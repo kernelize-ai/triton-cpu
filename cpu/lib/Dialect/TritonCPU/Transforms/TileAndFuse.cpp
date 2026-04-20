@@ -273,14 +273,17 @@ LogicalResult TileInfoAnalysis::visitOperation(
       // Also seed the result so downstream ops (convert_layout, etc.)
       // propagate.
       auto *resLattice = getLatticeElement(dotOp.getResult());
-      propagateIfChanged(resLattice, resLattice->join(TileInfo(tileShape)));
-      // A [M,K]: K not tiled (reduction dim)
-      propagateTileShape(operands[0], {tileShape[0], 0});
-      // B [K,N]: K not tiled
-      propagateTileShape(operands[1], {0, tileShape[1]});
+      // propagate [M, N] tile shape to result
+      propagateIfChanged(
+          resLattice, resLattice->join(TileInfo({tileShape[0], tileShape[1]})));
+      auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
+      auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
+      propagateTileShape(operands[0],
+                         {tileShape[0], (int32_t)aTy.getShape()[1]});
+      propagateTileShape(operands[1],
+                         {(int32_t)bTy.getShape()[0], tileShape[1]});
       // C [M,N]: accumulator fully tiled
-      if (operands.size() > 2)
-        propagateTileShape(operands[2], tileShape);
+      propagateTileShape(operands[2], {tileShape[0], tileShape[1]});
     } else {
       // uniformly tiled anchor ops
       for (auto *opLattice : operands)
@@ -334,6 +337,23 @@ LogicalResult TileInfoAnalysis::visitOperation(
 }
 
 namespace {
+
+static void annotateTileInfo(mlir::MLIRContext *context, triton::FuncOp funcOp,
+                             DataFlowSolver *solver) {
+  funcOp.walk([&](Operation *op) {
+    for (auto [i, result] : llvm::enumerate(op->getResults())) {
+      auto *lattice = solver->lookupState<dataflow::Lattice<TileInfo>>(result);
+      std::string s;
+      llvm::raw_string_ostream os(s);
+      if (!lattice)
+        os << "no-lattice";
+      else
+        lattice->getValue().print(os);
+      op->setAttr(("ttcpu.tile_info." + llvm::Twine(i)).str(),
+                  StringAttr::get(context, s));
+    }
+  });
+}
 
 // Replace the shape of a RankedTensorType with vectorShape, preserving element
 // type and encoding. Non-tensor types are returned unchanged.
@@ -884,10 +904,18 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     // find the K dimension ops for the A and B inputs to the Dot op.
     // We track the K dimension and avoid modifying those layouts as the K loop
     // is unchanged during tiling auto kDimMap = buildKDimMap(forOp, dotOp);
-
-    // TODO: this vector shape may be too small?
     auto [blockShape, vectorShape] =
         getBlockAndVectorShapes(resultTy, encoding);
+
+    auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
+    int32_t kBlock = aTy.getShape()[1]; // full K dimension
+    // Step must be a constant; extract its integer value as K_tile.
+    auto stepConst = forOp.getStep().getDefiningOp<arith::ConstantOp>();
+    assert(stepConst && "K loop step must be a constant");
+    int32_t kTile = cast<IntegerAttr>(stepConst.getValue()).getInt();
+
+    blockShape.push_back(kBlock); // blockShape = [M, N, K_block]
+    vectorShape.push_back(kTile); // vectorShape = [M_tile, N_tile, K_tile]
 
     dotOp->setAttr("ttcpu.tile_shape",
                    DenseI32ArrayAttr::get(rewriter.getContext(), vectorShape));
@@ -897,43 +925,62 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     solver.load<dataflow::DeadCodeAnalysis>();
     solver.load<dataflow::SparseConstantPropagation>();
     solver.load<TileInfoAnalysis>(symbolTable);
-    if (failed(solver.initializeAndRun(forOp)))
+    if (failed(
+            solver.initializeAndRun(forOp->getParentOfType<triton::FuncOp>())))
       return failure();
 
-    SmallVector<Value> ins;
+    annotateTileInfo(rewriter.getContext(),
+                     forOp->getParentOfType<triton::FuncOp>(), &solver);
+
+    llvm::MapVector<Value, SmallVector<int32_t>> ins;
 
     // add iter arg initializations to generic operand list first so we can keep
     // track of them later
     for (auto [argIdx, stride] : info->ptrArgs) {
-      ins.push_back(forOp.getInitArgs()[argIdx]); // initial value
-      ins.push_back(stride);                      // value to advance by
+      ins.insert({forOp.getInitArgs()[argIdx], {}}); // initial value
+      ins.insert({stride, {}});                      // value to advance by
     }
     for (auto &op : *forOp.getBody()) {
+      llvm::errs() << "k loop op: " << op << "\n";
       if (isa<scf::YieldOp>(op))
         continue;
       for (Value operand : op.getOperands()) {
+        llvm::errs() << "\toperand: " << operand << "\n";
         // Skip values defined inside the loop body (intermediate results,
         // the induction variable, and iter_args).
         if (operand.getParentBlock() == forOp.getBody())
           continue;
-        ins.push_back(operand);
+        auto tileShapeBuf =
+            getTileShapeFromSolver(solver, operand, vectorShape);
+        // can't do this since some values come back uninitialized hten get tile
+        // shape pulls the default shape - which we need to disable, that's just
+        // too unsafe assert(tileShapeBuf.size() < 3 && "expected rank-2 or less
+        // tile shapes for all dot operations");
+        ins.insert({operand, tileShapeBuf});
       }
     }
-    ins.push_back(forOp.getLowerBound());
-    ins.push_back(forOp.getUpperBound());
-    ins.push_back(forOp.getStep());
+    ins.insert({forOp.getLowerBound(), {}});
+    ins.insert({forOp.getUpperBound(), {}});
+    ins.insert({forOp.getStep(), {}});
+
+    SmallVector<Value> ins_keys(ins.keys().begin(), ins.keys().end());
 
     auto generic = cpu::GenericOp::create(rewriter, loc, TypeRange{resultTy},
-                                          ins, /*params= */ ValueRange{},
+                                          ins_keys, /*params= */ ValueRange{},
                                           blockShape, vectorShape);
 
     IRMapping outerMapping;
     SmallVector<int32_t> tileShapeBuf;
     initGenericBody(
-        rewriter, generic, ins, vectorShape, outerMapping,
+        rewriter, generic, ins_keys, vectorShape, outerMapping,
         [&](Value v, ArrayRef<int32_t> vectorShape) -> ArrayRef<int32_t> {
+#if 1
           tileShapeBuf = getTileShapeFromSolver(solver, v, vectorShape);
-          return tileShapeBuf;
+          return tileShapeBuf; // this seems bad
+#else
+          assert(ins.contains(v));
+          return ins.find(v)->second;
+#endif
         });
 
     // setup arguments for the K loop
@@ -947,10 +994,13 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     Value kStep = outerMapping.lookup(forOp.getStep());
 
     // copy the accumulator - TODO support slicing non-constant accumulators
-    auto tileAccTy =
-        cast<RankedTensorType>(updateTensorType(resultTy, vectorShape));
+    // drop the K dimension from the accumulator tile shape
+    auto tileAccTy = cast<RankedTensorType>(
+        updateTensorType(resultTy, llvm::ArrayRef(vectorShape).drop_back()));
     auto cInitConst = forOp.getInitArgs()[info->cIterArgIdx]
                           .getDefiningOp<arith::ConstantOp>();
+    assert(cInitConst &&
+           "expected accumulator initialization to be a constant op");
     auto origSplat = cast<DenseElementsAttr>(cInitConst.getValue());
     Value tileAcc = arith::ConstantOp::create(
         rewriter, loc,
@@ -963,11 +1013,15 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
 
     SmallVector<Value> kIterInits = {tileAcc};
     kIterInits.append(tilePtrInits);
-    auto kFor = scf::ForOp::create(rewriter, loc, kLb, kUb, kStep, kIterInits);
+    // only run for the for loop over the tiled K dimension
+    auto kTileConst = arith::ConstantOp::create(
+        rewriter, loc, rewriter.getI32IntegerAttr(kTile));
+    auto kFor =
+        scf::ForOp::create(rewriter, loc, kLb, kTileConst, kStep, kIterInits);
 
     IRMapping loopMapping;
     // map generic operand arguments to block arguments
-    for (auto [i, v] : llvm::enumerate(ins))
+    for (auto [i, v] : llvm::enumerate(ins.keys()))
       loopMapping.map(v, outerMapping.lookup(v));
 
     // map existing loop induction var to new induction var and existing loop
@@ -1436,20 +1490,7 @@ struct TritonCPUTileAndFusePass
       solver.load<TileInfoAnalysis>(symbolTable);
       if (failed(solver.initializeAndRun(funcOp)))
         return;
-      funcOp.walk([&](Operation *op) {
-        for (auto [i, result] : llvm::enumerate(op->getResults())) {
-          auto *lattice =
-              solver.lookupState<dataflow::Lattice<TileInfo>>(result);
-          std::string s;
-          llvm::raw_string_ostream os(s);
-          if (!lattice)
-            os << "no-lattice";
-          else
-            lattice->getValue().print(os);
-          op->setAttr(("ttcpu.tile_info." + llvm::Twine(i)).str(),
-                      StringAttr::get(context, s));
-        }
-      });
+      annotateTileInfo(context, funcOp, &solver);
     });
 
     llvm::errs() << "### MODULE BEFORE FUSION ###\n";
