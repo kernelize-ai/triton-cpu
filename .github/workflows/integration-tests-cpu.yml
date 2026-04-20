@@ -106,7 +106,7 @@ jobs:
         working-directory: ./triton
         run: python -m pytest ../python/test --ignore=../python/test/nexus
 
-      - name: Run tutorials on CPU
+      - name: Run CPU-specific tutorial clones
         working-directory: ./triton
         env:
           TRITON_DEFAULT_BACKEND: "cpu"
