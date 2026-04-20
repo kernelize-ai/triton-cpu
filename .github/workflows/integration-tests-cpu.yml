@@ -106,11 +106,13 @@ jobs:
         working-directory: ./triton
         run: python -m pytest ../python/test --ignore=../python/test/nexus
 
-      - name: Run tutorial 03 on CPU
+      - name: Run CPU-specific tutorial clones
         working-directory: ./triton
         env:
           TRITON_DEFAULT_BACKEND: "cpu"
-        run: python ../python/tutorials/03-matrix-multiplication.py
+        run: |
+            TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python ../python/tutorials/02-fused-softmax.py
+            python ../python/tutorials/03-matrix-multiplication.py
 
       # Triton tests.
       - name: Run lit tests
