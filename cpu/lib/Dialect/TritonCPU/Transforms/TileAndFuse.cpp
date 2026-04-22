@@ -118,7 +118,10 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
 class TileInfoAnalysis : public dataflow::SparseBackwardDataFlowAnalysis<
                              dataflow::Lattice<TileInfo>> {
 public:
-  using SparseBackwardDataFlowAnalysis::SparseBackwardDataFlowAnalysis;
+  TileInfoAnalysis(DataFlowSolver &solver, SymbolTableCollection &symbolTable,
+                   cpu::GenericOp targetGenericOp = {})
+      : SparseBackwardDataFlowAnalysis(solver, symbolTable),
+        targetGenericOp(targetGenericOp) {}
 
   LogicalResult visitOperation(
       Operation *op, ArrayRef<dataflow::Lattice<TileInfo> *> operands,
@@ -191,6 +194,10 @@ protected:
     auto genericOp = dyn_cast<cpu::GenericOp>(region->getParentOp());
     if (!genericOp)
       return;
+    // When scoped to a specific generic, block cross-generic contamination so
+    // that shared upstream ops don't get joined demands from multiple generics.
+    if (targetGenericOp && genericOp != targetGenericOp)
+      return;
 
     unsigned numInductionVars = genericOp.getNumInductionVars();
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
@@ -258,6 +265,10 @@ private:
       }
     }
   }
+
+  // If set, only this generic's block args propagate backward to ins values.
+  // Null means anchor on all generics (used for the debug annotation pass).
+  cpu::GenericOp targetGenericOp;
 };
 
 LogicalResult TileInfoAnalysis::visitOperation(
@@ -276,12 +287,10 @@ LogicalResult TileInfoAnalysis::visitOperation(
       // propagate [M, N] tile shape to result
       propagateIfChanged(
           resLattice, resLattice->join(TileInfo({tileShape[0], tileShape[1]})));
-      auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
-      auto bTy = cast<RankedTensorType>(dotOp.getB().getType());
-      propagateTileShape(operands[0],
-                         {tileShape[0], (int32_t)aTy.getShape()[1]});
-      propagateTileShape(operands[1],
-                         {(int32_t)bTy.getShape()[0], tileShape[1]});
+      // tileShape = [M_tile, N_tile, K_tile]; use K_tile (index 2) for the K
+      // dimension of A and B, not the full K_block from the matrix type.
+      propagateTileShape(operands[0], {tileShape[0], tileShape[2]}); // A: [M,K]
+      propagateTileShape(operands[1], {tileShape[2], tileShape[1]}); // B: [K,N]
       // C [M,N]: accumulator fully tiled
       propagateTileShape(operands[2], {tileShape[0], tileShape[1]});
     } else {
@@ -1255,14 +1264,20 @@ void InputFusion::rewrite(IRRewriter &rewriter) {
   DataFlowSolver solver;
   solver.load<dataflow::DeadCodeAnalysis>();
   solver.load<dataflow::SparseConstantPropagation>();
-  solver.load<TileInfoAnalysis>(symbolTable);
-  // Run on the enclosing function so that sortedOps and any values defined
-  // outside the genericOp's immediate parent (e.g. function arguments) are
-  // all visited and their operand lattices populated.
+  solver.load<TileInfoAnalysis>(symbolTable, genericOp);
+  // Run on the enclosing function so all ops (including those outside the
+  // generic body) get lattice entries. The targetGenericOp filter in
+  // visitNonControlFlowArguments ensures only this generic's demands propagate
+  // backward, so shared upstream ops get the correct per-generic tile shape.
   auto funcOp = genericOp->getParentOfType<triton::FuncOp>();
   assert(funcOp && "expected genericOp to be inside a func");
   if (failed(solver.initializeAndRun(funcOp)))
     llvm_unreachable("solver should not fail!");
+
+  annotateTileInfo(funcOp.getContext(), funcOp, &solver);
+  llvm::errs() << "### FUNC OP BEFORE GENERIC FUSION\n";
+  funcOp.dump();
+  llvm::errs() << "### END FUNC OP BEFORE GENERIC FUSION\n";
 
   SmallVector<Value> newIns(genericOp.getIns().begin(),
                             genericOp.getIns().end());
@@ -1478,7 +1493,7 @@ struct TritonCPUTileAndFusePass
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }
-
+#if 0
     // Debug helper: run the solver on each function and annotate every op
     // result with its tile info as a "ttcpu.tile_info" string attribute.
     // Remove before submitting.
@@ -1496,6 +1511,7 @@ struct TritonCPUTileAndFusePass
     llvm::errs() << "### MODULE BEFORE FUSION ###\n";
     m.dump();
     llvm::errs() << "### END MODULE BEFORE FUSION ###\n";
+#endif
 
     // Step 2: Fuse elementwise ops and loads into each generic, bottom-up.
     SmallVector<cpu::GenericOp> worklist;
