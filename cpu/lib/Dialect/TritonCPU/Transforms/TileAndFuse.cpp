@@ -270,10 +270,15 @@ public:
   LogicalResult run();
 
 private:
-  SmallVector<Operation *> collectChain(Value root);
+  struct Chain {
+    Value root;
+    unsigned insIdx;
+    SmallVector<int32_t> tileShape;
+  };
 
-  void cloneOp(Operation *op, Value root, unsigned insIdx, unsigned numIV,
-               ArrayRef<int32_t> tileShape, SmallVector<Value> &newIns,
+  SmallVector<Operation *> collectChain(Chain &chain);
+
+  void cloneOp(Operation *op, Chain &chain, SmallVector<Value> &newIns,
                SmallVector<Value> &newParams,
                SmallVector<unsigned> &insIdxToRemove, IRMapping &mapping);
 
@@ -297,15 +302,15 @@ LogicalResult InputFuser::run() {
       continue;
 
     SmallVector<int32_t> tileShape(tensorTy.getShape());
-    SmallVector<Operation *> sorted = collectChain(root);
+    Chain chain{root, (unsigned)insIdx, tileShape};
+    SmallVector<Operation *> sorted = collectChain(chain);
     if (sorted.empty())
       continue;
 
     IRMapping mapping;
     rewriter.setInsertionPointToStart(body);
     for (Operation *op : sorted) {
-      cloneOp(op, root, insIdx, numIV, tileShape, newIns, newParams,
-              insIdxToRemove, mapping);
+      cloneOp(op, chain, newIns, newParams, insIdxToRemove, mapping);
     }
   }
 
@@ -323,10 +328,10 @@ LogicalResult InputFuser::run() {
   return success();
 }
 
-SmallVector<Operation *> InputFuser::collectChain(Value root) {
+SmallVector<Operation *> InputFuser::collectChain(Chain &chain) {
   SetVector<Operation *> opsToFuse;
 
-  SmallVector<Value> worklist{root};
+  SmallVector<Value> worklist{chain.root};
   while (!worklist.empty()) {
     Value v = worklist.pop_back_val();
     // See through scf.for iter_args to their initial values so we can fuse
@@ -366,27 +371,27 @@ SmallVector<Operation *> InputFuser::collectChain(Value root) {
   return sortedOps;
 }
 
-void InputFuser::cloneOp(Operation *op, Value root, unsigned insIdx,
-                         unsigned numIV, ArrayRef<int32_t> tileShape,
+void InputFuser::cloneOp(Operation *op, Chain &chain,
                          SmallVector<Value> &newIns,
                          SmallVector<Value> &newParams,
                          SmallVector<unsigned> &insIdxToRemove,
                          IRMapping &mapping) {
   Block *body = &genericOp.getBody().front();
+  unsigned numIV = genericOp.getNumInductionVars();
 
   // make range must be replaced with make dynamic range which takes the current
   // tile offset as a parameter
   if (auto makeRangeOp = dyn_cast<triton::MakeRangeOp>(op)) {
     auto resultType = makeRangeOp.getResult().getType();
-    auto newResultType = updateTensorType(resultType, tileShape);
+    auto newResultType = updateTensorType(resultType, chain.tileShape);
     auto makeDynamicRangeOp = triton::cpu::MakeDynamicRangeOp::create(
         rewriter, makeRangeOp.getLoc(), newResultType,
         genericOp.getChunkOffset());
     mapping.map(makeRangeOp->getResults(), makeDynamicRangeOp->getResults());
-    if (makeRangeOp.getResult() == root) {
-      body->getArgument(numIV + insIdx)
+    if (makeRangeOp.getResult() == chain.root) {
+      body->getArgument(numIV + chain.insIdx)
           .replaceAllUsesWith(makeDynamicRangeOp.getResult());
-      insIdxToRemove.push_back(insIdx);
+      insIdxToRemove.push_back(chain.insIdx);
     }
     return;
   }
@@ -397,8 +402,8 @@ void InputFuser::cloneOp(Operation *op, Value root, unsigned insIdx,
     auto resultTensorType =
         dyn_cast<RankedTensorType>(constantOp.getResult().getType());
     if (resultTensorType) {
-      auto newTensorType =
-          cast<RankedTensorType>(updateTensorType(resultTensorType, tileShape));
+      auto newTensorType = cast<RankedTensorType>(
+          updateTensorType(resultTensorType, chain.tileShape));
       auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
       assert(denseAttr.isSplat() &&
              "non-splat tensor constants not yet supported in fuseInputs");
@@ -407,10 +412,10 @@ void InputFuser::cloneOp(Operation *op, Value root, unsigned insIdx,
       auto newConstant =
           arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
       mapping.map(constantOp.getResult(), newConstant.getResult());
-      if (constantOp.getResult() == root) {
-        body->getArgument(numIV + insIdx)
+      if (constantOp.getResult() == chain.root) {
+        body->getArgument(numIV + chain.insIdx)
             .replaceAllUsesWith(newConstant.getResult());
-        insIdxToRemove.push_back(insIdx);
+        insIdxToRemove.push_back(chain.insIdx);
       }
       return;
     }
@@ -422,20 +427,20 @@ void InputFuser::cloneOp(Operation *op, Value root, unsigned insIdx,
       continue;
 
     newIns.push_back(operand);
-    mapping.map(operand, body->addArgument(
-                             updateTensorType(operand.getType(), tileShape),
-                             operand.getLoc()));
+    mapping.map(operand, body->addArgument(updateTensorType(operand.getType(),
+                                                            chain.tileShape),
+                                           operand.getLoc()));
   }
 
   Operation *newOp = rewriter.clone(*op, mapping);
   for (auto [origResult, newResult] :
        llvm::zip(op->getResults(), newOp->getResults())) {
-    newResult.setType(updateTensorType(newResult.getType(), tileShape));
+    newResult.setType(updateTensorType(newResult.getType(), chain.tileShape));
     // If this result was previously an ins, replace its block arg with the
     // newly cloned result and mark the arg for removal.
-    if (origResult == root) {
-      body->getArgument(numIV + insIdx).replaceAllUsesWith(newResult);
-      insIdxToRemove.push_back(insIdx);
+    if (origResult == chain.root) {
+      body->getArgument(numIV + chain.insIdx).replaceAllUsesWith(newResult);
+      insIdxToRemove.push_back(chain.insIdx);
     }
   }
   mapping.map(op->getResults(), newOp->getResults());
