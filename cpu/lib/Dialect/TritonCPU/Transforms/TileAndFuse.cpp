@@ -262,6 +262,185 @@ static Value getIterArgInit(Value v) {
   return forOp.getInitArgs()[argIdx - numIV];
 }
 
+class InputFuser {
+public:
+  InputFuser(IRRewriter &rewriter, cpu::GenericOp genericOp)
+      : rewriter(rewriter), genericOp(genericOp) {}
+
+  LogicalResult run();
+
+private:
+  SmallVector<Operation *> collectChain(Value root);
+
+  void cloneOp(Operation *op, Value root, unsigned insIdx, unsigned numIV,
+               ArrayRef<int32_t> tileShape, SmallVector<Value> &newIns,
+               SmallVector<Value> &newParams,
+               SmallVector<unsigned> &insIdxToRemove, IRMapping &mapping);
+
+  IRRewriter &rewriter;
+  cpu::GenericOp genericOp;
+};
+
+LogicalResult InputFuser::run() {
+  Block *body = &genericOp.getBody().front();
+  unsigned numIV = genericOp.getNumInductionVars();
+
+  SmallVector<Value> newIns(genericOp.getIns());
+  SmallVector<Value> newParams(genericOp.getParams());
+  SmallVector<unsigned> insIdxToRemove;
+
+  for (auto [insIdx, root] : llvm::enumerate(genericOp.getIns())) {
+    BlockArgument blockArg = body->getArgument(numIV + insIdx);
+    auto tensorTy = dyn_cast<RankedTensorType>(blockArg.getType());
+    // only fuse tensor inputs
+    if (!tensorTy)
+      continue;
+
+    SmallVector<int32_t> tileShape(tensorTy.getShape());
+    SmallVector<Operation *> sorted = collectChain(root);
+    if (sorted.empty())
+      continue;
+
+    IRMapping mapping;
+    rewriter.setInsertionPointToStart(body);
+    for (Operation *op : sorted) {
+      cloneOp(op, root, insIdx, numIV, tileShape, newIns, newParams,
+              insIdxToRemove, mapping);
+    }
+  }
+
+  llvm::sort(insIdxToRemove);
+  for (unsigned idx : llvm::reverse(insIdxToRemove)) {
+    body->eraseArgument(idx + numIV);
+    newIns.erase(newIns.begin() + idx);
+  }
+
+  rewriter.modifyOpInPlace(genericOp, [&]() {
+    genericOp.getInsMutable().assign(newIns);
+    genericOp.getParamsMutable().assign(newParams);
+  });
+
+  return success();
+}
+
+SmallVector<Operation *> InputFuser::collectChain(Value root) {
+  SetVector<Operation *> opsToFuse;
+
+  SmallVector<Value> worklist{root};
+  while (!worklist.empty()) {
+    Value v = worklist.pop_back_val();
+    // See through scf.for iter_args to their initial values so we can fuse
+    // the ops that produce those values (e.g. constants used as initialisers).
+    Operation *defOp = getIterArgInit(v).getDefiningOp();
+    if (!defOp || !isFusible(defOp) || opsToFuse.contains(defOp))
+      continue;
+    opsToFuse.insert(defOp);
+    for (Value operand : defOp->getOperands())
+      worklist.push_back(operand);
+  }
+
+  // Sort opsToFuse into true topological order (defs before uses).
+  // The worklist DFS can insert the same dependency via two different paths
+  // (diamond-shaped graphs), so reversing the insertion order is not
+  // guaranteed to give a valid topo order.  We do an explicit post-order DFS.
+  SmallVector<Operation *> sortedOps;
+  DenseSet<Operation *> visited;
+  std::function<void(Operation *)> visit = [&](Operation *op) {
+    if (!opsToFuse.contains(op) || visited.contains(op))
+      return;
+    visited.insert(op);
+    for (Value operand : op->getOperands()) {
+      if (auto *def = operand.getDefiningOp())
+        visit(def);
+      // Also follow scf.for iter_arg initialisers.
+      Value init = getIterArgInit(operand);
+      if (init != operand)
+        if (auto *def = init.getDefiningOp())
+          visit(def);
+    }
+    sortedOps.push_back(op);
+  };
+  for (Operation *op : opsToFuse)
+    visit(op);
+
+  return sortedOps;
+}
+
+void InputFuser::cloneOp(Operation *op, Value root, unsigned insIdx,
+                         unsigned numIV, ArrayRef<int32_t> tileShape,
+                         SmallVector<Value> &newIns,
+                         SmallVector<Value> &newParams,
+                         SmallVector<unsigned> &insIdxToRemove,
+                         IRMapping &mapping) {
+  Block *body = &genericOp.getBody().front();
+
+  // make range must be replaced with make dynamic range which takes the current
+  // tile offset as a parameter
+  if (auto makeRangeOp = dyn_cast<triton::MakeRangeOp>(op)) {
+    auto resultType = makeRangeOp.getResult().getType();
+    auto newResultType = updateTensorType(resultType, tileShape);
+    auto makeDynamicRangeOp = triton::cpu::MakeDynamicRangeOp::create(
+        rewriter, makeRangeOp.getLoc(), newResultType,
+        genericOp.getChunkOffset());
+    mapping.map(makeRangeOp->getResults(), makeDynamicRangeOp->getResults());
+    if (makeRangeOp.getResult() == root) {
+      body->getArgument(numIV + insIdx)
+          .replaceAllUsesWith(makeDynamicRangeOp.getResult());
+      insIdxToRemove.push_back(insIdx);
+    }
+    return;
+  }
+
+  // constant ops with tensor type get replaced with a constant op using the
+  // tile size
+  if (auto constantOp = dyn_cast<arith::ConstantOp>(op)) {
+    auto resultTensorType =
+        dyn_cast<RankedTensorType>(constantOp.getResult().getType());
+    if (resultTensorType) {
+      auto newTensorType =
+          cast<RankedTensorType>(updateTensorType(resultTensorType, tileShape));
+      auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
+      assert(denseAttr.isSplat() &&
+             "non-splat tensor constants not yet supported in fuseInputs");
+      auto newAttr = DenseElementsAttr::get(
+          newTensorType, *denseAttr.getValues<Attribute>().begin());
+      auto newConstant =
+          arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
+      mapping.map(constantOp.getResult(), newConstant.getResult());
+      if (constantOp.getResult() == root) {
+        body->getArgument(numIV + insIdx)
+            .replaceAllUsesWith(newConstant.getResult());
+        insIdxToRemove.push_back(insIdx);
+      }
+      return;
+    }
+  }
+
+  // general case - clone op
+  for (Value operand : op->getOperands()) {
+    if (mapping.contains(operand))
+      continue;
+
+    newIns.push_back(operand);
+    mapping.map(operand, body->addArgument(
+                             updateTensorType(operand.getType(), tileShape),
+                             operand.getLoc()));
+  }
+
+  Operation *newOp = rewriter.clone(*op, mapping);
+  for (auto [origResult, newResult] :
+       llvm::zip(op->getResults(), newOp->getResults())) {
+    newResult.setType(updateTensorType(newResult.getType(), tileShape));
+    // If this result was previously an ins, replace its block arg with the
+    // newly cloned result and mark the arg for removal.
+    if (origResult == root) {
+      body->getArgument(numIV + insIdx).replaceAllUsesWith(newResult);
+      insIdxToRemove.push_back(insIdx);
+    }
+  }
+  mapping.map(op->getResults(), newOp->getResults());
+}
+
 // Fuse ops that produce the ins values of genericOp into its body.
 //
 // For each ins value, if its defining op is fusible (elementwise, load, splat),
@@ -458,14 +637,18 @@ struct TritonCPUTileAndFusePass
       signalPassFailure();
     }
 
-    // Step 2: Fuse elementwise ops and loads into each generic, bottom-up.
-    // Collect once before fusion (the worklist is stable; new generics are not
-    // created during fusion, only existing ops are cloned / erased).
+    // Step 2: Fuse elementwise ops and loads into each generic
     SmallVector<cpu::GenericOp> worklist;
     m.walk([&](cpu::GenericOp op) { worklist.push_back(op); });
     IRRewriter rewriter(context);
     for (cpu::GenericOp genericOp : llvm::reverse(worklist)) {
-      fuseInputs(rewriter, genericOp);
+#if 0
+    fuseInputs(rewriter, genericOp);
+#else
+      InputFuser fuser(rewriter, genericOp);
+      if (fuser.run().failed())
+        signalPassFailure();
+#endif
     }
   }
 };
