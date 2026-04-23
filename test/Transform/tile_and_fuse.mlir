@@ -35,8 +35,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
 
 // -----
 
-// Shared op: %mask (arith.cmpi) feeds two separate generics. In the per-chain
-// scheme, each generic gets its own clone of %mask and its producers — no
+// Shared op: %mask (arith.cmpi) feeds two separate loads. In the per-chain
+// scheme, each generic operand gets its own clone of %mask and its producers — no
 // shared block argument remains.
 //
 // CHECK-LABEL: tt.func public @test_shared_op
