@@ -379,6 +379,21 @@ void InputFuser::cloneOp(Operation *op, Chain &chain,
   Block *body = &genericOp.getBody().front();
   unsigned numIV = genericOp.getNumInductionVars();
 
+  // chain.root may be an scf.for iter_arg; the defining op produces the init
+  // value, not root itself. Treat both as equivalent for block arg replacement.
+  Value effectiveRoot = getIterArgInit(chain.root);
+
+  auto replaceRootIfMatch = [&](Value origResult, Value clonedResult) {
+    if (origResult != effectiveRoot)
+      return;
+    body->getArgument(numIV + chain.insIdx).replaceAllUsesWith(clonedResult);
+    insIdxToRemove.push_back(chain.insIdx);
+    // Also map root (the iter_arg) so downstream ops resolve through the
+    // mapping rather than falling through to the "add as new ins" path.
+    if (effectiveRoot != chain.root)
+      mapping.map(chain.root, clonedResult);
+  };
+
   // make range must be replaced with make dynamic range which takes the current
   // tile offset as a parameter
   if (auto makeRangeOp = dyn_cast<triton::MakeRangeOp>(op)) {
@@ -388,11 +403,7 @@ void InputFuser::cloneOp(Operation *op, Chain &chain,
         rewriter, makeRangeOp.getLoc(), newResultType,
         genericOp.getChunkOffset());
     mapping.map(makeRangeOp->getResults(), makeDynamicRangeOp->getResults());
-    if (makeRangeOp.getResult() == chain.root) {
-      body->getArgument(numIV + chain.insIdx)
-          .replaceAllUsesWith(makeDynamicRangeOp.getResult());
-      insIdxToRemove.push_back(chain.insIdx);
-    }
+    replaceRootIfMatch(makeRangeOp.getResult(), makeDynamicRangeOp.getResult());
     return;
   }
 
@@ -412,11 +423,7 @@ void InputFuser::cloneOp(Operation *op, Chain &chain,
       auto newConstant =
           arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
       mapping.map(constantOp.getResult(), newConstant.getResult());
-      if (constantOp.getResult() == chain.root) {
-        body->getArgument(numIV + chain.insIdx)
-            .replaceAllUsesWith(newConstant.getResult());
-        insIdxToRemove.push_back(chain.insIdx);
-      }
+      replaceRootIfMatch(constantOp.getResult(), newConstant.getResult());
       return;
     }
   }
@@ -436,12 +443,7 @@ void InputFuser::cloneOp(Operation *op, Chain &chain,
   for (auto [origResult, newResult] :
        llvm::zip(op->getResults(), newOp->getResults())) {
     newResult.setType(updateTensorType(newResult.getType(), chain.tileShape));
-    // If this result was previously an ins, replace its block arg with the
-    // newly cloned result and mark the arg for removal.
-    if (origResult == chain.root) {
-      body->getArgument(numIV + chain.insIdx).replaceAllUsesWith(newResult);
-      insIdxToRemove.push_back(chain.insIdx);
-    }
+    replaceRootIfMatch(origResult, newResult);
   }
   mapping.map(op->getResults(), newOp->getResults());
 }
