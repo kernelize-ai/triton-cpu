@@ -23,7 +23,7 @@ void MaskedLoadOp::getEffects(
 
 LogicalResult GenericOp::verify() {
   auto blockShape = getBlockShape();
-  auto vectorShape = getVectorShape();
+  auto tileShape = getTileShape();
 
   if (blockShape.size() != 1) {
     return emitOpError(
@@ -31,29 +31,29 @@ LogicalResult GenericOp::verify() {
            << blockShape.size();
   }
 
-  if (blockShape.size() != vectorShape.size()) {
+  if (blockShape.size() != tileShape.size()) {
     return emitOpError(
-               "expects blockShape and vectorShape to have the same rank, got ")
-           << blockShape.size() << " vs " << vectorShape.size();
+               "expects blockShape and tileShape to have the same rank, got ")
+           << blockShape.size() << " vs " << tileShape.size();
   }
   for (unsigned i = 0; i < blockShape.size(); i++) {
     if (blockShape[i] <= 0) {
       return emitOpError("expects blockShape[")
              << i << "] to be positive, got " << blockShape[i];
     }
-    if (vectorShape[i] <= 0) {
-      return emitOpError("expects vectorShape[")
-             << i << "] to be positive, got " << vectorShape[i];
+    if (tileShape[i] <= 0) {
+      return emitOpError("expects tileShape[")
+             << i << "] to be positive, got " << tileShape[i];
     }
-    if (blockShape[i] < vectorShape[i]) {
+    if (blockShape[i] < tileShape[i]) {
       return emitOpError("expects blockShape[")
-             << i << "] >= vectorShape[" << i << "], got " << blockShape[i]
-             << " vs " << vectorShape[i];
+             << i << "] >= tileShape[" << i << "], got " << blockShape[i]
+             << " vs " << tileShape[i];
     }
-    if (blockShape[i] % vectorShape[i] != 0) {
+    if (blockShape[i] % tileShape[i] != 0) {
       return emitOpError("expects blockShape[")
-             << i << "] % vectorShape[" << i << "] == 0, got " << blockShape[i]
-             << " vs " << vectorShape[i];
+             << i << "] % tileShape[" << i << "] == 0, got " << blockShape[i]
+             << " vs " << tileShape[i];
     }
   }
 

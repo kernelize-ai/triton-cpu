@@ -180,17 +180,20 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     Location loc = op.getLoc();
 
     auto blockShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("blockShape");
-    auto vectorShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("vectorShape");
+    assert(blockShapeAttr &&
+           "expected generic op to have blockShape attribute");
+    auto tileShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("tileShape");
+    assert(tileShapeAttr && "expected generic op to have tileShape attribute");
 
     ArrayRef<int32_t> blockShape = blockShapeAttr.asArrayRef();
-    ArrayRef<int32_t> vectorShape = vectorShapeAttr.asArrayRef();
-    assert(blockShape.size() == vectorShape.size() && !blockShape.empty() &&
-           "blockShape and vectorShape must be non-empty and of the same size");
+    ArrayRef<int32_t> tileShape = tileShapeAttr.asArrayRef();
+    assert(blockShape.size() == tileShape.size() && !blockShape.empty() &&
+           "blockShape and tileShape must be non-empty and of the same size");
 
     // TODO: assuming 1D shapes
     assert(blockShape.size() == 1);
     int64_t blockSize = blockShape[0];
-    int64_t vectorSize = vectorShape[0];
+    int64_t vectorSize = tileShape[0];
     unsigned numChunks = blockSize / vectorSize;
 
     Value result;
