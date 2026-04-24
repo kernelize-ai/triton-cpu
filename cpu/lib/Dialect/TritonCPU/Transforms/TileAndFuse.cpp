@@ -20,28 +20,28 @@ namespace cpu {
 
 namespace {
 
-// Replace the shape of a RankedTensorType with vectorShape, preserving element
+// Replace the shape of a RankedTensorType with tileShape, preserving element
 // type and encoding. Non-tensor types are returned unchanged.
-static Type updateTensorType(Type t, ArrayRef<int32_t> vectorShape) {
+static Type updateTensorType(Type t, ArrayRef<int32_t> tileShape) {
   auto tensorType = dyn_cast<RankedTensorType>(t);
   if (!tensorType)
     return t;
   return RankedTensorType::get(
       llvm::to_vector(
-          llvm::map_range(vectorShape, [](int32_t s) { return int64_t(s); })),
+          llvm::map_range(tileShape, [](int32_t s) { return int64_t(s); })),
       tensorType.getElementType(), tensorType.getEncoding());
 }
 
-// Extract blockShape (full tensor shape) and vectorShape (sizePerThread) from
+// Extract blockShape (full tensor shape) and tileShape (sizePerThread) from
 // a tensor type with BlockedEncoding.
 static std::pair<SmallVector<int32_t>, SmallVector<int32_t>>
-getBlockAndVectorShapes(RankedTensorType tensorTy,
-                        gpu::BlockedEncodingAttr encoding) {
+getBlockAndTileShapes(RankedTensorType tensorTy,
+                      gpu::BlockedEncodingAttr encoding) {
   auto shape = tensorTy.getShape();
   SmallVector<int32_t> blockShape(shape.begin(), shape.end());
   auto sizePerThread = encoding.getSizePerThread();
-  SmallVector<int32_t> vectorShape(sizePerThread.begin(), sizePerThread.end());
-  return {blockShape, vectorShape};
+  SmallVector<int32_t> tileShape(sizePerThread.begin(), sizePerThread.end());
+  return {blockShape, tileShape};
 }
 
 // Create the body block of a GenericOp, adding one block arg per ins value
@@ -49,13 +49,12 @@ getBlockAndVectorShapes(RankedTensorType tensorTy,
 // with ins value → block arg entries and sets the insertion point to the start
 // of the block. Returns the new block.
 static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
-                              ArrayRef<Value> ins,
-                              ArrayRef<int32_t> vectorShape,
+                              ArrayRef<Value> ins, ArrayRef<int32_t> tileShape,
                               IRMapping &mapping) {
   Block *body = rewriter.createBlock(&generic.getBody());
   body->addArgument(rewriter.getI32Type(), generic.getLoc()); // chunk offset
   for (Value v : ins) {
-    Type argTy = updateTensorType(v.getType(), vectorShape);
+    Type argTy = updateTensorType(v.getType(), tileShape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
   rewriter.setInsertionPointToStart(body);
@@ -81,18 +80,16 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
     if (!encoding)
       return failure();
 
-    auto [blockShape, vectorShape] =
-        getBlockAndVectorShapes(tensorTy, encoding);
+    auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
 
     SmallVector<Value> ins(storeOp->getOperands().begin(),
                            storeOp->getOperands().end());
 
     auto generic = cpu::GenericOp::create(
-        rewriter, loc, /*resultTypes=*/TypeRange{}, ins,
-        /*params=*/ValueRange{}, blockShape, vectorShape);
+        rewriter, loc, /*resultTypes=*/TypeRange{}, ins, blockShape, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, vectorShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
 
     rewriter.clone(*storeOp, bodyMapping);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
@@ -146,8 +143,7 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
           return user != reduceOp.getOperation(); // or just != reduceOp?
         });
 
-    auto [blockShape, vectorShape] =
-        getBlockAndVectorShapes(tensorTy, encoding);
+    auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
 
     SmallVector<Value> ins = {srcs[0]};
     SmallVector<Type> resultTypes(reduceOp.getResultTypes().begin(),
@@ -158,11 +154,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     LDBG("Creating reduction generic op, result types: " << resultTypes.size());
 
     auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, ins,
-                                          /*params=*/ValueRange{}, blockShape,
-                                          vectorShape);
+                                          blockShape, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, vectorShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
@@ -279,7 +274,6 @@ private:
   SmallVector<Operation *> collectChain(Chain &chain);
 
   void cloneOp(Operation *op, Chain &chain, SmallVector<Value> &newIns,
-               SmallVector<Value> &newParams,
                SmallVector<unsigned> &insIdxToRemove, IRMapping &mapping);
 
   IRRewriter &rewriter;
@@ -291,7 +285,6 @@ LogicalResult InputFuser::run() {
   unsigned numIV = genericOp.getNumInductionVars();
 
   SmallVector<Value> newIns(genericOp.getIns());
-  SmallVector<Value> newParams(genericOp.getParams());
   SmallVector<unsigned> insIdxToRemove;
 
   for (auto [insIdx, root] : llvm::enumerate(genericOp.getIns())) {
@@ -310,7 +303,7 @@ LogicalResult InputFuser::run() {
     IRMapping mapping;
     rewriter.setInsertionPointToStart(body);
     for (Operation *op : sorted) {
-      cloneOp(op, chain, newIns, newParams, insIdxToRemove, mapping);
+      cloneOp(op, chain, newIns, insIdxToRemove, mapping);
     }
   }
 
@@ -320,10 +313,8 @@ LogicalResult InputFuser::run() {
     newIns.erase(newIns.begin() + idx);
   }
 
-  rewriter.modifyOpInPlace(genericOp, [&]() {
-    genericOp.getInsMutable().assign(newIns);
-    genericOp.getParamsMutable().assign(newParams);
-  });
+  rewriter.modifyOpInPlace(genericOp,
+                           [&]() { genericOp.getInsMutable().assign(newIns); });
 
   return success();
 }
@@ -373,7 +364,6 @@ SmallVector<Operation *> InputFuser::collectChain(Chain &chain) {
 
 void InputFuser::cloneOp(Operation *op, Chain &chain,
                          SmallVector<Value> &newIns,
-                         SmallVector<Value> &newParams,
                          SmallVector<unsigned> &insIdxToRemove,
                          IRMapping &mapping) {
   Block *body = &genericOp.getBody().front();

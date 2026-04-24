@@ -65,7 +65,7 @@ def TritonCPUTileAndFuse : Pass<"tritoncpu-tile-and-fuse", "mlir::ModuleOp"> {
     - `ins` operands are the pointer, mask, and other arguments of any `tt.load`
       and `tt.store` ops in the chain.
     - `blockShape` is taken from the tensor shape of the common tensor type.
-    - `vectorShape` (tile size) is taken from the `sizePerThread` field of the
+    - `tileShape` is taken from the `sizePerThread` field of the
       `BlockedEncodingAttr` on the common tensor type.
 
     The ops in the chain are cloned into the generic region with tensor types
@@ -73,7 +73,7 @@ def TritonCPUTileAndFuse : Pass<"tritoncpu-tile-and-fuse", "mlir::ModuleOp"> {
     tiled block arguments. The original ops are erased.
 
     The resulting `ttc.generic` is later lowered to LLVM by unrolling the region
-    body once per tile (blockShape / vectorShape iterations), extracting and
+    body once per tile (blockShape / tileShape iterations), extracting and
     inserting sub-vectors from the operands for each tile.
   }];
 

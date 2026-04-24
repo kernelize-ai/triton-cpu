@@ -162,14 +162,14 @@ def TTC_YieldOp : TTC_Op<"yield", [Terminator, ReturnLike, HasParent<"GenericOp"
   let assemblyFormat = "($values^ `:` type($values))? attr-dict";
 }
 
-def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
-  let summary = "Tiled iteration over a tensor block with fused loads and stores";
+def TTC_GenericOp : TTC_Op<"generic", [RecursiveMemoryEffects, RecursivelySpeculatable, IsolatedFromAbove]> {
+  let summary = "Tiled iteration over a tensor block with fused tensor operations";
 
   let description = [{
-    Wraps a fused chain of tensor operations (loads, elementwise math, stores)
-    and owns the schedule for iterating over the block in tiles.
+    Wraps a fused chain of tensor operations and owns the schedule for iterating
+    over the block in tiles.
 
-    The operation logically iterates over `blockShape` in steps of `vectorShape`,
+    The operation logically iterates over `blockShape` in steps of `tileShape`,
     executing the body region once per tile. This models the pattern of splitting
     a full-block tensor computation into a loop over sub-vectors, enabling
     register-pressure-friendly lowering without materializing the entire block
@@ -177,31 +177,30 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
 
     Operands:
     - `ins`: tensor-typed inputs (e.g. pointer tensors for loads and stores).
-      Each operand is sliced to `vectorShape` for each tile iteration and passed
+      Each operand is sliced to `tileShape` for each tile iteration and passed
       as the corresponding block argument to the body region.
-    - `params`: scalar or tensor-typed pass-through values that are forwarded
-      into the body region unchanged (not tiled).
 
-    The `body` region receives block arguments corresponding to (in order) the
-    tiled slices of `ins` followed by the untiled `params`. It is executed once
-    per tile and terminated by `ttc.yield`. When the op has scalar results,
+    The `body` region receives block arguments corresponding to the tiled slices
+    of `ins`. It is executed once per tile and terminated by `ttc.yield`. When the op has scalar results,
     `ttc.yield` returns one partial value per result (e.g. the output of a
     `tt.reduce` over the tile).
 
     The `combiners` region contains one block per scalar result. Each block takes
     two arguments `(acc, partial)` of the result type and yields the updated
     accumulator. The lowering bootstraps the accumulator from the first tile's
-    partial result and applies the combiner for each subsequent tile.
+    partial result and applies the combiner for each subsequent tile. The combiners
+    region is only used for scalar reductions. Combining (concatenating) tensor tiles
+    for Generics that output tensors is handled separately by the lowering.
 
     Constraints:
-    - `blockShape` and `vectorShape` must have the same rank.
-    - Each `blockShape[i]` must be a positive multiple of `vectorShape[i]`.
+    - `blockShape` and `tileShape` must have the same rank.
+    - Each `blockShape[i]` must be a positive multiple of `tileShape[i]`.
     - `combiners` must have exactly as many blocks as there are scalar results,
       each with two arguments and one yield of the matching type.
 
     Example — elementwise chain (no scalar results, empty combiners):
     ```
-    ttc.generic %src_ptrs, %dst_ptrs {blockShape = [128], vectorShape = [16]}
+    ttc.generic %src_ptrs, %dst_ptrs {blockShape = [128], tileShape = [16]}
         : tensor<128x!tt.ptr<f32>>, tensor<128x!tt.ptr<f32>>
     body {
     ^bb0(%src: tensor<16x!tt.ptr<f32>>, %dst: tensor<16x!tt.ptr<f32>>):
@@ -214,7 +213,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
 
     Example — reduction (one scalar result):
     ```
-    %max = ttc.generic %ptrs, %mask {blockShape = [128], vectorShape = [16]}
+    %max = ttc.generic %ptrs, %mask {blockShape = [128], tileShape = [16]}
         : tensor<128x!tt.ptr<f32>>, tensor<128xi1> -> f32
     body {
     ^bb0(%tptrs: tensor<16x!tt.ptr<f32>>, %tmask: tensor<16xi1>):
@@ -227,20 +226,13 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
       ttc.yield %new : f32
     }
     ```
-
-    During lowering to LLVM, the body is unrolled `blockShape / vectorShape`
-    times. For each iteration, sub-vectors are extracted from the LLVM struct
-    representation of each `ins` operand, cast back to the tile tensor type, and
-    substituted for the corresponding block arguments before cloning the body.
-    Scalar results are accumulated across tiles using the combiner blocks.
   }];
 
   let arguments = (ins
     Variadic<TT_Type>:$ins,
-    Variadic<TT_Type>:$params,
 
     DenseI32ArrayAttr:$blockShape,
-    DenseI32ArrayAttr:$vectorShape
+    DenseI32ArrayAttr:$tileShape
   );
 
   let results = (outs Variadic<AnyType>:$results);
@@ -250,7 +242,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    $ins (` ` `(` $params^ `)`)? attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
+    $ins attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
   }];
 
   let extraClassDeclaration = [{

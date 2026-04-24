@@ -56,14 +56,14 @@ void CpuAxisInfoAnalysis::visitGenericOpArguments(
     ArrayRef<dataflow::Lattice<AxisInfo> *> argLattices) {
   ProgramPoint *programPoint = getProgramPointAfter(genericOp);
 
-  auto vectorShape = genericOp.getVectorShape();
+  auto tileShape = genericOp.getTileShape();
 
   // handle the induction var / tile offset separately
   {
     AxisInfo::DimVectorT knownContiguity(1, 1);
     AxisInfo::DimVectorT knownDivisibility(1, 1);
     AxisInfo::DimVectorT knownConstancy(1, 1);
-    knownDivisibility[0] = vectorShape[0]; // TODO: multi-dim support
+    knownDivisibility[0] = tileShape[0]; // TODO: multi-dim support
     auto inductionVar =
         AxisInfo(knownContiguity, knownDivisibility, knownConstancy);
     propagateIfChanged(argLattices[0], argLattices[0]->join(inductionVar));
@@ -92,7 +92,7 @@ void CpuAxisInfoAnalysis::visitGenericOpArguments(
       AxisInfo::DimVectorT constancy(rank);
 
       for (int d = 0; d < rank; ++d) {
-        int64_t tileSize = (d < (int)vectorShape.size()) ? vectorShape[d] : 1;
+        int64_t tileSize = (d < (int)tileShape.size()) ? tileShape[d] : 1;
         int64_t tileSizeBytes = tileSize * elemTy.getIntOrFloatBitWidth() / 8;
         contiguity[d] = std::min(outer.getContiguity(d), tileSize);
         constancy[d] = std::min(outer.getConstancy(d), tileSize);
