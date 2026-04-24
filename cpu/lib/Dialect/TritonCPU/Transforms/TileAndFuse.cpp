@@ -44,16 +44,25 @@ getBlockAndTileShapes(RankedTensorType tensorTy,
   return {blockShape, tileShape};
 }
 
+struct TiledInput {
+  Value value;
+  SmallVector<int32_t> shape;
+};
+
 // Create the body block of a GenericOp, adding one block arg per ins value
 // with tensor types replaced to the vector (chunk) shape. Populates `mapping`
 // with ins value → block arg entries and sets the insertion point to the start
 // of the block. Returns the new block.
 static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
-                              ArrayRef<Value> ins, ArrayRef<int32_t> tileShape,
-                              IRMapping &mapping) {
+                              ArrayRef<TiledInput> ins,
+                              ArrayRef<int32_t> tileShape, IRMapping &mapping) {
   Block *body = rewriter.createBlock(&generic.getBody());
-  body->addArgument(rewriter.getI32Type(), generic.getLoc()); // chunk offset
-  for (Value v : ins) {
+  for (unsigned i = 0; i < tileShape.size(); i++)
+    body->addArgument(rewriter.getI32Type(),
+                      generic.getLoc()); // tile offset per vector shape dim
+
+  for (auto pair : ins) {
+    auto [v, tileShape] = pair;
     Type argTy = updateTensorType(v.getType(), tileShape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
@@ -82,11 +91,17 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
 
     auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
 
-    SmallVector<Value> ins(storeOp->getOperands().begin(),
-                           storeOp->getOperands().end());
+    SmallVector<TiledInput> ins;
+    for (auto value : storeOp->getOperands()) {
+      ins.push_back(TiledInput{value, tileShape});
+    }
 
-    auto generic = cpu::GenericOp::create(
-        rewriter, loc, /*resultTypes=*/TypeRange{}, ins, blockShape, tileShape);
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, /*resultTypes=*/TypeRange{},
+                               insValues, blockShape, tileShape);
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
@@ -146,7 +161,7 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 
     auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
 
-    SmallVector<Value> ins = {srcs[0]};
+    SmallVector<TiledInput> ins = {TiledInput{srcs[0], tileShape}};
     SmallVector<Type> resultTypes(reduceOp.getResultTypes().begin(),
                                   reduceOp.getResultTypes().end());
     if (srcUsedElsewhere)
@@ -154,7 +169,9 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 
     LDBG("Creating reduction generic op, result types: " << resultTypes.size());
 
-    auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, ins,
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+    auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, insValues,
                                           blockShape, tileShape);
 
     IRMapping bodyMapping;
@@ -310,31 +327,208 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     // currently tiled.
     auto [blockShape, tileShape] = getBlockAndTileShapes(resultTy, encoding);
 
-    // Collect all values the for loop captures from outside its scope.
-    //   1. The forOp's explicit operands (lb, ub, step, init_args).
-    //   2. Free variables: values used by ops inside the body that are
-    //      defined outside the for op (implicit captures).
-    auto isDefinedInsideForOp = [&](Value v) -> bool {
-      if (auto blockArg = dyn_cast<BlockArgument>(v))
-        return forOp->isAncestor(blockArg.getOwner()->getParentOp());
-      return forOp->isAncestor(v.getDefiningOp());
+    auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
+    assert(aTy.getRank() == 2 && "only 2D dot op supported");
+    int32_t kSize = (int32_t)aTy.getShape()[1];
+
+    SmallVector<int32_t> aTileShape = {tileShape[0], kSize};
+    SmallVector<int32_t> bTileShape = {kSize, tileShape[1]};
+
+    struct OperandChain {
+      SetVector<Operation *> body;
+      SmallVector<TiledInput> ins;
     };
 
-    SetVector<Value> capturedSet;
-    for (Value v : forOp.getOperands())
-      capturedSet.insert(v);
-    forOp.getBody()->walk([&](Operation *innerOp) {
-      for (Value operand : innerOp->getOperands())
-        if (!isDefinedInsideForOp(operand))
-          capturedSet.insert(operand);
-    });
-    SmallVector<Value> ins(capturedSet.begin(), capturedSet.end());
+    // Walk backward from rootOp (inside forOp's body) via getBackwardSlice.
+    // Populates:
+    //   body   — ops strictly inside forOp that are in this chain
+    //   ins — values defined outside forOp consumed by this chain,
+    //               including iter_arg init values traced across the boundary
+    unsigned numIVs = forOp.getNumInductionVars();
+    auto buildChain = [&](Operation *rootOp,
+                          ArrayRef<int32_t> shape) -> OperandChain {
+      OperandChain chain;
+
+      BackwardSliceOptions opts;
+      opts.omitBlockArguments = true;
+      opts.filter = [&](Operation *op) {
+        return op != forOp && forOp->isAncestor(op);
+      };
+      (void)getBackwardSlice(rootOp, &chain.body, opts);
+      chain.body.insert(rootOp); // getBackwardSlice excludes the root itself
+
+      for (Operation *op : chain.body) {
+        for (Value operand : op->getOperands()) {
+          if (auto barg = dyn_cast<BlockArgument>(operand)) {
+            if (barg.getOwner() != forOp.getBody())
+              continue;
+            if (barg.getArgNumber() < numIVs)
+              continue; // induction variable — defined by the loop, not
+                        // external
+            // iter_arg: cross the boundary to its init value
+            Value initVal = forOp.getInitArgs()[barg.getArgNumber() - numIVs];
+            bool isTensor = isa<RankedTensorType>(initVal.getType());
+            chain.ins.push_back({initVal, isTensor ? SmallVector<int32_t>(shape)
+                                                   : SmallVector<int32_t>{}});
+          } else if (!forOp->isAncestor(operand.getDefiningOp())) {
+            bool isTensor = isa<RankedTensorType>(operand.getType());
+            chain.ins.push_back({operand, isTensor ? SmallVector<int32_t>(shape)
+                                                   : SmallVector<int32_t>{}});
+          }
+        }
+      }
+      return chain;
+    };
+
+    // dotOp.getA() and getB() are results of loads inside the for body.
+    // dotOp.getC() is an iter_arg (block argument) — no chain needed, we
+    // reconstruct the zero accumulator at tile size inside the generic body.
+    OperandChain aChain = buildChain(dotOp.getA().getDefiningOp(), aTileShape);
+    OperandChain bChain = buildChain(dotOp.getB().getDefiningOp(), bTileShape);
+
+    auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+    for (auto [iterArgIdx, offset] : info->ptrArgs) {
+      Operation *addPtrOp =
+          yieldOp.getOperands()[iterArgIdx].getDefiningOp<triton::AddPtrOp>();
+      assert(addPtrOp && "expected tt::add_ptr");
+      // determine which chain owns this ptr arg by checking aChain's ins
+      const auto iterArgIdx_ =
+          iterArgIdx; // captured structured bindings workaround
+      bool isAChain = llvm::any_of(aChain.ins, [&](const TiledInput &ti) {
+        return ti.value == forOp.getInitArgs()[iterArgIdx_];
+      });
+      OperandChain &chain = isAChain ? aChain : bChain;
+      ArrayRef<int32_t> shape = isAChain ? aTileShape : bTileShape;
+
+      // pull in the addptr and its offset operand chain
+      BackwardSliceOptions opts;
+      opts.omitBlockArguments = true;
+      opts.filter = [&](Operation *op) {
+        return op != forOp && forOp->isAncestor(op);
+      };
+      (void)getBackwardSlice(addPtrOp, &chain.body, opts);
+      chain.body.insert(addPtrOp);
+      // offset may be external
+      if (!forOp->isAncestor(offset.getDefiningOp()))
+        chain.ins.push_back({offset, {}});
+    }
+
+    // Build ins: for loop bounds (scalars, needed to reconstruct the inner
+    // scf.for) followed by A-chain then B-chain ins.
+    SmallVector<TiledInput> ins;
+    ins.push_back({forOp.getLowerBound(), {}});
+    ins.push_back({forOp.getUpperBound(), {}});
+    ins.push_back({forOp.getStep(), {}});
+    for (auto &inValue : aChain.ins)
+      ins.push_back(inValue);
+    for (auto &inValue : bChain.ins)
+      ins.push_back(inValue);
+
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
 
     auto generic = cpu::GenericOp::create(rewriter, loc, TypeRange{resultTy},
-                                          ins, blockShape, tileShape);
+                                          insValues, blockShape, tileShape);
 
-    llvm::errs() << "generic: " << generic << "\n";
-    assert(false && "TODO");
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+
+    Block *body = &generic.getBody().front();
+    unsigned argIdx = generic.getNumInductionVars();
+
+    for (Value scalar :
+         {forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep()})
+      bodyMapping.map(scalar, body->getArgument(argIdx++));
+
+    IRMapping aMapping, bMapping;
+    for (auto &ti : aChain.ins)
+      aMapping.map(ti.value, body->getArgument(argIdx++));
+    for (auto &ti : bChain.ins)
+      bMapping.map(ti.value, body->getArgument(argIdx++));
+
+    rewriter.setInsertionPointToStart(body);
+
+    // TODO: what if C is not loop carried?
+    // Zero-splat C at tile size
+    auto cInitConst = forOp.getInitArgs()[info->cIterArgIdx]
+                          .getDefiningOp<arith::ConstantOp>();
+    auto cDense = cast<DenseElementsAttr>(cInitConst.getValue());
+    auto cTileTy =
+        cast<RankedTensorType>(updateTensorType(resultTy, tileShape));
+    Value cTileInit = arith::ConstantOp::create(
+        rewriter, loc,
+        DenseElementsAttr::get(cTileTy,
+                               *cDense.getValues<Attribute>().begin()));
+
+    // Assemble iter_args for inner for: same slots as original
+    SmallVector<Value> innerInitArgs(forOp.getInitArgs().size());
+    innerInitArgs[info->cIterArgIdx] = cTileInit;
+    for (auto [iterArgIdx, _] : info->ptrArgs) {
+      Value origInit = forOp.getInitArgs()[iterArgIdx];
+      // init value lands in whichever chain owns it
+      innerInitArgs[iterArgIdx] = aMapping.contains(origInit)
+                                      ? aMapping.lookup(origInit)
+                                      : bMapping.lookup(origInit);
+    }
+
+    auto innerFor = scf::ForOp::create(
+        rewriter, loc, bodyMapping.lookup(forOp.getLowerBound()),
+        bodyMapping.lookup(forOp.getUpperBound()),
+        bodyMapping.lookup(forOp.getStep()), innerInitArgs);
+    rewriter.setInsertionPointToStart(innerFor.getBody());
+
+    // TODO: lambda-ify all this
+    // Remap original IV and iter_args to inner for's block args
+    auto remapIterArgs = [&](IRMapping &m) {
+      m.map(forOp.getInductionVar(), innerFor.getInductionVar());
+      for (unsigned i = 0; i < forOp.getInitArgs().size(); ++i)
+        m.map(forOp.getBody()->getArgument(numIVs + i),
+              innerFor.getBody()->getArgument(numIVs + i));
+    };
+
+    remapIterArgs(aMapping);
+    for (Operation *op : aChain.body) {
+      Operation *cloned = rewriter.clone(*op, aMapping);
+      for (auto [orig, res] : llvm::zip(op->getResults(), cloned->getResults()))
+        res.setType(updateTensorType(orig.getType(), aTileShape));
+      aMapping.map(op->getResults(), cloned->getResults());
+    }
+
+    remapIterArgs(bMapping);
+    for (Operation *op : bChain.body) {
+      Operation *cloned = rewriter.clone(*op, bMapping);
+      for (auto [orig, res] : llvm::zip(op->getResults(), cloned->getResults()))
+        res.setType(updateTensorType(orig.getType(), bTileShape));
+      bMapping.map(op->getResults(), cloned->getResults());
+    }
+
+    bodyMapping.map(dotOp.getA(), aMapping.lookup(dotOp.getA()));
+    bodyMapping.map(dotOp.getB(), bMapping.lookup(dotOp.getB()));
+    bodyMapping.map(dotOp.getC(), innerFor.getBody()->getArgument(
+                                      numIVs + info->cIterArgIdx));
+    Operation *clonedDot = rewriter.clone(*dotOp, bodyMapping);
+    clonedDot->getResult(0).setType(updateTensorType(resultTy, tileShape));
+
+    auto origYield = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+    SmallVector<Value> yieldVals(forOp.getInitArgs().size());
+    yieldVals[info->cIterArgIdx] = clonedDot->getResult(0);
+    for (auto [iterArgIdx, _] : info->ptrArgs) {
+      Value origYieldVal = origYield.getOperands()[iterArgIdx];
+      // look up the cloned addptr in whichever chain owns it
+      yieldVals[iterArgIdx] = aMapping.contains(origYieldVal)
+                                  ? aMapping.lookup(origYieldVal)
+                                  : bMapping.lookup(origYieldVal);
+    }
+    scf::YieldOp::create(rewriter, loc, yieldVals);
+
+    rewriter.setInsertionPointAfter(innerFor);
+    cpu::YieldOp::create(rewriter, loc,
+                         ValueRange{innerFor.getResult(info->cIterArgIdx)});
+
+    rewriter.replaceAllUsesWith(forOp.getResult(info->cIterArgIdx),
+                                generic.getResult(0));
+    rewriter.eraseOp(forOp);
+    return success();
   }
 };
 
