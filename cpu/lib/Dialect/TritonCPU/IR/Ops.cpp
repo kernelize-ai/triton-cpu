@@ -25,11 +25,8 @@ LogicalResult GenericOp::verify() {
   auto blockShape = getBlockShape();
   auto tileShape = getTileShape();
 
-  if (blockShape.size() != 1) {
-    return emitOpError(
-               "only rank-1 generic ops are currently supported, got rank ")
-           << blockShape.size();
-  }
+  if (blockShape.size() < 1)
+    return emitOpError("must provide a non-empty block/vector shape");
 
   if (blockShape.size() != tileShape.size()) {
     return emitOpError(
@@ -54,6 +51,19 @@ LogicalResult GenericOp::verify() {
       return emitOpError("expects blockShape[")
              << i << "] % tileShape[" << i << "] == 0, got " << blockShape[i]
              << " vs " << tileShape[i];
+    }
+  }
+
+  // all operands must have the same encoding
+  Attribute tensorEncoding;
+  for (auto operand : getOperands()) {
+    if (auto tensorTy = dyn_cast<RankedTensorType>(operand.getType())) {
+      if (tensorEncoding && tensorEncoding != tensorTy.getEncoding())
+        return emitOpError("expects all tensor operands to have the same "
+                           "encoding, got ")
+               << tensorTy.getEncoding() << " with previous encoding "
+               << tensorEncoding;
+      tensorEncoding = tensorTy.getEncoding();
     }
   }
 

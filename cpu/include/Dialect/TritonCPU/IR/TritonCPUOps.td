@@ -246,8 +246,8 @@ def TTC_GenericOp : TTC_Op<"generic", [RecursiveMemoryEffects, RecursivelySpecul
   }];
 
   let extraClassDeclaration = [{
-    Value getChunkOffset() { return getBody().front().getArgument(0); }
-    unsigned getNumInductionVars() { return 1; }
+    Value getTileOffset(unsigned dim) { return getBody().front().getArgument(dim); }
+    unsigned getNumInductionVars() { return getBlockShape().size(); }
     unsigned getNumRegionIterArgs() {
       return getBody().front().getNumArguments() - getNumInductionVars();
     }

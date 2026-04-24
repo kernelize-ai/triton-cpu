@@ -215,6 +215,129 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
   }
 };
 
+struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  struct KLoopDotInfo {
+    triton::DotOp dotOp;
+    unsigned cIterArgIdx;
+    SmallVector<std::pair<unsigned, Value>>
+        ptrArgs; // loop carried ptr values for A and B dot operands
+  };
+
+  static std::optional<KLoopDotInfo> matchKLoopWithDot(scf::ForOp forOp) {
+    if (forOp->getParentOfType<cpu::GenericOp>())
+      return std::nullopt;
+
+    triton::DotOp dotOp;
+    for (auto &op : *forOp.getBody()) {
+      if (auto d = dyn_cast<triton::DotOp>(&op)) {
+        if (dotOp)
+          return std::nullopt; // TODO: handle multiple dots?
+        dotOp = d;
+      }
+    }
+    if (!dotOp)
+      return std::nullopt;
+
+    // Dot result must have BlockedEncoding so we can derive
+    // blockShape/vectorShape.
+    auto resultTy = dyn_cast<RankedTensorType>(dotOp.getType());
+    if (!resultTy || !isa<gpu::BlockedEncodingAttr>(resultTy.getEncoding()))
+      return std::nullopt;
+
+    // C operand must be an iter_arg of this loop (not a constant or external
+    // value).
+    auto cArg = dyn_cast<BlockArgument>(dotOp.getC());
+    if (!cArg || cArg.getOwner() != forOp.getBody())
+      return std::nullopt;
+    unsigned numIVs = forOp.getNumInductionVars();
+    unsigned cArgNum = cArg.getArgNumber();
+    if (cArgNum < numIVs)
+      return std::nullopt;
+    unsigned cIterArgIdx = cArgNum - numIVs;
+
+    // C's init value must be a zero-splat constant — we reconstruct it at tile
+    // size inside the generic body.
+    auto cInitOp =
+        forOp.getInitArgs()[cIterArgIdx].getDefiningOp<arith::ConstantOp>();
+    if (!cInitOp)
+      return std::nullopt;
+    auto dense = dyn_cast<DenseElementsAttr>(cInitOp.getValue());
+    if (!dense || !dense.isSplat())
+      return std::nullopt;
+    if (auto fp = dyn_cast<FloatAttr>(dense.getSplatValue<Attribute>()))
+      if (!fp.getValue().isZero())
+        return std::nullopt;
+
+    // The yield must carry the dot result back as the updated C value.
+    auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+    if (yieldOp.getOperands()[cIterArgIdx] != dotOp.getResult())
+      return std::nullopt;
+
+    // Find pointer iter_args that are advanced by tt.addptr each iteration.
+    SmallVector<std::pair<unsigned, Value>> ptrArgs;
+    for (unsigned i = 0, e = forOp.getInitArgs().size(); i < e; ++i) {
+      if (i == cIterArgIdx)
+        continue;
+      Value iterArgVal = forOp.getBody()->getArgument(numIVs + i);
+      auto addPtrOp =
+          yieldOp.getOperands()[i].getDefiningOp<triton::AddPtrOp>();
+      if (!addPtrOp || addPtrOp.getPtr() != iterArgVal)
+        continue;
+      ptrArgs.push_back({i, addPtrOp.getOffset()});
+    }
+    if (ptrArgs.empty())
+      return std::nullopt;
+
+    return KLoopDotInfo{dotOp, cIterArgIdx, ptrArgs};
+  }
+
+  mlir::LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+
+    auto info = matchKLoopWithDot(forOp);
+    if (!info)
+      return failure();
+
+    Location loc = forOp.getLoc();
+    triton::DotOp dotOp = info->dotOp;
+    auto resultTy = cast<RankedTensorType>(dotOp.getType());
+    auto encoding = cast<gpu::BlockedEncodingAttr>(resultTy.getEncoding());
+
+    // use the MxN (result) shape for block/tile shapes. The K loop is not
+    // currently tiled.
+    auto [blockShape, tileShape] = getBlockAndTileShapes(resultTy, encoding);
+
+    // Collect all values the for loop captures from outside its scope.
+    //   1. The forOp's explicit operands (lb, ub, step, init_args).
+    //   2. Free variables: values used by ops inside the body that are
+    //      defined outside the for op (implicit captures).
+    auto isDefinedInsideForOp = [&](Value v) -> bool {
+      if (auto blockArg = dyn_cast<BlockArgument>(v))
+        return forOp->isAncestor(blockArg.getOwner()->getParentOp());
+      return forOp->isAncestor(v.getDefiningOp());
+    };
+
+    SetVector<Value> capturedSet;
+    for (Value v : forOp.getOperands())
+      capturedSet.insert(v);
+    forOp.getBody()->walk([&](Operation *innerOp) {
+      for (Value operand : innerOp->getOperands())
+        if (!isDefinedInsideForOp(operand))
+          capturedSet.insert(operand);
+    });
+    SmallVector<Value> ins(capturedSet.begin(), capturedSet.end());
+
+    auto generic = cpu::GenericOp::create(rewriter, loc, TypeRange{resultTy},
+                                          ins, blockShape, tileShape);
+
+    llvm::errs() << "generic: " << generic << "\n";
+    assert(false && "TODO");
+  }
+};
+
 struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
 
@@ -404,6 +527,7 @@ struct TritonCPUTileAndFusePass
     // Step 1: Create the generic ops
     patterns.add<WrapStores>(context, benefitDefault);
     patterns.add<WrapReduceOp>(context, benefitDefault);
+    patterns.add<WrapKLoopWithDotOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
