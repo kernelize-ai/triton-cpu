@@ -344,31 +344,36 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     //   ins — values defined outside forOp consumed by this chain,
     //               including iter_arg init values traced across the boundary
     unsigned numIVs = forOp.getNumInductionVars();
-    auto buildChain = [&](Operation *rootOp,
-                          ArrayRef<int32_t> shape) -> OperandChain {
-      OperandChain chain;
 
-      BackwardSliceOptions opts;
-      opts.omitBlockArguments = true;
-      opts.filter = [&](Operation *op) {
-        return op != forOp && forOp->isAncestor(op);
-      };
-      (void)getBackwardSlice(rootOp, &chain.body, opts);
-      chain.body.insert(rootOp); // getBackwardSlice excludes the root itself
+    BackwardSliceOptions sliceOpts;
+    sliceOpts.omitBlockArguments = true;
+    sliceOpts.filter = [&](Operation *op) {
+      return op != forOp && forOp->isAncestor(op);
+    };
 
-      for (Operation *op : chain.body) {
+    // Scan `ops` for operands defined outside forOp and append them to
+    // `chain.ins`. Crosses iter_arg boundaries to their init values; treats
+    // other external block args (e.g. function arguments) as plain externals.
+    auto collectExternals = [&](ArrayRef<Operation *> ops, OperandChain &chain,
+                                ArrayRef<int32_t> shape) {
+      for (Operation *op : ops) {
         for (Value operand : op->getOperands()) {
           if (auto barg = dyn_cast<BlockArgument>(operand)) {
-            if (barg.getOwner() != forOp.getBody())
-              continue;
-            if (barg.getArgNumber() < numIVs)
-              continue; // induction variable — defined by the loop, not
-                        // external
-            // iter_arg: cross the boundary to its init value
-            Value initVal = forOp.getInitArgs()[barg.getArgNumber() - numIVs];
-            bool isTensor = isa<RankedTensorType>(initVal.getType());
-            chain.ins.push_back({initVal, isTensor ? SmallVector<int32_t>(shape)
-                                                   : SmallVector<int32_t>{}});
+            if (barg.getOwner() == forOp.getBody()) {
+              if (barg.getArgNumber() < numIVs)
+                continue; // induction variable
+              Value initVal = forOp.getInitArgs()[barg.getArgNumber() - numIVs];
+              bool isTensor = isa<RankedTensorType>(initVal.getType());
+              chain.ins.push_back({initVal, isTensor
+                                                ? SmallVector<int32_t>(shape)
+                                                : SmallVector<int32_t>{}});
+            } else {
+              // external block arg (e.g. function argument)
+              bool isTensor = isa<RankedTensorType>(operand.getType());
+              chain.ins.push_back({operand, isTensor
+                                                ? SmallVector<int32_t>(shape)
+                                                : SmallVector<int32_t>{}});
+            }
           } else if (!forOp->isAncestor(operand.getDefiningOp())) {
             bool isTensor = isa<RankedTensorType>(operand.getType());
             chain.ins.push_back({operand, isTensor ? SmallVector<int32_t>(shape)
@@ -376,6 +381,14 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
           }
         }
       }
+    };
+
+    auto buildChain = [&](Operation *rootOp,
+                          ArrayRef<int32_t> shape) -> OperandChain {
+      OperandChain chain;
+      (void)getBackwardSlice(rootOp, &chain.body, sliceOpts);
+      chain.body.insert(rootOp); // getBackwardSlice excludes the root itself
+      collectExternals(chain.body.getArrayRef(), chain, shape);
       return chain;
     };
 
@@ -407,9 +420,7 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
       };
       (void)getBackwardSlice(addPtrOp, &chain.body, opts);
       chain.body.insert(addPtrOp);
-      // offset may be external
-      if (!forOp->isAncestor(offset.getDefiningOp()))
-        chain.ins.push_back({offset, {}});
+      collectExternals(chain.body.getArrayRef(), chain, shape);
     }
 
     // Build ins: for loop bounds (scalars, needed to reconstruct the inner
