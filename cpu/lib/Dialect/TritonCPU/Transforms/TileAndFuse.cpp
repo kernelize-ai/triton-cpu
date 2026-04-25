@@ -356,6 +356,10 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     // other external block args (e.g. function arguments) as plain externals.
     auto collectExternals = [&](ArrayRef<Operation *> ops, OperandChain &chain,
                                 ArrayRef<int32_t> shape) {
+      DenseSet<Value> seen;
+      for (auto &ti : chain.ins) // pre-populate from prior calls
+        seen.insert(ti.value);
+
       for (Operation *op : ops) {
         for (Value operand : op->getOperands()) {
           if (auto barg = dyn_cast<BlockArgument>(operand)) {
@@ -363,21 +367,28 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
               if (barg.getArgNumber() < numIVs)
                 continue; // induction variable
               Value initVal = forOp.getInitArgs()[barg.getArgNumber() - numIVs];
-              bool isTensor = isa<RankedTensorType>(initVal.getType());
-              chain.ins.push_back({initVal, isTensor
-                                                ? SmallVector<int32_t>(shape)
-                                                : SmallVector<int32_t>{}});
+              if (seen.insert(initVal).second) {
+                bool isTensor = isa<RankedTensorType>(initVal.getType());
+                chain.ins.push_back({initVal, isTensor
+                                                  ? SmallVector<int32_t>(shape)
+                                                  : SmallVector<int32_t>{}});
+              }
             } else {
               // external block arg (e.g. function argument)
+              if (seen.insert(operand).second) {
+                bool isTensor = isa<RankedTensorType>(operand.getType());
+                chain.ins.push_back({operand, isTensor
+                                                  ? SmallVector<int32_t>(shape)
+                                                  : SmallVector<int32_t>{}});
+              }
+            }
+          } else if (!forOp->isAncestor(operand.getDefiningOp())) {
+            if (seen.insert(operand).second) {
               bool isTensor = isa<RankedTensorType>(operand.getType());
               chain.ins.push_back({operand, isTensor
                                                 ? SmallVector<int32_t>(shape)
                                                 : SmallVector<int32_t>{}});
             }
-          } else if (!forOp->isAncestor(operand.getDefiningOp())) {
-            bool isTensor = isa<RankedTensorType>(operand.getType());
-            chain.ins.push_back({operand, isTensor ? SmallVector<int32_t>(shape)
-                                                   : SmallVector<int32_t>{}});
           }
         }
       }
