@@ -111,14 +111,17 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
   SmallVector<Value> emitTileBody(cpu::GenericOp op,
                                   ConversionPatternRewriter &rewriter,
-                                  ArrayRef<Value> chunkedArgs, Value tileOffset,
+                                  ArrayRef<Value> chunkedArgs,
+                                  ArrayRef<Value> tileOffsets,
                                   Value &result) const {
     Block *body = &op.getBody().front();
     const bool hasReductions = !op.getCombiners().empty();
 
     // clone the body of the generic op for this chunk only
     IRMapping mapping;
-    mapping.map(body->getArgument(0), tileOffset);
+    for (auto [blockArg, offset] : llvm::zip(
+             body->getArguments().take_front(tileOffsets.size()), tileOffsets))
+      mapping.map(blockArg, offset);
     for (auto [bodyArg, chunkedArg] :
          llvm::zip(body->getArguments().drop_front(), chunkedArgs))
       mapping.map(bodyArg, chunkedArg);
@@ -259,7 +262,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       SmallVector<Value> chunkedArgs =
           buildStaticChunkedArgs(op, adaptor, rewriter, i, vectorSize);
       Value chunkOffset = b.i32_val(i * vectorSize);
-      auto tiles = emitTileBody(op, rewriter, chunkedArgs, chunkOffset, result);
+      auto tiles =
+          emitTileBody(op, rewriter, chunkedArgs, {chunkOffset}, result);
       scatterTiles(rewriter, loc, tiles, chunkOffset, vectorSize, tensorAccPtrs,
                    tensorElemTys);
     }
@@ -281,7 +285,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto firstArgs =
         buildStaticChunkedArgs(op, adaptor, rewriter, 0, vectorSize);
     auto firstTiles =
-        emitTileBody(op, rewriter, firstArgs, b.i32_val(0), result);
+        emitTileBody(op, rewriter, firstArgs, {b.i32_val(0)}, result);
     scatterTiles(rewriter, loc, firstTiles, b.i32_val(0), vectorSize,
                  tensorAccPtrs, tensorElemTys);
 
@@ -317,7 +321,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         buildDynamicChunkedArgs(op, adaptor, rewriter, tileOffset, vectorSize);
     Value tileResult = loopAcc;
     auto loopTiles =
-        emitTileBody(op, rewriter, tileArgs, tileOffset, tileResult);
+        emitTileBody(op, rewriter, tileArgs, {tileOffset}, tileResult);
     scatterTiles(rewriter, loc, loopTiles, tileOffset, vectorSize,
                  tensorAccPtrs, tensorElemTys);
     Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
@@ -334,7 +338,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   // iteration peeling is needed since there is no accumulator to bootstrap.
   void emitLoop(cpu::GenericOp op, OpAdaptor adaptor,
                 ConversionPatternRewriter &rewriter, unsigned numChunks,
-                unsigned vectorSize, ArrayRef<Value> tensorAccPtrs,
+                unsigned vectorSize, ArrayRef<int32_t> blockShape,
+                ArrayRef<int32_t> tileShape, ArrayRef<Value> tensorAccPtrs,
                 ArrayRef<Type> tensorElemTys) const {
     Location loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -360,13 +365,28 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     // loop body: emit tile, increment counter
     rewriter.setInsertionPointToEnd(loopBody);
+#if 1
+    // Decompose flat tile index into per-dim tile offsets
+    unsigned rank = blockShape.size();
+    SmallVector<Value> tileOffsets(rank);
+    Value remaining = loopI;
+    for (int d = rank - 1; d >= 0; --d) {
+      unsigned nc = blockShape[d] / tileShape[d];
+      Value chunkIdx = b.urem(remaining, b.i32_val(nc));
+      tileOffsets[d] = b.mul(chunkIdx, b.i32_val(tileShape[d]));
+      remaining = b.udiv(remaining, b.i32_val(nc));
+    }
+    // Flat offset for accumulator scatter (tile-major layout)
+    Value flatTileOffset = b.mul(loopI, b.i32_val(vectorSize));
+#else
     Value tileOffset =
         LLVM::MulOp::create(rewriter, loc, loopI, b.i32_val(vectorSize));
-    auto tileArgs =
-        buildDynamicChunkedArgs(op, adaptor, rewriter, tileOffset, vectorSize);
+#endif
+    auto tileArgs = buildDynamicChunkedArgs(op, adaptor, rewriter,
+                                            flatTileOffset, vectorSize);
     Value unused;
-    auto loopTiles = emitTileBody(op, rewriter, tileArgs, tileOffset, unused);
-    scatterTiles(rewriter, loc, loopTiles, tileOffset, vectorSize,
+    auto loopTiles = emitTileBody(op, rewriter, tileArgs, tileOffsets, unused);
+    scatterTiles(rewriter, loc, loopTiles, flatTileOffset, vectorSize,
                  tensorAccPtrs, tensorElemTys);
     Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
     LLVM::BrOp::create(rewriter, loc, ValueRange{nextI}, loopHeader);
@@ -388,10 +408,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     assert(blockShape.size() == tileShape.size() && !blockShape.empty() &&
            "blockShape and tileShape must be non-empty and of the same size");
 
-    // TODO: assuming 1D shapes
-    assert(blockShape.size() == 1);
-    unsigned vectorSize = tileShape[0];
-    unsigned numChunks = blockShape[0] / vectorSize;
+    unsigned vectorSize = 1, numChunks = 1;
+    for (unsigned d = 0; d < blockShape.size(); ++d) {
+      vectorSize *= tileShape[d];
+      numChunks *= blockShape[d] / tileShape[d];
+    }
 
     const bool hasReductions = !op.getCombiners().empty();
     const unsigned numCombinerBlocks = op.getCombiners().getBlocks().size();
@@ -463,15 +484,20 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         });
 
     Value result;
-    if (requiresTensorArgMaterialization || numChunks == 1)
+    if (requiresTensorArgMaterialization || numChunks == 1) {
+      assert(blockShape.size() == 1 &&
+             "only support rank-1 generic tiles in unrolled path");
       emitUnrolled(op, adaptor, rewriter, numChunks, vectorSize, result,
                    tensorAccPtrs, tensorElemTys);
-    else if (hasReductions)
+    } else if (hasReductions) {
+      assert(blockShape.size() == 1 &&
+             "only support rank-1 generic tiles in reductions path");
       emitLoopWithReductions(op, adaptor, rewriter, numChunks, vectorSize,
                              result, tensorAccPtrs, tensorElemTys);
-    else
-      emitLoop(op, adaptor, rewriter, numChunks, vectorSize, tensorAccPtrs,
-               tensorElemTys);
+    } else {
+      emitLoop(op, adaptor, rewriter, numChunks, vectorSize, blockShape,
+               tileShape, tensorAccPtrs, tensorElemTys);
+    }
 
     SmallVector<Value> replacements;
     if (result)
