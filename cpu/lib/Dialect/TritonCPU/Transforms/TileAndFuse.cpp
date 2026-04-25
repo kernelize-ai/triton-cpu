@@ -744,6 +744,7 @@ struct TritonCPUTileAndFusePass
     patterns.add<WrapStores>(context, benefitDefault);
     patterns.add<WrapReduceOp>(context, benefitDefault);
     patterns.add<WrapKLoopWithDotOp>(context, benefitDefault);
+    // TODO: wrap convert layout as anchor op?
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
