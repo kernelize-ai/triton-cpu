@@ -571,6 +571,10 @@ static bool isFusible(Operation *defOp) {
   // tt.splat broadcasts a scalar to a tensor; the scalar input becomes a param.
   if (isa<triton::SplatOp>(defOp))
     return true;
+  if (isa<triton::BroadcastOp>(defOp))
+    return true;
+  if (isa<triton::ExpandDimsOp>(defOp))
+    return true;
   // tt.make_range can be fused by rewriting make_range to
   // ttc.make_dynamic_range, taking the chunk offset as a parameter
   if (isa<triton::MakeRangeOp>(defOp))
@@ -723,14 +727,98 @@ void InputFuser::cloneOp(Operation *op, Chain &chain,
       mapping.map(chain.root, clonedResult);
   };
 
+  if (auto broadcastOp = dyn_cast<triton::BroadcastOp>(op)) {
+    Value source = broadcastOp.getSrc();
+    auto sourceType = cast<RankedTensorType>(source.getType());
+    SmallVector<int32_t> newInputShape;
+    for (auto [srcDim, tiledDim] :
+         llvm::zip(sourceType.getShape(), chain.tileShape))
+      newInputShape.push_back(srcDim == 1 ? 1 : tiledDim);
+
+    newIns.push_back(source);
+    mapping.map(source, body->addArgument(
+                            updateTensorType(source.getType(), newInputShape),
+                            source.getLoc()));
+    Operation *newBroadcast = rewriter.clone(*op, mapping);
+    newBroadcast->getResult(0).setType(
+        updateTensorType(broadcastOp.getType(), chain.tileShape));
+    replaceRootIfMatch(broadcastOp.getResult(), newBroadcast->getResult(0));
+    mapping.map(op->getResults(), newBroadcast->getResults());
+    return;
+  }
+
+  if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+    llvm::errs() << "expand dims: " << expandDimsOp << "\n";
+    unsigned axis = expandDimsOp.getAxis();
+    llvm::errs() << "expand dims axis: " << axis << "\n";
+    Value source = expandDimsOp.getSrc();
+    auto sourceType = cast<RankedTensorType>(source.getType());
+    llvm::errs() << "sourceType: " << sourceType << "\n";
+    newIns.push_back(source);
+    Type newSourceType =
+        updateTensorType(source.getType(), {chain.tileShape[1 - axis]});
+    llvm::errs() << "newSourceType: " << newSourceType << "\n";
+    mapping.map(source, body->addArgument(newSourceType, source.getLoc()));
+
+    auto resultType = cast<RankedTensorType>(expandDimsOp.getType());
+    SmallVector<int32_t> newResultShape;
+#if 1
+    llvm::errs() << "newResultShape: ";
+    for (auto [idx, tileDim] : llvm::enumerate(chain.tileShape)) {
+      newResultShape.push_back(idx == axis ? 1 : tileDim);
+      llvm::errs() << newResultShape.back() << " ";
+    }
+    llvm::errs() << "\n";
+#else
+    for (auto [srcDim, tiledDim] :
+         llvm::zip(resultType.getShape(), chain.tileShape))
+      newResultShape.push_back(srcDim == 1 ? 1 : tiledDim);
+#endif
+    llvm::errs() << "resultType: " << resultType << "\n";
+    Operation *newExpandDims = rewriter.clone(*op, mapping);
+    newExpandDims->getResult(0).setType(
+        updateTensorType(resultType, newResultShape));
+    llvm::errs() << "new expand dims: " << *newExpandDims << "\n";
+    replaceRootIfMatch(expandDimsOp.getResult(), newExpandDims->getResult(0));
+    mapping.map(op->getResults(), newExpandDims->getResults());
+    llvm::errs() << "done\n";
+    return;
+  }
+
   // make range must be replaced with make dynamic range which takes the current
   // tile offset as a parameter
   if (auto makeRangeOp = dyn_cast<triton::MakeRangeOp>(op)) {
-    auto resultType = makeRangeOp.getResult().getType();
-    auto newResultType = updateTensorType(resultType, chain.tileShape);
+    llvm::errs() << "make range op: " << makeRangeOp << "\n";
+    auto resultType = cast<RankedTensorType>(makeRangeOp.getResult().getType());
+
+    unsigned dim = 0;
+    SmallVector<int32_t> tileShape;
+    if (chain.tileShape.size() > resultType.getRank()) {
+      auto sliceEncoding =
+          dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
+      assert(sliceEncoding && "expected make range op result type to have "
+                              "slice encoding with tiled size mismatch");
+      assert(chain.tileShape.size() == 2 &&
+             "only rank-2 slice encoding tensors supported");
+      dim = sliceEncoding.getDim();
+
+      if (chain.tileShape[dim] == resultType.getShape()[0]) {
+        // untiled, just clone the existing makeRange
+        Operation *newOp = rewriter.clone(*op, mapping);
+        replaceRootIfMatch(makeRangeOp.getResult(), newOp->getResult(0));
+        mapping.map(op->getResults(), newOp->getResults());
+        return;
+      }
+
+      tileShape.push_back(chain.tileShape[1 - dim]);
+    } else {
+      tileShape = chain.tileShape;
+    }
+
+    auto newResultType = updateTensorType(resultType, tileShape);
     auto makeDynamicRangeOp = triton::cpu::MakeDynamicRangeOp::create(
         rewriter, makeRangeOp.getLoc(), newResultType,
-        genericOp.getTileOffset(/*dim=*/0));
+        genericOp.getTileOffset(dim));
     mapping.map(makeRangeOp->getResults(), makeDynamicRangeOp->getResults());
     replaceRootIfMatch(makeRangeOp.getResult(), makeDynamicRangeOp.getResult());
     return;
@@ -793,6 +881,7 @@ struct TritonCPUTileAndFusePass
     patterns.add<WrapStores>(context, benefitDefault);
     patterns.add<WrapReduceOp>(context, benefitDefault);
     patterns.add<WrapKLoopWithDotOp>(context, benefitDefault);
+    // TODO: wrap convert layout as anchor op?
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();

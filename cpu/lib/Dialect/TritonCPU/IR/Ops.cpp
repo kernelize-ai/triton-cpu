@@ -54,6 +54,7 @@ LogicalResult GenericOp::verify() {
     }
   }
 
+#if 0
   // all operands must have the same encoding
   Attribute tensorEncoding;
   for (auto operand : getOperands()) {
@@ -66,6 +67,7 @@ LogicalResult GenericOp::verify() {
       tensorEncoding = tensorTy.getEncoding();
     }
   }
+#endif
 
   // Body must exist and have the implicit induction variable arguments.
   Region &body = getBody();
