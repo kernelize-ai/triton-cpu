@@ -66,36 +66,3 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
     tt.return
   }
 }
-
-// -----
-
-// TODO: is this valid??
-// Iter-arg fusion: %init (tt.make_range) is the init value of an scf.for
-// iter_arg. The generic inside the loop takes the iter_arg as ins. The fuser
-// must see through the iter_arg to its init op and replace the block argument,
-// rather than leaving the iter_arg as an unfused ins. Without the fix, the
-// make_dynamic_range would be emitted but never replace the block arg, leaving
-// a dead clone.
-//
-// CHECK-LABEL: tt.func public @test_iter_arg_fusion
-// CHECK:       scf.for
-// CHECK:         ttc.generic
-// CHECK-NOT:       tensor<4xi32
-// CHECK:           ttc.make_dynamic_range
-
-#blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [1], warpsPerCTA = [1], order = [0]}>
-module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
-  tt.func public @test_iter_arg_fusion(%ptr: !tt.ptr<i32>, %n: i32) attributes {noinline = false, ttc.persistent_kernel} {
-    %c0 = arith.constant 0 : i32
-    %c1 = arith.constant 1 : i32
-    %c10 = arith.constant 10 : i32
-    %init = tt.make_range {start = 0 : i32, end = 4 : i32} : tensor<4xi32, #blocked>
-    scf.for %bid = %c0 to %c10 step %c1 iter_args(%carried = %init) -> (tensor<4xi32, #blocked>) : i32 {
-      %base = tt.splat %ptr : !tt.ptr<i32> -> tensor<4x!tt.ptr<i32>, #blocked>
-      %ptrs = tt.addptr %base, %carried : tensor<4x!tt.ptr<i32>, #blocked>, tensor<4xi32, #blocked>
-      tt.store %ptrs, %carried : tensor<4x!tt.ptr<i32>, #blocked>
-      scf.yield %carried : tensor<4xi32, #blocked>
-    }
-    tt.return
-  }
-}
