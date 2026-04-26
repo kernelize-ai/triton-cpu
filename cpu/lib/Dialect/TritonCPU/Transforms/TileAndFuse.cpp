@@ -310,18 +310,7 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       SmallVector<int32_t> tileShape(tiledType.getShape());
       SmallVector<Value> newIns(genericOp.getIns());
 
-      IRMapping mapping;
-      // 1. Add new block args for source op inputs at body end
-      // (there should only be one operand but maybe we can share this common
-      // code across all patterns)
-      for (Value operand : makeRangeOp->getOperands()) {
-        newIns.push_back(operand);
-        mapping.map(operand, body->addArgument(
-                                 updateTensorType(operand.getType(), tileShape),
-                                 operand.getLoc()));
-      }
-
-      // 2. clone
+      // 1. clone (make range has no operands)
       rewriter.setInsertionPointToStart(body);
 
       auto resultType = makeRangeOp.getResult().getType();
