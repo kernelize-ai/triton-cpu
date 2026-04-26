@@ -134,7 +134,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     // the tensor
     // TODO: parametrize?
     const bool allowTensorMaterializationFlag = true;
-    const bool srcIsLoad = isa<LoadOp>(srcs[0].getDefiningOp());
+    const bool srcIsLoad =
+        srcs[0].getDefiningOp() && isa<LoadOp>(srcs[0].getDefiningOp());
     const bool allowTensorMaterialization =
         allowTensorMaterializationFlag && !srcIsLoad;
     const bool srcUsedElsewhere =
