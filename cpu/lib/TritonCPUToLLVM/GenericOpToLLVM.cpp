@@ -197,9 +197,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
   // Builds tile args for a dynamic tile at runtime offset tileOffset.
   // Mirrors buildStaticChunkedArgs but uses a runtime Value for the offset
-  // instead of a compile-time index. Only valid for alloca-backed tensor args
-  // and non-tensor args — statically-indexed tensor args must use the unrolled
-  // path.
+  // instead of a compile-time index. Only valid for temporary storage backed
+  // tensor args and non-tensor args — statically-indexed tensor args must use
+  // the unrolled path.
   SmallVector<Value>
   buildDynamicChunkedArgs(cpu::GenericOp op, OpAdaptor adaptor,
                           ConversionPatternRewriter &rewriter, Value tileOffset,
@@ -233,8 +233,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                .getResult(0));
       } else {
         assert(!isa<RankedTensorType>(origArg.getType()) &&
-               "tensor types are not allowed in compile-time generated "
-               "generic tile loops");
+               "tensor types from non-generic ops are not allowed in the "
+               "dynamic generic tile loop path");
         assert(isa<PointerType>(origArg.getType()) ||
                origArg.getType() == llvmArg.getType() &&
                    "expected non-tensor arguments to be unchanged by type "
