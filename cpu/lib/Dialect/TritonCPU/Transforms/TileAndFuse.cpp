@@ -363,7 +363,6 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       SmallVector<Value> newIns(genericOp.getIns());
 
       // 1. clone. constants have no operands to update
-      IRMapping mapping;
       rewriter.setInsertionPointToStart(body);
       auto newTensorType =
           cast<RankedTensorType>(updateTensorType(resultTensorType, tileShape));
