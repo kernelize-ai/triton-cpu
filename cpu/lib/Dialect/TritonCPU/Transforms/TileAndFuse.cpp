@@ -580,22 +580,21 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
       if (!op) {
+#if 0
         // constant ops can be fused through loops, so check to see if we have a
         // block argument
         auto blockArg = dyn_cast<BlockArgument>(insVal);
-        if (blockArg) {
-          auto forOp = dyn_cast<scf::ForOp>(blockArg.getOwner()->getParentOp());
-          if (forOp) {
-            unsigned argIdx = blockArg.getArgNumber();
-            unsigned numIV = forOp.getNumInductionVars();
-            Value loopIterInit = forOp.getInitArgs()[argIdx - numIV];
-            op = loopIterInit.getDefiningOp();
-            if (!op)
-              continue;
-          }
-        }
-
-        continue;
+        if (!blockArg)
+          continue;
+        auto forOp = dyn_cast<scf::ForOp>(blockArg.getOwner()->getParentOp());
+        if (!forOp)
+          continue;
+        unsigned argIdx = blockArg.getArgNumber();
+        unsigned numIV = forOp.getNumInductionVars();
+        op = forOp.getInitArgs()[argIdx - numIV].getDefiningOp();
+        if (!op)
+#endif
+          continue;
       }
       auto constantOp = dyn_cast<arith::ConstantOp>(op);
       if (!constantOp)
@@ -603,7 +602,7 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 
       auto resultTensorType =
           dyn_cast<RankedTensorType>(constantOp.getResult().getType());
-      if (resultTensorType)
+      if (!resultTensorType)
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
