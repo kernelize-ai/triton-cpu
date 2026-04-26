@@ -591,10 +591,16 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
           continue;
         unsigned argIdx = blockArg.getArgNumber();
         unsigned numIV = forOp.getNumInductionVars();
+
+        // Only safe to look through if the iter_arg is never modified
+        auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+        if (yieldOp.getOperand(argIdx - numIV) != blockArg)
+            continue;
+
         op = forOp.getInitArgs()[argIdx - numIV].getDefiningOp();
         if (!op)
 #endif
-          continue;
+        continue;
       }
       auto constantOp = dyn_cast<arith::ConstantOp>(op);
       if (!constantOp)

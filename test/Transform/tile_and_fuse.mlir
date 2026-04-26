@@ -7,8 +7,8 @@
 // CHECK-LABEL: tt.func public @test_basic_fusion
 // CHECK:       ttc.generic
 // CHECK-NOT:     tensor<4x!tt.ptr<f32>
-// CHECK:         tt.splat
 // CHECK:         ttc.make_dynamic_range
+// CHECK:         tt.splat
 // CHECK:         tt.addptr
 // CHECK:         tt.load
 // CHECK:         tt.store
@@ -69,6 +69,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
 
 // -----
 
+// TODO: is this valid??
 // Iter-arg fusion: %init (tt.make_range) is the init value of an scf.for
 // iter_arg. The generic inside the loop takes the iter_arg as ins. The fuser
 // must see through the iter_arg to its init op and replace the block argument,
