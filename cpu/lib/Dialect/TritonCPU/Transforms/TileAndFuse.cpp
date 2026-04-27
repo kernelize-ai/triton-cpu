@@ -653,12 +653,17 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       // 1. clone (make range has no operands)
       rewriter.setInsertionPointToStart(body);
 
-      auto resultType = makeRangeOp.getResult().getType();
+      auto resultType =
+          cast<RankedTensorType>(makeRangeOp.getResult().getType());
       auto newResultType = updateTensorType(resultType, tileShape);
+      // TODO: get the right slice chunk offset
+      auto sliceEncodingAttr =
+          dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
+      unsigned dim = sliceEncodingAttr ? sliceEncodingAttr.getDim() : 0;
       cpu::MakeDynamicRangeOp makeDynamicRangeOp =
           triton::cpu::MakeDynamicRangeOp::create(
               rewriter, makeRangeOp.getLoc(), newResultType,
-              genericOp.getChunkOffset());
+              genericOp.getTileOffset(dim));
 
       // 3. update existing uses
       blockArg.replaceAllUsesWith(makeDynamicRangeOp.getResult());
@@ -728,6 +733,124 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   }
 };
 
+struct FuseBroadcastIntoGeneric
+    : public mlir::OpRewritePattern<cpu::GenericOp> {
+  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::GenericOp genericOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Block *body = &genericOp.getBody().front();
+    unsigned numIV = genericOp.getNumInductionVars();
+
+    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+      Operation *op = insVal.getDefiningOp();
+      if (!op)
+        continue;
+
+      auto broadcastOp = dyn_cast<triton::BroadcastOp>(op);
+      if (!broadcastOp)
+        continue;
+
+      BlockArgument blockArg = body->getArgument(numIV + i);
+      auto tiledType = cast<RankedTensorType>(blockArg.getType());
+      SmallVector<int32_t> tileShape(tiledType.getShape());
+      SmallVector<Value> newIns(genericOp.getIns());
+
+      // broadcast source operand: only tile the non-broadcast dim
+      RankedTensorType sourceTensorType =
+          cast<RankedTensorType>(broadcastOp.getSrc().getType());
+      SmallVector<int32_t> sourceTileShape = llvm::to_vector(
+          llvm::map_range(llvm::zip(sourceTensorType.getShape(), tileShape),
+                          [](auto pair) -> int32_t {
+                            auto [s, t] = pair;
+                            return s == 1 ? s : t;
+                          }));
+
+      llvm::errs() << "broadcast op: " << broadcastOp << "\n";
+      llvm::errs() << "broadcast source type: " << sourceTensorType << "\n";
+      llvm::errs() << "tileShape: ";
+      for (auto t : tileShape)
+        llvm::errs() << t << " ";
+      llvm::errs() << "\n";
+      llvm::errs() << "sourceTileShape: ";
+      for (auto st : sourceTileShape)
+        llvm::errs() << st << " ";
+      llvm::errs() << "\n";
+
+      Type blockArgType = updateTensorType(sourceTensorType, sourceTileShape);
+      llvm::errs() << "block arg type: " << blockArgType << "\n";
+
+      IRMapping mapping;
+      // 1. map src operand to block args
+      newIns.push_back(broadcastOp.getSrc());
+      mapping.map(
+          broadcastOp.getSrc(),
+          body->addArgument(blockArgType, broadcastOp.getSrc().getLoc()));
+
+      // 2. clone the broadcast
+      rewriter.setInsertionPointToStart(body);
+      Operation *newBroadcast = rewriter.clone(*op, mapping);
+      Type origResultType = broadcastOp.getResult().getType();
+      newBroadcast->getResult(0).setType(
+          updateTensorType(origResultType, tileShape));
+
+      // 3. replace block arg and clean up
+      blockArg.replaceAllUsesWith(newBroadcast->getResult(0));
+      body->eraseArgument(numIV + i);
+      newIns.erase(newIns.begin() + i);
+
+      rewriter.modifyOpInPlace(
+          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
+
+      return success();
+    }
+
+    return failure();
+  }
+};
+
+struct FuseExpandDimsIntoGeneric
+    : public mlir::OpRewritePattern<cpu::GenericOp> {
+  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::GenericOp genericOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Block *body = &genericOp.getBody().front();
+    unsigned numIV = genericOp.getNumInductionVars();
+
+    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+      Operation *op = insVal.getDefiningOp();
+      if (!op)
+        continue;
+
+      auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op);
+      if (!expandDimsOp)
+        continue;
+
+      BlockArgument blockArg = body->getArgument(numIV + i);
+      auto tiledType = cast<RankedTensorType>(blockArg.getType());
+      SmallVector<int32_t> tileShape(tiledType.getShape());
+      SmallVector<Value> newIns(genericOp.getIns());
+
+      llvm::errs() << "tile shape: ";
+      for (auto s : tileShape)
+        llvm::errs() << s << " ";
+      llvm::errs() << "\n";
+
+      llvm::errs() << "expand dims = " << expandDimsOp << "\n";
+      return failure();
+
+      assert(false && "TODO");
+
+      return success();
+    }
+
+    return failure();
+  }
+};
+
 } // namespace
 
 struct TritonCPUTileAndFusePass
@@ -754,6 +877,8 @@ struct TritonCPUTileAndFusePass
     RewritePatternSet fusePatterns(context);
 
     fusePatterns.add<FuseElementwiseIntoGeneric>(context, benefitDefault);
+    fusePatterns.add<FuseBroadcastIntoGeneric>(context, benefitDefault);
+    fusePatterns.add<FuseExpandDimsIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseMakeRangeIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
 
