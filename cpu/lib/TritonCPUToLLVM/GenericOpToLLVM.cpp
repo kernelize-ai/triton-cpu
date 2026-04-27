@@ -254,9 +254,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           tileStruct =
               LLVM::InsertValueOp::create(rewriter, loc, tileStruct, elem, {j});
         }
+#if 1
+        tileArgs.push_back(tileStruct);
+#else
         tileArgs.push_back(UnrealizedConversionCastOp::create(
                                rewriter, loc, origArg.getType(), tileStruct)
                                .getResult(0));
+#endif
       } else if (isa<PointerType>(origArg.getType())) {
         // we might have a tt.ptr hiding in an unrealized conversion cast due to
         // late conversion of generic op block arguments. Use unrealized
