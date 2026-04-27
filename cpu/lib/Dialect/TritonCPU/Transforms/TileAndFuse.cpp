@@ -559,6 +559,62 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
   }
 };
 
+struct WrapConvertLayoutOp
+    : mlir::OpRewritePattern<triton::gpu::ConvertLayoutOp> {
+  using OpRewritePattern<triton::gpu::ConvertLayoutOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::ConvertLayoutOp cvtOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto loc = cvtOp.getLoc();
+
+    if (cvtOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    auto operand = cvtOp.getSrc();
+
+    auto tensorTy = cast<RankedTensorType>(operand.getType());
+    auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy.getEncoding());
+    if (!encoding)
+      return failure();
+
+    // only wrap blocked->blocked conversions
+    auto convertedTensorTy =
+        cast<RankedTensorType>(cvtOp.getResult().getType());
+    if (!isa<triton::gpu::BlockedEncodingAttr>(convertedTensorTy.getEncoding()))
+      return failure();
+
+    // Note: this uses the source tensor ty to determine the tile shape. if we
+    // tile over the source, we should be able to write to any location in the
+    // output
+    auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
+
+    // but, overwrite the tileshape to match the block shape (i.e. just generate
+    // a single tile generic for now)
+    tileShape = blockShape;
+
+    SmallVector<TiledInput> ins;
+    for (auto value : cvtOp->getOperands()) {
+      ins.push_back(TiledInput{value, tileShape});
+    }
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+
+    auto generic = cpu::GenericOp::create(
+        rewriter, loc, /*resultTypes=*/TypeRange{convertedTensorTy}, insValues,
+        blockShape, tileShape);
+
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+
+    auto newCvt = rewriter.clone(*cvtOp, bodyMapping);
+    cpu::YieldOp::create(rewriter, loc, newCvt->getResults());
+
+    rewriter.replaceOp(cvtOp, generic.getResults());
+    return success();
+  }
+};
+
 struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
 
@@ -881,10 +937,10 @@ struct TritonCPUTileAndFusePass
     constexpr int benefitDefault = 1;
 
     // Step 1: Create the generic ops
-    patterns.add<WrapStores>(context, benefitDefault);
-    patterns.add<WrapReduceOp>(context, benefitDefault);
-    patterns.add<WrapKLoopWithDotOp>(context, benefitDefault);
-    // TODO: wrap convert layout as anchor op?
+    patterns.add<WrapStores>(context, benefitDefault + 1);
+    patterns.add<WrapReduceOp>(context, benefitDefault + 1);
+    patterns.add<WrapKLoopWithDotOp>(context, benefitDefault + 1);
+    patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();

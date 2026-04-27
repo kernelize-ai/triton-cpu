@@ -136,40 +136,59 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         if (yieldOp.getValues().empty())
           continue;
 
-        // TODO: this should still hold because only reduceop rewrites introduce
-        // materialized tensors. But eventually we can lift that limitation and
-        // allow any generic to materialize output tensors
-        assert(hasReductions &&
-               "unexpected yield op result in generic without reductions");
         auto yieldOpValues = llvm::to_vector(llvm::map_range(
             yieldOp.getValues(), [&](Value v) { return mapping.lookup(v); }));
-        if (!result) {
-          result = yieldOpValues[0];
+
+        if (hasReductions) {
+          if (!result) {
+            result = yieldOpValues[0];
+          } else {
+            // combine with the previous reduction result using the same
+            // combiner region
+            auto *combinerBlock = &op.getCombiners().front();
+            IRMapping combMapping;
+            combMapping.map(combinerBlock->getArgument(0), result);
+            combMapping.map(combinerBlock->getArgument(1), yieldOpValues[0]);
+
+            auto terminator =
+                cast<cpu::YieldOp>(combinerBlock->getTerminator());
+            auto yieldVals = terminator.getValues();
+            assert(
+                yieldVals.size() == 1 &&
+                "expected exactly one value yielded from the combiner block");
+
+            Operation *combinerOp = yieldVals.front().getDefiningOp();
+            assert(combinerOp && "expected yielded value to be defined by an "
+                                 "op in the combiner block");
+            auto newCombiner = rewriter.clone(*combinerOp, combMapping);
+            result = newCombiner->getResult(0);
+          }
+
+          // materialzied tensor values are currently added to yield op after
+          // scalars
+          unsigned numCombinerBlocks = op.getCombiners().getBlocks().size();
+          for (unsigned k = numCombinerBlocks; k < yieldOpValues.size(); ++k)
+            tensorTiles.push_back(yieldOpValues[k]);
         } else {
-          // combine with the previous reduction result using the same
-          // combiner region
-          auto *combinerBlock = &op.getCombiners().front();
-          IRMapping combMapping;
-          combMapping.map(combinerBlock->getArgument(0), result);
-          combMapping.map(combinerBlock->getArgument(1), yieldOpValues[0]);
-
-          auto terminator = cast<cpu::YieldOp>(combinerBlock->getTerminator());
-          auto yieldVals = terminator.getValues();
-          assert(yieldVals.size() == 1 &&
-                 "expected exactly one value yielded from the combiner block");
-
-          Operation *combinerOp = yieldVals.front().getDefiningOp();
-          assert(combinerOp && "expected yielded value to be defined by an "
-                               "op in the combiner block");
-          auto newCombiner = rewriter.clone(*combinerOp, combMapping);
-          result = newCombiner->getResult(0);
+#if 1
+          for (unsigned k = 0; k < yieldOpValues.size(); ++k)
+            tensorTiles.push_back(yieldOpValues[k]);
+#else
+          // TODO: we should assert that all users are generics since we are
+          // about to materialize a tensor in a format only generics can handle
+          assert(yieldOpValues.size() == 1 &&
+                 "only support scattering one generic tensor result currently");
+          assert(op.getBlockShape() == op.getTileShape() &&
+                 "only support materializing tensors in static path for "
+                 "generics with num_tiles = 1");
+          Location loc = yieldOp.getLoc();
+          auto b = TritonLLVMOpBuilder(loc, rewriter);
+          scatterTiles(rewriter, loc, yieldOpValues,
+                       /*tileOffset= */ b.i32_val(0), /*vectorSize= */ 1, {},
+                       {});
+#endif
         }
 
-        // materialzied tensor values are currently added to yield op after
-        // scalars
-        unsigned numCombinerBlocks = op.getCombiners().getBlocks().size();
-        for (unsigned k = numCombinerBlocks; k < yieldOpValues.size(); ++k)
-          tensorTiles.push_back(yieldOpValues[k]);
       } else {
         rewriter.clone(bOp, mapping);
       }
@@ -572,6 +591,18 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       emitLoopWithReductions(op, adaptor, rewriter, numChunks, vectorSize,
                              result, tensorAccPtrs, tensorElemTys);
     } else {
+      const bool genericHasTensorOutputs =
+          llvm::any_of(op->getResults(), [](Value result) {
+            return isa<RankedTensorType>(result.getType());
+          });
+      const bool allUsersAreGeneric =
+          genericHasTensorOutputs
+              ? llvm::all_of(
+                    op->getUsers(),
+                    [](Operation *user) { return isa<cpu::GenericOp>(user); })
+              : true;
+      assert(allUsersAreGeneric && "expected all generic op users to also be "
+                                   "generic ops on dynamic path");
       emitLoop(op, adaptor, rewriter, numChunks, vectorSize, blockShape,
                tileShape, tensorAccPtrs, tensorElemTys);
     }
