@@ -55,7 +55,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     SmallVector<Value> chunkedArgs;
 
     for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
-             body->getArguments().drop_front(), adaptor.getOperands())) {
+             body->getArguments().drop_front(op.getNumInductionVars()),
+             adaptor.getOperands())) {
 
       if (!isa<RankedTensorType>(origArg.getType())) {
         // forward constants and scalars without chunking
@@ -123,7 +124,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
              body->getArguments().take_front(tileOffsets.size()), tileOffsets))
       mapping.map(blockArg, offset);
     for (auto [bodyArg, chunkedArg] :
-         llvm::zip(body->getArguments().drop_front(), chunkedArgs))
+         llvm::zip(body->getArguments().drop_front(op.getNumInductionVars()),
+                   chunkedArgs))
       mapping.map(bodyArg, chunkedArg);
 
     SmallVector<Value> tensorTiles;
@@ -213,7 +215,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     SmallVector<Value> tileArgs;
 
     for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
-             body->getArguments().drop_front(), adaptor.getOperands())) {
+             body->getArguments().drop_front(op.getNumInductionVars()),
+             adaptor.getOperands())) {
       if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
         // Load this tile's elements from the alloca produced by the prior
         // generic and pack them into the tile struct.
@@ -385,11 +388,47 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto tileArgs = buildDynamicChunkedArgs(op, adaptor, rewriter,
                                             flatTileOffset, vectorSize);
     Value unused;
+    // TODO: can we always inline here instead of clone?
+#if 1
+
+    const bool hasReductions = !op.getCombiners().empty();
+    // TODO: consider asserting that generic body region has one block on the
+    // emitTileBody/clone path
+    assert(!hasReductions &&
+           "cannot handle generic reductions on the inline loop path");
+
+    Region &bodyRegion = op.getBody();
+    Block *bodyEntry = &bodyRegion.front();
+
+    // Move all blocks into the parent region before afterBlock.
+    rewriter.inlineRegionBefore(bodyRegion, *afterBlock->getParent(),
+                                afterBlock->getIterator());
+
+    for (Block &block : llvm::make_range(bodyEntry->getIterator(),
+                                         afterBlock->getIterator())) {
+      auto yieldOp = dyn_cast<cpu::YieldOp>(block.getTerminator());
+      if (!yieldOp)
+        continue;
+
+      rewriter.setInsertionPoint(yieldOp);
+      SmallVector<Value> loopTiles = llvm::to_vector(yieldOp.getValues());
+      scatterTiles(rewriter, loc, loopTiles, flatTileOffset, vectorSize,
+                   tensorAccPtrs, tensorElemTys);
+      Value nextI =
+          LLVM::AddOp::create(rewriter, op.getLoc(), loopI, b.i32_val(1));
+      rewriter.replaceOpWithNewOp<LLVM::BrOp>(
+          yieldOp, SmallVector<Value>{nextI}, loopHeader);
+      break; // only one ttc.yield per generic body
+    }
+
+#else
     auto loopTiles = emitTileBody(op, rewriter, tileArgs, tileOffsets, unused);
     scatterTiles(rewriter, loc, loopTiles, flatTileOffset, vectorSize,
                  tensorAccPtrs, tensorElemTys);
+
     Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
     LLVM::BrOp::create(rewriter, loc, ValueRange{nextI}, loopHeader);
+#endif
   }
 
   LogicalResult
@@ -471,8 +510,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // (llvm.extractvalue only accepts attribute indices). Alloca-backed tensors
     // from a prior generic are GEP-indexed and support dynamic offsets.
     const bool requiresTensorArgMaterialization = llvm::any_of(
-        llvm::enumerate(llvm::zip(body->getArguments().drop_front(),
-                                  adaptor.getOperands())),
+        llvm::enumerate(
+            llvm::zip(body->getArguments().drop_front(op.getNumInductionVars()),
+                      adaptor.getOperands())),
         [this, &op](auto pair) {
           auto [opIdx, argPair] = pair;
           auto [origArg, llvmArg] = argPair;
