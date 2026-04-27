@@ -26,10 +26,15 @@ static Type updateTensorType(Type t, ArrayRef<int32_t> tileShape) {
   auto tensorType = dyn_cast<RankedTensorType>(t);
   if (!tensorType)
     return t;
-  return RankedTensorType::get(
-      llvm::to_vector(
-          llvm::map_range(tileShape, [](int32_t s) { return int64_t(s); })),
-      tensorType.getElementType(), tensorType.getEncoding());
+  assert(tensorType.getRank() == tileShape.size() &&
+         "expected tensor type and tile shape to have same rank");
+  SmallVector<int64_t> newShape;
+  // for broadcast/expanded dims (size 1) do not use the tile shape
+  for (auto [s, tile] : llvm::zip(tensorType.getShape(), tileShape))
+    newShape.push_back(std::min(s, (int64_t)tile));
+
+  return RankedTensorType::get(newShape, tensorType.getElementType(),
+                               tensorType.getEncoding());
 }
 
 // Extract blockShape (full tensor shape) and tileShape (sizePerThread) from
@@ -767,26 +772,13 @@ struct FuseBroadcastIntoGeneric
                             return s == 1 ? s : t;
                           }));
 
-      llvm::errs() << "broadcast op: " << broadcastOp << "\n";
-      llvm::errs() << "broadcast source type: " << sourceTensorType << "\n";
-      llvm::errs() << "tileShape: ";
-      for (auto t : tileShape)
-        llvm::errs() << t << " ";
-      llvm::errs() << "\n";
-      llvm::errs() << "sourceTileShape: ";
-      for (auto st : sourceTileShape)
-        llvm::errs() << st << " ";
-      llvm::errs() << "\n";
-
-      Type blockArgType = updateTensorType(sourceTensorType, sourceTileShape);
-      llvm::errs() << "block arg type: " << blockArgType << "\n";
-
       IRMapping mapping;
       // 1. map src operand to block args
       newIns.push_back(broadcastOp.getSrc());
       mapping.map(
           broadcastOp.getSrc(),
-          body->addArgument(blockArgType, broadcastOp.getSrc().getLoc()));
+          body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
+                            broadcastOp.getSrc().getLoc()));
 
       // 2. clone the broadcast
       rewriter.setInsertionPointToStart(body);
@@ -834,15 +826,40 @@ struct FuseExpandDimsIntoGeneric
       SmallVector<int32_t> tileShape(tiledType.getShape());
       SmallVector<Value> newIns(genericOp.getIns());
 
-      llvm::errs() << "tile shape: ";
-      for (auto s : tileShape)
-        llvm::errs() << s << " ";
-      llvm::errs() << "\n";
+      unsigned axis = expandDimsOp.getAxis();
+      assert(tileShape[axis] == 1 &&
+             "expected expand dims axis tile shape to be 1");
 
-      llvm::errs() << "expand dims = " << expandDimsOp << "\n";
-      return failure();
+      SmallVector<int32_t> sourceTileShape;
+      for (auto [j, t] : llvm::enumerate(tileShape)) {
+        if (j == axis)
+          continue;
+        sourceTileShape.push_back(t);
+      }
 
-      assert(false && "TODO");
+      RankedTensorType sourceTensorType =
+          cast<RankedTensorType>(expandDimsOp.getSrc().getType());
+      IRMapping mapping;
+      // 1. map src operand to block args
+      newIns.push_back(expandDimsOp.getSrc());
+      mapping.map(
+          expandDimsOp.getSrc(),
+          body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
+                            expandDimsOp.getSrc().getLoc()));
+
+      // 2. clone expand dims
+      rewriter.setInsertionPointToStart(body);
+      Operation *newExpandDims = rewriter.clone(*op, mapping);
+      Type origResultType = expandDimsOp.getResult().getType();
+      newExpandDims->getResult(0).setType(
+          updateTensorType(origResultType, tileShape));
+
+      blockArg.replaceAllUsesWith(newExpandDims->getResult(0));
+      body->eraseArgument(numIV + i);
+      newIns.erase(newIns.begin() + i);
+
+      rewriter.modifyOpInPlace(
+          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
 
       return success();
     }
