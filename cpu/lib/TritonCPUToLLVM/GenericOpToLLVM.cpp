@@ -538,7 +538,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
          llvm::drop_begin(op.getResultTypes(), numCombinerBlocks)) {
       auto tensorTy = cast<RankedTensorType>(resultTy);
       int64_t blockSize = std::accumulate(blockShape.begin(), blockShape.end(),
-                                          0, std::multiplies<>());
+                                          1, std::multiplies<>());
       Type elemTy = getTypeConverter()->convertType(tensorTy.getElementType());
       tensorElemTys.push_back(elemTy);
 
