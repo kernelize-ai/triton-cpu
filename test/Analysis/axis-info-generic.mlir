@@ -38,7 +38,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
                 %offset_ptrs = tt.addptr %ptrs, %offsets : tensor<4x!tt.ptr<f32>, #blocked>, tensor<4xi32, #blocked>
                 // COM: no un-rolled prologue, check for branch to loop pre-header
                 // CHECK: llvm.br ^bb1
-                // CHECK: llvm.cond_br {{.*}}, ^bb2, ^bb3
+                // COM: loop branch
+                // CHECK: llvm.cond_br {{.*}}, ^bb2, ^bb4
+                // COM: branch to inlined block
+                // CHECK: llvm.br ^bb3
                 // CHECK: ttc.masked_load {{.*}} -> vector<4xf32>
                 %ret = tt.load %offset_ptrs : tensor<4x!tt.ptr<f32>, #blocked>
                 ttc.yield
