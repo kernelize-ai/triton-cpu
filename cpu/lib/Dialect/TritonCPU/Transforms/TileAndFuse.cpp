@@ -716,18 +716,32 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 
       auto resultType =
           cast<RankedTensorType>(makeRangeOp.getResult().getType());
-      auto newResultType = updateTensorType(resultType, tileShape);
-      // TODO: get the right slice chunk offset
-      auto sliceEncodingAttr =
-          dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
-      unsigned dim = sliceEncodingAttr ? sliceEncodingAttr.getDim() : 0;
-      cpu::MakeDynamicRangeOp makeDynamicRangeOp =
-          triton::cpu::MakeDynamicRangeOp::create(
-              rewriter, makeRangeOp.getLoc(), newResultType,
-              genericOp.getTileOffset(dim));
+
+      const bool isNotTiled = llvm::all_of(
+          llvm::zip(tileShape, resultType.getShape()), [](auto pair) {
+            auto [t, s] = pair;
+            return t == s;
+          });
+
+      IRMapping mapping;
+      Operation *newOp;
+      if (isNotTiled) {
+        // just fuse the existing op
+        newOp = rewriter.clone(*op, mapping);
+      } else {
+        auto newResultType = updateTensorType(resultType, tileShape);
+        // TODO: get the right slice chunk offset
+        auto sliceEncodingAttr =
+            dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
+        unsigned dim = sliceEncodingAttr ? sliceEncodingAttr.getDim() : 0;
+        newOp = triton::cpu::MakeDynamicRangeOp::create(
+            rewriter, makeRangeOp.getLoc(), newResultType,
+            genericOp.getTileOffset(dim));
+      }
+      assert(newOp && "expected make range op to be replaced or fused");
 
       // 3. update existing uses
-      blockArg.replaceAllUsesWith(makeDynamicRangeOp.getResult());
+      blockArg.replaceAllUsesWith(newOp->getResult(0));
       body->eraseArgument(numIV + i);
       newIns.erase(newIns.begin() + i);
 
