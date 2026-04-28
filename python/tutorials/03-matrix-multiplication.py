@@ -219,14 +219,18 @@ def get_hip_autotune_config():
 
 def get_cpu_autotune_config():
     sizes = [
-        {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6},
-        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4},
-        {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6},
-        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6},
-        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4},
-        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4},
-        #{'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4},
-        #{'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 6},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
     ]
     return [triton.Config(s | {'matrix_instr_nonkdim': 16}, num_warps=1, num_stages=2) for s in sizes]
 
@@ -381,8 +385,6 @@ def matmul(a, b, activation=""):
 torch.manual_seed(0)
 a = torch.rand((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
 b = torch.rand((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
-#a = torch.ones((4, 16), device=DEVICE, dtype=torch.float16)
-#b = torch.ones((16, 8), device=DEVICE, dtype=torch.float16)
 
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
@@ -393,7 +395,6 @@ if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
-
 
 TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
 if TORCH_HAS_FP8 and is_cuda():
@@ -468,4 +469,4 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-benchmark.run(show_plots=True, print_data=True)
+benchmark.run(show_plots=False, print_data=True)

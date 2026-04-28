@@ -204,7 +204,7 @@ def benchmark(M, N, provider):
     return gbps(ms)
 
 
-benchmark.run(show_plots=True, print_data=True)
+benchmark.run(show_plots=False, print_data=True)
 
 # %%
 # In the above plot, we can see that:
