@@ -730,7 +730,6 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         newOp = rewriter.clone(*op, mapping);
       } else {
         auto newResultType = updateTensorType(resultType, tileShape);
-        // TODO: get the right slice chunk offset
         auto sliceEncodingAttr =
             dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
         unsigned dim = sliceEncodingAttr ? sliceEncodingAttr.getDim() : 0;

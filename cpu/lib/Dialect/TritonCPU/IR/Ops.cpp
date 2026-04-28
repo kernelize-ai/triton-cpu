@@ -26,7 +26,7 @@ LogicalResult GenericOp::verify() {
   auto tileShape = getTileShape();
 
   if (blockShape.size() < 1)
-    return emitOpError("must provide a non-empty block/vector shape");
+    return emitOpError("must provide a non-empty block/tile shape");
 
   if (blockShape.size() != tileShape.size()) {
     return emitOpError(
@@ -53,21 +53,6 @@ LogicalResult GenericOp::verify() {
              << " vs " << tileShape[i];
     }
   }
-
-#if 0
-  // all operands must have the same encoding
-  Attribute tensorEncoding;
-  for (auto operand : getOperands()) {
-    if (auto tensorTy = dyn_cast<RankedTensorType>(operand.getType())) {
-      if (tensorEncoding && tensorEncoding != tensorTy.getEncoding())
-        return emitOpError("expects all tensor operands to have the same "
-                           "encoding, got ")
-               << tensorTy.getEncoding() << " with previous encoding "
-               << tensorEncoding;
-      tensorEncoding = tensorTy.getEncoding();
-    }
-  }
-#endif
 
   // Body must exist and have the implicit induction variable arguments.
   Region &body = getBody();

@@ -170,23 +170,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           for (unsigned k = numCombinerBlocks; k < yieldOpValues.size(); ++k)
             tensorTiles.push_back(yieldOpValues[k]);
         } else {
-#if 1
           for (unsigned k = 0; k < yieldOpValues.size(); ++k)
             tensorTiles.push_back(yieldOpValues[k]);
-#else
-          // TODO: we should assert that all users are generics since we are
-          // about to materialize a tensor in a format only generics can handle
-          assert(yieldOpValues.size() == 1 &&
-                 "only support scattering one generic tensor result currently");
-          assert(op.getBlockShape() == op.getTileShape() &&
-                 "only support materializing tensors in static path for "
-                 "generics with num_tiles = 1");
-          Location loc = yieldOp.getLoc();
-          auto b = TritonLLVMOpBuilder(loc, rewriter);
-          scatterTiles(rewriter, loc, yieldOpValues,
-                       /*tileOffset= */ b.i32_val(0), /*vectorSize= */ 1, {},
-                       {});
-#endif
         }
 
       } else {
@@ -254,13 +239,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           tileStruct =
               LLVM::InsertValueOp::create(rewriter, loc, tileStruct, elem, {j});
         }
-#if 1
         tileArgs.push_back(tileStruct);
-#else
-        tileArgs.push_back(UnrealizedConversionCastOp::create(
-                               rewriter, loc, origArg.getType(), tileStruct)
-                               .getResult(0));
-#endif
       } else if (isa<PointerType>(origArg.getType())) {
         // we might have a tt.ptr hiding in an unrealized conversion cast due to
         // late conversion of generic op block arguments. Use unrealized

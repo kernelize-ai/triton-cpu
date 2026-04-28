@@ -385,7 +385,6 @@ def matmul(a, b, activation=""):
 torch.manual_seed(0)
 a = torch.rand((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
 b = torch.rand((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
-
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
 print(f"triton_output_with_fp16_inputs={triton_output}")
