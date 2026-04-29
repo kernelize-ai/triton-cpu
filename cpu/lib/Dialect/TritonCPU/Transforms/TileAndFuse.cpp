@@ -67,8 +67,8 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                       generic.getLoc()); // tile offset per vector shape dim
 
   for (auto pair : ins) {
-    auto [v, tileShape] = pair;
-    Type argTy = updateTensorType(v.getType(), tileShape);
+    auto [v, inputTileShape] = pair;
+    Type argTy = updateTensorType(v.getType(), inputTileShape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
   rewriter.setInsertionPointToStart(body);
