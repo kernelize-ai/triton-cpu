@@ -219,11 +219,18 @@ def get_hip_autotune_config():
 
 def get_cpu_autotune_config():
     sizes = [
-        {'BLOCK_SIZE_M': 2, 'BLOCK_SIZE_N': 4, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
-        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 4, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
-        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 4, 'GROUP_SIZE_M': 1},
         {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
-        {'BLOCK_SIZE_M': 8, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 1},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 4},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 8, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 16, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
+        {'BLOCK_SIZE_M': 4, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 8, 'GROUP_SIZE_M': 6},
     ]
     return [triton.Config(s | {'matrix_instr_nonkdim': 16}, num_warps=1, num_stages=2) for s in sizes]
 
@@ -430,7 +437,7 @@ for fp8_inputs in [False, True]:
     configs.append(
         triton.testing.Benchmark(
             x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-            x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
+            x_vals=[128 * i for i in range(2, 8)],  # Different possible values for `x_name`
             line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
             # Possible values for `line_arg`
             # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
@@ -446,8 +453,8 @@ for fp8_inputs in [False, True]:
 
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, provider, fp8_inputs):
-    a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
-    b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
+    a = torch.randn((M, K), device=DEVICE, dtype=torch.float32)
+    b = torch.randn((K, N), device=DEVICE, dtype=torch.float32)
     if TORCH_HAS_FP8 and fp8_inputs:
         a = a.to(torch.float8_e5m2)
         b = b.T
@@ -461,4 +468,4 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-#benchmark.run(show_plots=True, print_data=True)
+benchmark.run(show_plots=False, print_data=True)

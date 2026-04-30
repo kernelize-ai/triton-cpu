@@ -25,11 +25,8 @@ LogicalResult GenericOp::verify() {
   auto blockShape = getBlockShape();
   auto tileShape = getTileShape();
 
-  if (blockShape.size() != 1) {
-    return emitOpError(
-               "only rank-1 generic ops are currently supported, got rank ")
-           << blockShape.size();
-  }
+  if (blockShape.size() < 1)
+    return emitOpError("must provide a non-empty block/tile shape");
 
   if (blockShape.size() != tileShape.size()) {
     return emitOpError(
