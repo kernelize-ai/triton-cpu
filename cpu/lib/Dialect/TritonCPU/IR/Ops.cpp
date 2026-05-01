@@ -70,6 +70,14 @@ LogicalResult GenericOp::verify() {
 
   // Combiners region must have one block per scalar result.
   Region &combiners = getCombiners();
+  if (!combiners.getBlocks().empty()) {
+    // if we have combiners we are currently limited to only one block in the
+    // body region
+    if (body.getBlocks().size() != 1)
+      return emitOpError("currently only supports one block in "
+                         "the body region with populated combiners, got ")
+             << body.getBlocks().size();
+  }
   unsigned numScalarResults = std::accumulate(
       getResults().begin(), getResults().end(), 0, [](int sum, Value v) {
         if (!isa<RankedTensorType>(v.getType()))
