@@ -289,15 +289,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       SmallVector<Value> perDimOffsets(rank);
       unsigned remaining = i;
       LDBG("i = " << i);
-      // Body induction vars are ordered innermost-first (col, then row), so
-      // store offsets at rank-1-d to match that convention.
       for (int d = rank - 1; d >= 0; --d) {
         unsigned nc = blockShape[d] / tileShape[d];
         unsigned chunkIdx = remaining % nc;
-        LDBG("perDimOffsets[" << rank - 1 - d << "] = " << chunkIdx << " * "
+        LDBG("perDimOffsets[" << d << "] = " << chunkIdx << " * "
                               << tileShape[d] << " = "
                               << (chunkIdx * tileShape[d]));
-        perDimOffsets[rank - 1 - d] = b.i32_val(chunkIdx * tileShape[d]);
+        perDimOffsets[d] = b.i32_val(chunkIdx * tileShape[d]);
         remaining /= nc;
       }
 
@@ -415,7 +413,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     for (int d = rank - 1; d >= 0; --d) {
       unsigned nc = blockShape[d] / tileShape[d];
       Value chunkIdx = b.urem(remaining, b.i32_val(nc));
-      tileOffsets[rank - 1 - d] = b.mul(chunkIdx, b.i32_val(tileShape[d]));
+      tileOffsets[d] = b.mul(chunkIdx, b.i32_val(tileShape[d]));
       remaining = b.udiv(remaining, b.i32_val(nc));
     }
     // Flat offset for accumulator scatter (tile-major layout)
