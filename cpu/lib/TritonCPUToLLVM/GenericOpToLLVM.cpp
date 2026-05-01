@@ -58,7 +58,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
              body->getArguments().drop_front(op.getNumInductionVars()),
-             adaptor.getOperands())) {
+             adaptor.getIns())) {
       LDBG("Chunk operand " << opIdx << " = " << origArg << " --> " << llvmArg);
       if (!isa<RankedTensorType>(origArg.getType())) {
         // forward constants and scalars without chunking
@@ -224,7 +224,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
              body->getArguments().drop_front(op.getNumInductionVars()),
-             adaptor.getOperands())) {
+             adaptor.getIns())) {
       if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
         // Load this tile's elements from the alloca produced by the prior
         // generic and pack them into the tile struct.
@@ -505,15 +505,19 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
 
-    auto blockShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("blockShape");
-    assert(blockShapeAttr &&
-           "expected generic op to have blockShape attribute");
     auto tileShapeAttr = op->getAttrOfType<DenseI32ArrayAttr>("tileShape");
     assert(tileShapeAttr && "expected generic op to have tileShape attribute");
-
-    ArrayRef<int32_t> blockShape = blockShapeAttr.asArrayRef();
     ArrayRef<int32_t> tileShape = tileShapeAttr.asArrayRef();
-    assert(blockShape.size() == tileShape.size() && !blockShape.empty() &&
+
+    SmallVector<int32_t> blockShape;
+    for (Value dim : op.getBlockShape()) {
+      APInt val;
+      assert(matchPattern(dim, m_ConstantInt(&val)) &&
+             "expected blockShape operand to fold to a constant integer");
+      blockShape.push_back(static_cast<int32_t>(val.getSExtValue()));
+    }
+
+    assert(!blockShape.empty() && blockShape.size() == tileShape.size() &&
            "blockShape and tileShape must be non-empty and of the same size");
 
     unsigned vectorSize = 1, numChunks = 1;
@@ -588,7 +592,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     const bool requiresTensorArgMaterialization = llvm::any_of(
         llvm::enumerate(
             llvm::zip(body->getArguments().drop_front(op.getNumInductionVars()),
-                      adaptor.getOperands())),
+                      adaptor.getIns())),
         [this, &op](auto pair) {
           auto [opIdx, argPair] = pair;
           auto [origArg, llvmArg] = argPair;

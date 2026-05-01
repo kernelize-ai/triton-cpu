@@ -103,10 +103,16 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
 
     SmallVector<Value> insValues =
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+    SmallVector<Value> blockShapeValues =
+        llvm::map_to_vector(blockShape, [&](int32_t s) {
+          return arith::ConstantOp::create(rewriter, loc,
+                                           rewriter.getI32IntegerAttr(s))
+              .getResult();
+        });
 
     auto generic =
         cpu::GenericOp::create(rewriter, loc, /*resultTypes=*/TypeRange{},
-                               insValues, blockShape, tileShape);
+                               insValues, blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
@@ -176,8 +182,14 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 
     SmallVector<Value> insValues =
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+    SmallVector<Value> blockShapeValues =
+        llvm::map_to_vector(blockShape, [&](int32_t s) {
+          return arith::ConstantOp::create(rewriter, loc,
+                                           rewriter.getI32IntegerAttr(s))
+              .getResult();
+        });
     auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, insValues,
-                                          blockShape, tileShape);
+                                          blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
@@ -454,8 +466,15 @@ struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
     SmallVector<Value> insValues =
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
 
-    auto generic = cpu::GenericOp::create(rewriter, loc, TypeRange{resultTy},
-                                          insValues, blockShape, tileShape);
+    SmallVector<Value> blockShapeValues =
+        llvm::map_to_vector(blockShape, [&](int32_t s) {
+          return arith::ConstantOp::create(rewriter, loc,
+                                           rewriter.getI32IntegerAttr(s))
+              .getResult();
+        });
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, TypeRange{resultTy}, insValues,
+                               blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
@@ -597,12 +616,18 @@ struct WrapConvertLayoutOp
     for (auto value : cvtOp->getOperands()) {
       ins.push_back(TiledInput{value, tileShape});
     }
+
     SmallVector<Value> insValues =
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
-
+    SmallVector<Value> blockShapeValues =
+        llvm::map_to_vector(blockShape, [&](int32_t s) {
+          return arith::ConstantOp::create(rewriter, loc,
+                                           rewriter.getI32IntegerAttr(s))
+              .getResult();
+        });
     auto generic = cpu::GenericOp::create(
         rewriter, loc, /*resultTypes=*/TypeRange{convertedTensorTy}, insValues,
-        blockShape, tileShape);
+        blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
