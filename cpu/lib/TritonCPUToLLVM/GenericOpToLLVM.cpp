@@ -425,7 +425,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                        Value &result, ArrayRef<Value> tensorAccPtrs,
                        ArrayRef<Type> tensorElemTys,
                        Block *innerAfterBlock = nullptr) const {
-#if 1
     Location loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -501,83 +500,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                           tensorAccPtrs, tensorElemTys, afterBlock);
           accOffsets.pop_back();
         });
-
-#else
-
-    Block *currentBlock = rewriter.getInsertionBlock();
-    Block *afterBlock =
-        rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
-
-    // loop-carried value: (i: i32) only
-    Block *loopHeader = rewriter.createBlock(afterBlock, {i32_ty}, {loc});
-    Block *loopBody = rewriter.createBlock(afterBlock);
-
-    // currentBlock -> loopHeader(0)
-    rewriter.setInsertionPointToEnd(currentBlock);
-    LLVM::BrOp::create(rewriter, loc, ValueRange{b.i32_val(0)}, loopHeader);
-
-    // loopHeader: check i < numChunks, branch to body or exit
-    rewriter.setInsertionPointToEnd(loopHeader);
-    Value loopI = loopHeader->getArgument(0);
-    Value cond = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ult,
-                                      loopI, b.i32_val(numChunks));
-    LLVM::CondBrOp::create(rewriter, loc, cond, loopBody, {}, afterBlock, {});
-
-    // loop body: emit tile, increment counter
-    rewriter.setInsertionPointToEnd(loopBody);
-    // Decompose flat tile index into per-dim tile offsets
-    unsigned rank = blockShape.size();
-    SmallVector<Value> tileOffsets(rank);
-    Value remaining = loopI;
-    for (int d = rank - 1; d >= 0; --d) {
-      unsigned nc = blockShape[d] / tileShape[d];
-      Value chunkIdx = b.urem(remaining, b.i32_val(nc));
-      tileOffsets[d] = b.mul(chunkIdx, b.i32_val(tileShape[d]));
-      remaining = b.udiv(remaining, b.i32_val(nc));
-    }
-    // Flat offset for accumulator scatter (tile-major layout)
-    Value flatTileOffset = b.mul(loopI, b.i32_val(vectorSize));
-    auto tileArgs = buildDynamicChunkedArgs(op, adaptor, rewriter,
-                                            flatTileOffset, vectorSize);
-
-    Region &bodyRegion = op.getBody();
-    Block *bodyEntry = &bodyRegion.front();
-
-    // Move all blocks into the parent region before afterBlock.
-    rewriter.inlineRegionBefore(bodyRegion, *afterBlock->getParent(),
-                                afterBlock->getIterator());
-
-    TypeConverter::SignatureConversion sigConv(bodyEntry->getNumArguments());
-    for (auto [idx, arg] : llvm::enumerate(bodyEntry->getArguments()))
-      sigConv.addInputs(idx, getTypeConverter()->convertType(arg.getType()));
-    bodyEntry = rewriter.applySignatureConversion(bodyEntry, sigConv,
-                                                  getTypeConverter());
-
-    // Branch from loopBody into the inlined region, passing induction vars then
-    // tile args as block arguments to match bodyEntry's argument list.
-    rewriter.setInsertionPointToEnd(loopBody);
-    SmallVector<Value> entryArgs;
-    entryArgs.append(tileOffsets.begin(), tileOffsets.end());
-    entryArgs.append(tileArgs.begin(), tileArgs.end());
-    LLVM::BrOp::create(rewriter, loc, entryArgs, bodyEntry);
-
-    for (Block &block : llvm::make_range(bodyEntry->getIterator(),
-                                         afterBlock->getIterator())) {
-      auto yieldOp = dyn_cast<cpu::YieldOp>(block.getTerminator());
-      if (!yieldOp)
-        continue;
-
-      rewriter.setInsertionPoint(yieldOp);
-      SmallVector<Value> loopTiles = llvm::to_vector(yieldOp.getValues());
-      scatterTiles(rewriter, loc, loopTiles, flatTileOffset, vectorSize,
-                   tensorAccPtrs, tensorElemTys);
-      Value nextI =
-          LLVM::AddOp::create(rewriter, op.getLoc(), loopI, b.i32_val(1));
-      rewriter.replaceOpWithNewOp<LLVM::BrOp>(
-          yieldOp, SmallVector<Value>{nextI}, loopHeader);
-      break; // only one ttc.yield per generic body
-    }
-#endif
   }
 
   LogicalResult
