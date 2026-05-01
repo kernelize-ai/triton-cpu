@@ -15,7 +15,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
   // CHECK-COUNT-1: llvm.cond_br
   // CHECK-NOT: llvm.cond_br
   tt.func public @scale_1d(%scale: f32) {
-    %0 = ttc.generic %scale attributes {blockShape = array<i32: 16>, tileShape = array<i32: 4>} body {
+    %c16_i32 = arith.constant 16 : i32
+
+    %0 = ttc.generic (%scale) blocks [%c16_i32 : i32] attributes {tileShape = array<i32: 4>} body {
       ^bb0(%offset: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<4xf32, #blocked>
@@ -36,7 +38,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
   // CHECK-COUNT-2: llvm.cond_br
   // CHECK-NOT: llvm.cond_br
   tt.func public @scale_2d(%scale: f32) {
-    %0 = ttc.generic %scale attributes {blockShape = array<i32: 4, 8>, tileShape = array<i32: 1, 4>} body {
+    %c4_i32 = arith.constant 4 : i32
+    %c8_i32 = arith.constant 8 : i32
+    %0 = ttc.generic (%scale) blocks [%c4_i32, %c8_i32 : i32, i32] attributes {tileShape = array<i32: 1, 4>} body {
       ^bb0(%dim0: i32, %dim1: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<1x4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<1x4xf32, #blocked>
@@ -57,7 +61,9 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
   // CHECK-COUNT-3: llvm.cond_br
   // CHECK-NOT: llvm.cond_br
   tt.func public @scale_3d(%scale: f32) {
-    %0 = ttc.generic %scale attributes {blockShape = array<i32: 4, 4, 8>, tileShape = array<i32: 1, 1, 4>} body {
+    %c4_i32 = arith.constant 4 : i32
+    %c8_i32 = arith.constant 8 : i32
+    %0 = ttc.generic (%scale) blocks [%c4_i32, %c4_i32, %c8_i32 : i32, i32, i32] attributes {tileShape = array<i32: 1, 1, 4>} body {
       ^bb0(%dim0: i32, %dim1: i32, %dim2: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<1x1x4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<1x1x4xf32, #blocked>
@@ -78,7 +84,10 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
   // CHECK-COUNT-4: llvm.cond_br
   // CHECK-NOT: llvm.cond_br
   tt.func public @scale_4d(%scale: f32) {
-    %0 = ttc.generic %scale attributes {blockShape = array<i32: 2, 2, 4, 8>, tileShape = array<i32: 1, 1, 1, 4>} body {
+    %c2_i32 = arith.constant 2 : i32
+    %c4_i32 = arith.constant 4 : i32
+    %c8_i32 = arith.constant 8 : i32
+    %0 = ttc.generic (%scale) blocks [%c2_i32, %c2_i32, %c4_i32, %c8_i32 : i32, i32, i32, i32] attributes {tileShape = array<i32: 1, 1, 1, 4>} body {
       ^bb0(%dim0: i32, %dim1: i32, %dim2: i32, %dim3: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<1x1x1x4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<1x1x1x4xf32, #blocked>

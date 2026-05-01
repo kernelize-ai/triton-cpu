@@ -17,7 +17,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
         %x_3 = tt.addptr %x, %offsets_1 : tensor<512x!tt.ptr<f32>, #blocked>, tensor<512xi32, #blocked>
 
         // CHECK-COUNT-128: ttc.masked_load {{.*}} -> vector<4xf32>
-        ttc.generic %x_3 attributes {blockShape = array<i32: 512>, tileShape = array<i32: 4>} body {
+        ttc.generic (%x_3) blocks [%c512_i32 : i32] attributes {tileShape = array<i32: 4>} body {
             ^bb0(%offset:i32, %arg0: tensor<4x!tt.ptr<f32>, #blocked>):
                 %x_10 = tt.load %arg0 : tensor<4x!tt.ptr<f32>, #blocked>
                 ttc.yield
@@ -31,7 +31,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
 #blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [1], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shared = 0 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
     tt.func public @load_scalar(%x_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
-        ttc.generic %x_ptr attributes {blockShape = array<i32: 1024>, tileShape = array<i32: 4>} body {
+        %c1024_i32 = arith.constant 1024 : i32
+        ttc.generic (%x_ptr) blocks [%c1024_i32 : i32] attributes {tileShape = array<i32: 4>} body {
             ^bb0(%tileOffset: i32, %ptr: !tt.ptr<f32>):
                 %offsets = ttc.make_dynamic_range %tileOffset : tensor<4xi32, #blocked>
                 %ptrs = tt.splat %ptr : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>, #blocked>
@@ -66,9 +67,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
     // 4 M-tiles × 1 N-tile = 4 body invocations, each must emit one vector<8xf16> store.
     // CHECK-COUNT-4: ttc.masked_store {{.*}} : (!llvm.ptr<1>, vector<8xf16>, vector<8xi1>) -> ()
     // CHECK-NOT: ttc.masked_store {{.*}} : (!llvm.ptr<1>, vector<1xf16>
-    ttc.generic %data, %c_ptr, %stride_cm, %M, %N, %offs_am, %offs_bn
-        attributes {blockShape = array<i32: 4, 8>, tileShape = array<i32: 1, 8>} body {
-    ^bb0(%tile_n: i32, %tile_m: i32,
+    %c4_i32 = arith.constant 4 : i32
+    %c8_i32 = arith.constant 8 : i32
+    ttc.generic (%data, %c_ptr, %stride_cm, %M, %N, %offs_am, %offs_bn) blocks
+        [%c4_i32, %c8_i32 : i32, i32] attributes {tileShape = array<i32: 1, 8>} body {
+    ^bb0(%tile_m: i32, %tile_n: i32,
          %tile_data: tensor<1x8xf16, #blocked>,
          %ptr: !tt.ptr<f16>, %stride: i32, %m_bound: i32, %n_bound: i32,
          %row_base: i32, %col_base: i32):

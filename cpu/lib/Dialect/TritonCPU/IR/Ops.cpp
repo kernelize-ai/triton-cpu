@@ -25,7 +25,7 @@ LogicalResult GenericOp::verify() {
   auto blockShape = getBlockShape();
   auto tileShape = getTileShape();
 
-  if (blockShape.size() < 1)
+  if (blockShape.empty())
     return emitOpError("must provide a non-empty block/tile shape");
 
   if (blockShape.size() != tileShape.size()) {
@@ -33,24 +33,32 @@ LogicalResult GenericOp::verify() {
                "expects blockShape and tileShape to have the same rank, got ")
            << blockShape.size() << " vs " << tileShape.size();
   }
-  for (unsigned i = 0; i < blockShape.size(); i++) {
-    if (blockShape[i] <= 0) {
-      return emitOpError("expects blockShape[")
-             << i << "] to be positive, got " << blockShape[i];
-    }
+  for (unsigned i = 0; i < tileShape.size(); i++) {
     if (tileShape[i] <= 0) {
       return emitOpError("expects tileShape[")
              << i << "] to be positive, got " << tileShape[i];
     }
-    if (blockShape[i] < tileShape[i]) {
-      return emitOpError("expects blockShape[")
-             << i << "] >= tileShape[" << i << "], got " << blockShape[i]
-             << " vs " << tileShape[i];
-    }
-    if (blockShape[i] % tileShape[i] != 0) {
-      return emitOpError("expects blockShape[")
-             << i << "] % tileShape[" << i << "] == 0, got " << blockShape[i]
-             << " vs " << tileShape[i];
+
+    // blockShape[i] is a runtime value; check constraints only when it folds
+    // to a constant (e.g. when constructed from arith.constant).
+    APInt blockVal;
+    if (matchPattern(blockShape[i], m_ConstantInt(&blockVal))) {
+      int64_t bv = blockVal.getSExtValue();
+      if (bv <= 0)
+        return emitOpError("expects blockShape[")
+               << i << "] to be positive, got " << bv;
+      if (bv < tileShape[i])
+        return emitOpError("expects blockShape[")
+               << i << "] >= tileShape[" << i << "], got " << bv << " vs "
+               << tileShape[i];
+      if (bv % tileShape[i] != 0)
+        return emitOpError("expects blockShape[")
+               << i << "] % tileShape[" << i << "] == 0, got " << bv << " vs "
+               << tileShape[i];
+    } else {
+      return emitOpError("only constant block shapes are currently supported "
+                         "for verification, got ")
+             << blockShape[i];
     }
   }
 

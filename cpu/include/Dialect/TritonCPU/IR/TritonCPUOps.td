@@ -162,7 +162,7 @@ def TTC_YieldOp : TTC_Op<"yield", [Terminator, ReturnLike, HasParent<"GenericOp"
   let assemblyFormat = "($values^ `:` type($values))? attr-dict";
 }
 
-def TTC_GenericOp : TTC_Op<"generic", [RecursiveMemoryEffects, RecursivelySpeculatable, IsolatedFromAbove]> {
+def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemoryEffects, RecursivelySpeculatable, IsolatedFromAbove]> {
   let summary = "Tiled iteration over a tensor block with fused tensor operations";
 
   let description = [{
@@ -231,7 +231,7 @@ def TTC_GenericOp : TTC_Op<"generic", [RecursiveMemoryEffects, RecursivelySpecul
   let arguments = (ins
     Variadic<TT_Type>:$ins,
 
-    DenseI32ArrayAttr:$blockShape,
+    Variadic<I32>:$blockShape,
     DenseI32ArrayAttr:$tileShape
   );
 
@@ -242,7 +242,7 @@ def TTC_GenericOp : TTC_Op<"generic", [RecursiveMemoryEffects, RecursivelySpecul
   let hasVerifier = 1;
 
   let assemblyFormat = [{
-    $ins attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type(operands, results)
+    `(` $ins `)` `blocks` `[` $blockShape `:` type($blockShape) `]` attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type($ins, $results)
   }];
 
   let extraClassDeclaration = [{
