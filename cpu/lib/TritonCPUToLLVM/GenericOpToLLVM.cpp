@@ -112,11 +112,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     return chunkedArgs;
   }
 
-  SmallVector<Value> emitTileBody(cpu::GenericOp op,
-                                  ConversionPatternRewriter &rewriter,
-                                  ArrayRef<Value> chunkedArgs,
-                                  ArrayRef<Value> tileOffsets,
-                                  Value &result) const {
+  SmallVector<Value> cloneTileBody(cpu::GenericOp op,
+                                   ConversionPatternRewriter &rewriter,
+                                   ArrayRef<Value> chunkedArgs,
+                                   ArrayRef<Value> tileOffsets,
+                                   Value &result) const {
+    assert(op.getBody().getBlocks().size() == 1 &&
+           "expected generic op body to have one block");
     Block *body = &op.getBody().front();
     const bool hasReductions = !op.getCombiners().empty();
 
@@ -302,7 +304,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       Value flatOffset = b.i32_val(i * vectorSize);
       LDBG("flatOffset = " << (i * vectorSize));
       auto tiles =
-          emitTileBody(op, rewriter, chunkedArgs, perDimOffsets, result);
+          cloneTileBody(op, rewriter, chunkedArgs, perDimOffsets, result);
       scatterTiles(rewriter, loc, tiles, flatOffset, vectorSize, tensorAccPtrs,
                    tensorElemTys);
     }
@@ -324,7 +326,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto firstArgs =
         buildStaticChunkedArgs(op, adaptor, rewriter, 0, vectorSize);
     auto firstTiles =
-        emitTileBody(op, rewriter, firstArgs, {b.i32_val(0)}, result);
+        cloneTileBody(op, rewriter, firstArgs, {b.i32_val(0)}, result);
     scatterTiles(rewriter, loc, firstTiles, b.i32_val(0), vectorSize,
                  tensorAccPtrs, tensorElemTys);
 
@@ -360,7 +362,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         buildDynamicChunkedArgs(op, adaptor, rewriter, tileOffset, vectorSize);
     Value tileResult = loopAcc;
     auto loopTiles =
-        emitTileBody(op, rewriter, tileArgs, {tileOffset}, tileResult);
+        cloneTileBody(op, rewriter, tileArgs, {tileOffset}, tileResult);
     scatterTiles(rewriter, loc, loopTiles, tileOffset, vectorSize,
                  tensorAccPtrs, tensorElemTys);
     Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
@@ -372,18 +374,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     result = afterResult;
   }
 
-  // Path 3: emit a loop over tiles with no reduction accumulator.
-  // Loops from i=0 to numChunks-1 carrying only the loop counter. No first-
-  // iteration peeling is needed since there is no accumulator to bootstrap.
-  void emitLoop(cpu::GenericOp op, OpAdaptor adaptor,
-                ConversionPatternRewriter &rewriter, unsigned numChunks,
-                unsigned vectorSize, ArrayRef<int32_t> blockShape,
-                ArrayRef<int32_t> tileShape, ArrayRef<Value> tensorAccPtrs,
-                ArrayRef<Type> tensorElemTys) const {
-    Location loc = op.getLoc();
+  void emitSingleLoop(
+      ConversionPatternRewriter &rewriter, Location loc, int32_t numChunks,
+      int32_t tileSize,
+      llvm::function_ref<void(Value /*loopI*/, Value /*dimTileOffset*/,
+                              Block * /*afterBlock*/)>
+          bodyFn) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-
-    LDBG("Inline generic body into dynamic loop");
 
     Block *currentBlock = rewriter.getInsertionBlock();
     Block *afterBlock =
@@ -406,63 +403,101 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     // loop body: emit tile, increment counter
     rewriter.setInsertionPointToEnd(loopBody);
-    // Decompose flat tile index into per-dim tile offsets
+
+    Value tileOffset = b.mul(loopI, b.i32_val(tileSize));
+    bodyFn(loopI, tileOffset, afterBlock);
+
+    Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
+    LLVM::BrOp::create(rewriter, loc, ValueRange{nextI}, loopHeader);
+
+    rewriter.setInsertionPointToStart(afterBlock);
+  }
+
+  // Path 3: emit a loop over tiles with no reduction accumulator.
+  // Loops from i=0 to numChunks-1 carrying only the loop counter. No first-
+  // iteration peeling is needed since there is no accumulator to bootstrap.
+  void emitNestedLoops(cpu::GenericOp op, OpAdaptor adaptor,
+                       ConversionPatternRewriter &rewriter, unsigned dim,
+                       SmallVectorImpl<Value> &accOffsets, Value flatElemOffset,
+                       ArrayRef<int32_t> blockShape,
+                       ArrayRef<int32_t> tileShape, unsigned vectorSize,
+                       Value &result, ArrayRef<Value> tensorAccPtrs,
+                       ArrayRef<Type> tensorElemTys,
+                       Block *innerAfterBlock = nullptr) const {
+    Location loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+
     unsigned rank = blockShape.size();
-    SmallVector<Value> tileOffsets(rank);
-    Value remaining = loopI;
-    for (int d = rank - 1; d >= 0; --d) {
-      unsigned nc = blockShape[d] / tileShape[d];
-      Value chunkIdx = b.urem(remaining, b.i32_val(nc));
-      tileOffsets[d] = b.mul(chunkIdx, b.i32_val(tileShape[d]));
-      remaining = b.udiv(remaining, b.i32_val(nc));
+
+    if (dim == rank) {
+      // innermost loop, inline generic op body
+      assert(innerAfterBlock &&
+             "expected inner after block for innermost loop");
+
+      Region &bodyRegion = op.getBody();
+      Block *bodyEntry = &bodyRegion.front();
+
+      // must be built before inlining the region since it references block
+      // arguments
+      auto tileArgs = buildDynamicChunkedArgs(op, adaptor, rewriter,
+                                              flatElemOffset, vectorSize);
+
+      rewriter.inlineRegionBefore(bodyRegion, *innerAfterBlock->getParent(),
+                                  innerAfterBlock->getIterator());
+
+      TypeConverter::SignatureConversion sigConv(bodyEntry->getNumArguments());
+      for (auto [idx, arg] : llvm::enumerate(bodyEntry->getArguments()))
+        sigConv.addInputs(idx, getTypeConverter()->convertType(arg.getType()));
+      bodyEntry = rewriter.applySignatureConversion(bodyEntry, sigConv,
+                                                    getTypeConverter());
+
+      SmallVector<Value> entryArgs(accOffsets.begin(), accOffsets.end());
+      entryArgs.append(tileArgs.begin(), tileArgs.end());
+      LLVM::BrOp::create(rewriter, loc, entryArgs, bodyEntry);
+
+      for (Block &block : llvm::make_range(bodyEntry->getIterator(),
+                                           innerAfterBlock->getIterator())) {
+        auto yieldOp = dyn_cast<cpu::YieldOp>(block.getTerminator());
+        if (!yieldOp)
+          continue;
+
+        rewriter.setInsertionPoint(yieldOp);
+        SmallVector<Value> loopTiles = llvm::to_vector(yieldOp.getValues());
+        scatterTiles(rewriter, loc, loopTiles, flatElemOffset, vectorSize,
+                     tensorAccPtrs, tensorElemTys);
+
+        // emit single loop handles branching to the next block, so just erase
+        // the yield and set the rewriter insertion point to the end of the last
+        // inlined block
+        rewriter.eraseOp(yieldOp);
+        rewriter.setInsertionPointToEnd(&block);
+        break; // only one ttc.yield per generic body
+      }
+
+      return;
     }
-    // Flat offset for accumulator scatter (tile-major layout)
-    Value flatTileOffset = b.mul(loopI, b.i32_val(vectorSize));
-    auto tileArgs = buildDynamicChunkedArgs(op, adaptor, rewriter,
-                                            flatTileOffset, vectorSize);
-    const bool hasReductions = !op.getCombiners().empty();
-    // TODO: consider asserting that generic body region has one block on the
-    // emitTileBody/clone path
-    assert(!hasReductions &&
-           "cannot handle generic reductions on the inline loop path");
 
-    Region &bodyRegion = op.getBody();
-    Block *bodyEntry = &bodyRegion.front();
+    // emit single loop, recurse to next level down
+    int32_t numChunks = blockShape[dim] / tileShape[dim];
 
-    // Move all blocks into the parent region before afterBlock.
-    rewriter.inlineRegionBefore(bodyRegion, *afterBlock->getParent(),
-                                afterBlock->getIterator());
-
-    TypeConverter::SignatureConversion sigConv(bodyEntry->getNumArguments());
-    for (auto [idx, arg] : llvm::enumerate(bodyEntry->getArguments()))
-      sigConv.addInputs(idx, getTypeConverter()->convertType(arg.getType()));
-    bodyEntry = rewriter.applySignatureConversion(bodyEntry, sigConv,
-                                                  getTypeConverter());
-
-    // Branch from loopBody into the inlined region, passing induction vars then
-    // tile args as block arguments to match bodyEntry's argument list.
-    rewriter.setInsertionPointToEnd(loopBody);
-    SmallVector<Value> entryArgs;
-    entryArgs.append(tileOffsets.begin(), tileOffsets.end());
-    entryArgs.append(tileArgs.begin(), tileArgs.end());
-    LLVM::BrOp::create(rewriter, loc, entryArgs, bodyEntry);
-
-    for (Block &block : llvm::make_range(bodyEntry->getIterator(),
-                                         afterBlock->getIterator())) {
-      auto yieldOp = dyn_cast<cpu::YieldOp>(block.getTerminator());
-      if (!yieldOp)
-        continue;
-
-      rewriter.setInsertionPoint(yieldOp);
-      SmallVector<Value> loopTiles = llvm::to_vector(yieldOp.getValues());
-      scatterTiles(rewriter, loc, loopTiles, flatTileOffset, vectorSize,
-                   tensorAccPtrs, tensorElemTys);
-      Value nextI =
-          LLVM::AddOp::create(rewriter, op.getLoc(), loopI, b.i32_val(1));
-      rewriter.replaceOpWithNewOp<LLVM::BrOp>(
-          yieldOp, SmallVector<Value>{nextI}, loopHeader);
-      break; // only one ttc.yield per generic body
+    int32_t innerStride = vectorSize;
+    for (unsigned d = dim + 1; d < rank; ++d) {
+      innerStride *= blockShape[d] / tileShape[d];
     }
+
+    emitSingleLoop(
+        rewriter, loc, numChunks, tileShape[dim],
+        [&](Value loopI, Value dimTileOffset, Block *afterBlock) {
+          accOffsets.push_back(dimTileOffset);
+          Value newFlat =
+              LLVM::AddOp::create(rewriter, loc, flatElemOffset,
+                                  LLVM::MulOp::create(rewriter, loc, loopI,
+                                                      b.i32_val(innerStride)));
+          emitNestedLoops(op, adaptor, rewriter, dim + 1, accOffsets, newFlat,
+                          blockShape, tileShape, vectorSize, result,
+                          tensorAccPtrs, tensorElemTys, afterBlock);
+          accOffsets.pop_back();
+        });
   }
 
   LogicalResult
@@ -586,8 +621,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
               : true;
       assert(allUsersAreGeneric && "expected all generic op users to also be "
                                    "generic ops on dynamic path");
-      emitLoop(op, adaptor, rewriter, numChunks, vectorSize, blockShape,
-               tileShape, tensorAccPtrs, tensorElemTys);
+      SmallVector<Value> accOffsets;
+      auto b = TritonLLVMOpBuilder(loc, rewriter);
+      emitNestedLoops(op, adaptor, rewriter, /*dim=*/0, accOffsets,
+                      b.i32_val(0), blockShape, tileShape, vectorSize, result,
+                      tensorAccPtrs, tensorElemTys);
     }
 
     SmallVector<Value> replacements;
