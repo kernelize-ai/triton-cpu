@@ -112,12 +112,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     return chunkedArgs;
   }
 
-  SmallVector<Value> emitTileBody(cpu::GenericOp op,
-                                  ConversionPatternRewriter &rewriter,
-                                  ArrayRef<Value> chunkedArgs,
-                                  ArrayRef<Value> tileOffsets,
-                                  Value &result) const {
-    // TODO: assert that the body region has only one block
+  SmallVector<Value> cloneTileBody(cpu::GenericOp op,
+                                   ConversionPatternRewriter &rewriter,
+                                   ArrayRef<Value> chunkedArgs,
+                                   ArrayRef<Value> tileOffsets,
+                                   Value &result) const {
     assert(op.getBody().getBlocks().size() == 1 &&
            "expected generic op body to have one block");
     Block *body = &op.getBody().front();
@@ -305,7 +304,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       Value flatOffset = b.i32_val(i * vectorSize);
       LDBG("flatOffset = " << (i * vectorSize));
       auto tiles =
-          emitTileBody(op, rewriter, chunkedArgs, perDimOffsets, result);
+          cloneTileBody(op, rewriter, chunkedArgs, perDimOffsets, result);
       scatterTiles(rewriter, loc, tiles, flatOffset, vectorSize, tensorAccPtrs,
                    tensorElemTys);
     }
@@ -327,7 +326,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto firstArgs =
         buildStaticChunkedArgs(op, adaptor, rewriter, 0, vectorSize);
     auto firstTiles =
-        emitTileBody(op, rewriter, firstArgs, {b.i32_val(0)}, result);
+        cloneTileBody(op, rewriter, firstArgs, {b.i32_val(0)}, result);
     scatterTiles(rewriter, loc, firstTiles, b.i32_val(0), vectorSize,
                  tensorAccPtrs, tensorElemTys);
 
@@ -363,7 +362,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         buildDynamicChunkedArgs(op, adaptor, rewriter, tileOffset, vectorSize);
     Value tileResult = loopAcc;
     auto loopTiles =
-        emitTileBody(op, rewriter, tileArgs, {tileOffset}, tileResult);
+        cloneTileBody(op, rewriter, tileArgs, {tileOffset}, tileResult);
     scatterTiles(rewriter, loc, loopTiles, tileOffset, vectorSize,
                  tensorAccPtrs, tensorElemTys);
     Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
