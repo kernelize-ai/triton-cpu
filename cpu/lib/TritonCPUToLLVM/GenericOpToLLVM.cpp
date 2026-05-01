@@ -378,7 +378,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       ConversionPatternRewriter &rewriter, Location loc, int32_t numChunks,
       int32_t tileSize,
       llvm::function_ref<void(Value /*loopI*/, Value /*dimTileOffset*/,
-                              Block * /*loopHeader*/, Block * /*afterBlock*/)>
+                              Block * /*afterBlock*/)>
           bodyFn) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -405,7 +405,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     rewriter.setInsertionPointToEnd(loopBody);
 
     Value tileOffset = b.mul(loopI, b.i32_val(tileSize));
-    bodyFn(loopI, tileOffset, loopHeader, afterBlock);
+    bodyFn(loopI, tileOffset, afterBlock);
 
     Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
     LLVM::BrOp::create(rewriter, loc, ValueRange{nextI}, loopHeader);
@@ -487,8 +487,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     emitSingleLoop(
         rewriter, loc, numChunks, tileShape[dim],
-        [&](Value loopI, Value dimTileOffset, Block *loopHeader,
-            Block *afterBlock) {
+        [&](Value loopI, Value dimTileOffset, Block *afterBlock) {
           accOffsets.push_back(dimTileOffset);
           Value newFlat =
               LLVM::AddOp::create(rewriter, loc, flatElemOffset,
