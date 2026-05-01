@@ -59,14 +59,16 @@ void CpuAxisInfoAnalysis::visitGenericOpArguments(
   auto tileShape = genericOp.getTileShape();
 
   // handle the induction var / tile offset separately
-  {
+  assert(tileShape.size() == genericOp.getNumInductionVars() &&
+         "expected number of induction vars to match tile shape rank");
+  for (unsigned i = 0; i < genericOp.getNumInductionVars(); i++) {
     AxisInfo::DimVectorT knownContiguity(1, 1);
     AxisInfo::DimVectorT knownDivisibility(1, 1);
     AxisInfo::DimVectorT knownConstancy(1, 1);
-    knownDivisibility[0] = tileShape[0]; // TODO: multi-dim support
+    knownDivisibility[0] = tileShape[i];
     auto inductionVar =
         AxisInfo(knownContiguity, knownDivisibility, knownConstancy);
-    propagateIfChanged(argLattices[0], argLattices[0]->join(inductionVar));
+    propagateIfChanged(argLattices[i], argLattices[i]->join(inductionVar));
   }
 
   for (auto [operand, argLattice] :

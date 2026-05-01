@@ -142,7 +142,8 @@ class CPUBackend(BaseBackend):
         else:
             cpu.passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        cpu.passes.ttgpuir.add_accelerate_matmul(pm)
+        if options.tile_and_fuse is False:
+            cpu.passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 
         passes.ttgpuir.add_optimize_thread_locality(pm)
