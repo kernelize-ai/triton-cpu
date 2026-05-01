@@ -55,6 +55,10 @@ LogicalResult GenericOp::verify() {
         return emitOpError("expects blockShape[")
                << i << "] % tileShape[" << i << "] == 0, got " << bv << " vs "
                << tileShape[i];
+    } else {
+      return emitOpError("only constant block shapes are currently supported "
+                         "for verification, got ")
+             << blockShape[i];
     }
   }
 
