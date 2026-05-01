@@ -729,10 +729,23 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         // just fuse the existing op
         newOp = rewriter.clone(*op, mapping);
       } else {
+        auto rank = tileShape.size();
         auto newResultType = updateTensorType(resultType, tileShape);
         auto sliceEncodingAttr =
             dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
-        unsigned dim = sliceEncodingAttr ? sliceEncodingAttr.getDim() : 0;
+        unsigned dim;
+        if (!sliceEncodingAttr) {
+          assert(rank == 1 && "make dynamic range op without slice encoding "
+                              "should be inside a 1D generic");
+          dim = 0;
+        } else {
+          // Body induction vars are ordered outermost-first, matching
+          // blockShape. A SliceEncodingAttr with dim=d encodes a 1D tensor in
+          // the direction of tensor-dim (1-d),
+          // which sits at blockShape index (rank-2) + (1-d) = rank-1-d.
+          dim =
+              genericOp.getBlockShape().size() - 1 - sliceEncodingAttr.getDim();
+        }
         newOp = triton::cpu::MakeDynamicRangeOp::create(
             rewriter, makeRangeOp.getLoc(), newResultType,
             genericOp.getTileOffset(dim));
