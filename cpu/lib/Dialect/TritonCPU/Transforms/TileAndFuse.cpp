@@ -638,7 +638,6 @@ struct WrapConvertLayoutOp
     if (!requiredTileShape)
       return failure();
 
-    SmallVector<int32_t> tileShape = *requiredTileShape;
     // Use the destination ty to get the tile shape. the destination ty will be
     // tiled in any cvt evaluated for fusion, so we want to use the same
     // criteria for "fits" to avoid wrapping fusible cvts
@@ -646,9 +645,10 @@ struct WrapConvertLayoutOp
         dstTy, cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding()));
 
     // return failure as we should be able to fuse this cvt op
-    if (ArrayRef(tileShape) == ArrayRef(defaultTileShape))
+    if (ArrayRef(*requiredTileShape) == ArrayRef(defaultTileShape))
       return failure();
 
+    SmallVector<int32_t> tileShape = blockShape;
     SmallVector<TiledInput> ins;
     for (auto value : cvtOp->getOperands()) {
       ins.push_back(TiledInput{value, tileShape});
