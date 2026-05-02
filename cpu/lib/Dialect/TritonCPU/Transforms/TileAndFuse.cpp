@@ -61,6 +61,35 @@ buildBlockShapeValues(Location loc, ArrayRef<int32_t> blockShape,
   });
 }
 
+// Note: this helper assumes the conversion only involves reordering of
+// registers
+static std::optional<SmallVector<int32_t>>
+getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
+                                      RankedTensorType dstTy) {
+  // only support blocked -> blocked conversions
+  auto srcEnc = dyn_cast<gpu::BlockedEncodingAttr>(srcTy.getEncoding());
+  auto dstEnc = dyn_cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding());
+  if (!srcEnc || !dstEnc)
+    return std::nullopt;
+
+  auto srcSPT = srcEnc.getSizePerThread();
+  auto dstSPT = dstEnc.getSizePerThread();
+  assert(srcSPT.size() == dstSPT.size());
+
+  auto shape = srcTy.getShape();
+  SmallVector<int32_t> tileShape;
+
+  for (auto [s, d, dimSize] : llvm::zip(srcSPT, dstSPT, shape)) {
+    int32_t tile = std::lcm((int32_t)s, (int32_t)d);
+    // Tile must evenly divide the tensor dimension
+    if (dimSize % tile != 0)
+      return std::nullopt;
+    tileShape.push_back(tile);
+  }
+
+  return tileShape;
+}
+
 struct TiledInput {
   Value value;
   SmallVector<int32_t> shape;
@@ -991,21 +1020,43 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 
       LDBG("Evaluate cvt for fusion: " << cvtOp);
       auto srcTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
+      auto dstTy = cast<RankedTensorType>(cvtOp.getType());
 
-      auto layout =
-          minimalCvtLayout(srcTy, cast<RankedTensorType>(cvtOp.getType()));
-      auto outDims = to_vector(layout.getOutDimNames());
-
-      // TODO: to start, let's just fuse the no-op CVTs
-      if (!outDims.empty()) {
-        LDBG("Not fusing cvt due to non-empty layout: " << layout);
-        continue;
-      }
-
+      // get the existing tile type
       BlockArgument blockArg = body->getArgument(numIV + i);
       auto tiledType = cast<RankedTensorType>(blockArg.getType());
 
       SmallVector<int32_t> tileShape(tiledType.getShape());
+
+      // determine if the register shuffle required fits inside our generic
+      // Note: the logic here is very similar to cvtReordersRegisters
+      auto layout = minimalCvtLayout(srcTy, dstTy);
+      auto outDims = to_vector(layout.getOutDimNames());
+
+      if (!outDims.empty()) {
+        MLIRContext *ctx = srcTy.getContext();
+        auto kRegister = StringAttr::get(ctx, "register");
+
+        // layout must only reorder registers
+        if (ArrayRef(outDims) != ArrayRef({kRegister}))
+          continue;
+
+        // must be able to determine the required tile shape and it must fit
+        // inside this generic
+        auto requiredTileShape =
+            getBlockedRegisterConversionTileShape(srcTy, dstTy);
+        if (!requiredTileShape)
+          continue;
+
+        auto required = *requiredTileShape;
+        bool fits = llvm::all_of(llvm::zip(tileShape, required), [](auto pair) {
+          auto [cur, req] = pair;
+          return cur % req == 0;
+        });
+        if (!fits)
+          continue;
+      }
+
       SmallVector<Value> newIns(genericOp.getIns());
 
       IRMapping mapping;
@@ -1018,7 +1069,7 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       // 2. clone
       rewriter.setInsertionPointToStart(body);
       Operation *newOp = rewriter.clone(*op, mapping);
-      newOp->getResult(0).setType(updateTensorType(cvtOp.getType(), tileShape));
+      newOp->getResult(0).setType(updateTensorType(dstTy, tileShape));
 
       // 3. replace block arg and clean up
       blockArg.replaceAllUsesWith(newOp->getResult(0));
