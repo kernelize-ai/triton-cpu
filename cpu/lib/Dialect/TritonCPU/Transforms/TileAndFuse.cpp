@@ -1043,6 +1043,7 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       auto outDims = to_vector(layout.getOutDimNames());
 
       if (!outDims.empty()) {
+        LDBG("Non-empty out dims, layout: " << layout);
         MLIRContext *ctx = srcTy.getContext();
         auto kRegister = StringAttr::get(ctx, "register");
 
@@ -1064,6 +1065,8 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         });
         if (!fits)
           continue;
+
+        LDBG("Cvt can be legally fused");
       }
 
       SmallVector<Value> newIns(genericOp.getIns());
