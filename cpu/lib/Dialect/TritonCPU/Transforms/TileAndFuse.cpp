@@ -5,6 +5,8 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 
+#include "triton/Analysis/Utility.h"
+
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 #define DEBUG_TYPE "tritoncpu-tile-and-fuse"
@@ -969,6 +971,69 @@ struct FuseExpandDimsIntoGeneric
   }
 };
 
+struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
+  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::GenericOp genericOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Block *body = &genericOp.getBody().front();
+    unsigned numIV = genericOp.getNumInductionVars();
+
+    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+      Operation *op = insVal.getDefiningOp();
+      if (!op)
+        continue;
+
+      auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
+      if (!cvtOp)
+        continue;
+
+      LDBG("Evaluate cvt for fusion: " << cvtOp);
+      auto srcTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
+
+      auto layout =
+          minimalCvtLayout(srcTy, cast<RankedTensorType>(cvtOp.getType()));
+      auto outDims = to_vector(layout.getOutDimNames());
+
+      // TODO: to start, let's just fuse the no-op CVTs
+      if (!outDims.empty()) {
+        LDBG("Not fusing cvt due to non-empty layout: " << layout);
+        continue;
+      }
+
+      BlockArgument blockArg = body->getArgument(numIV + i);
+      auto tiledType = cast<RankedTensorType>(blockArg.getType());
+
+      SmallVector<int32_t> tileShape(tiledType.getShape());
+      SmallVector<Value> newIns(genericOp.getIns());
+
+      IRMapping mapping;
+      // 1. Add new block args for source op inputs at body end
+      newIns.push_back(cvtOp.getSrc());
+      mapping.map(cvtOp.getSrc(),
+                  body->addArgument(updateTensorType(srcTy, tileShape),
+                                    cvtOp.getSrc().getLoc()));
+
+      // 2. clone
+      rewriter.setInsertionPointToStart(body);
+      Operation *newOp = rewriter.clone(*op, mapping);
+      newOp->getResult(0).setType(updateTensorType(cvtOp.getType(), tileShape));
+
+      // 3. replace block arg and clean up
+      blockArg.replaceAllUsesWith(newOp->getResult(0));
+      body->eraseArgument(numIV + i);
+      newIns.erase(newIns.begin() + i);
+
+      rewriter.modifyOpInPlace(
+          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
+
+      return success();
+    }
+    return failure();
+  }
+};
+
 } // namespace
 
 struct TritonCPUTileAndFusePass
@@ -985,7 +1050,7 @@ struct TritonCPUTileAndFusePass
     patterns.add<WrapStores>(context, benefitDefault + 1);
     patterns.add<WrapReduceOp>(context, benefitDefault + 1);
     patterns.add<WrapKLoopWithDotOp>(context, benefitDefault + 1);
-    patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
+    // patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
@@ -999,6 +1064,7 @@ struct TritonCPUTileAndFusePass
     fusePatterns.add<FuseExpandDimsIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseMakeRangeIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
+    fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
       signalPassFailure();
