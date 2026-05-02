@@ -7,6 +7,8 @@
 
 #include "triton/Analysis/Utility.h"
 
+#include <numeric>
+
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
 #define DEBUG_TYPE "tritoncpu-tile-and-fuse"
