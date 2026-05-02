@@ -619,27 +619,35 @@ struct WrapConvertLayoutOp
     if (cvtOp->getParentOfType<cpu::GenericOp>())
       return failure();
 
-    auto operand = cvtOp.getSrc();
+    auto src = cvtOp.getSrc();
+    auto srcTy = cast<RankedTensorType>(src.getType());
+    auto dstTy = cast<RankedTensorType>(cvtOp.getType());
 
-    auto tensorTy = cast<RankedTensorType>(operand.getType());
-    auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy.getEncoding());
-    if (!encoding)
+    auto layout = minimalCvtLayout(srcTy, dstTy);
+    auto outDims = to_vector(layout.getOutDimNames());
+    MLIRContext *ctx = srcTy.getContext();
+    auto kRegister = StringAttr::get(ctx, "register");
+    // only wrap cvts that reorder registers. if the cvt does nothing (empty out
+    // dims), return failure as we should be able to fuse it
+    if (outDims.empty() || (ArrayRef(outDims) != ArrayRef({kRegister})))
       return failure();
 
-    // only wrap blocked->blocked conversions
-    auto convertedTensorTy =
-        cast<RankedTensorType>(cvtOp.getResult().getType());
-    if (!isa<triton::gpu::BlockedEncodingAttr>(convertedTensorTy.getEncoding()))
+    //  get blocked register conversion tile shape
+    auto requiredTileShape =
+        getBlockedRegisterConversionTileShape(srcTy, dstTy);
+    if (!requiredTileShape)
       return failure();
 
-    // Note: this uses the source tensor ty to determine the tile shape. if we
-    // tile over the source, we should be able to write to any location in the
-    // output
-    auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
+    SmallVector<int32_t> tileShape = *requiredTileShape;
+    // Use the destination ty to get the tile shape. the destination ty will be
+    // tiled in any cvt evaluated for fusion, so we want to use the same
+    // criteria for "fits" to avoid wrapping fusible cvts
+    auto [blockShape, defaultTileShape] = getBlockAndTileShapes(
+        dstTy, cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding()));
 
-    // but, overwrite the tileshape to match the block shape (i.e. just generate
-    // a single tile generic for now)
-    tileShape = blockShape;
+    // return failure as we should be able to fuse this cvt op
+    if (ArrayRef(tileShape) == ArrayRef(defaultTileShape))
+      return failure();
 
     SmallVector<TiledInput> ins;
     for (auto value : cvtOp->getOperands()) {
@@ -650,14 +658,15 @@ struct WrapConvertLayoutOp
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
     SmallVector<Value> blockShapeValues =
         buildBlockShapeValues(loc, blockShape, rewriter);
-    auto generic = cpu::GenericOp::create(
-        rewriter, loc, /*resultTypes=*/TypeRange{convertedTensorTy}, insValues,
-        blockShapeValues, tileShape);
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, /*resultTypes=*/TypeRange{dstTy},
+                               insValues, blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
 
     auto newCvt = rewriter.clone(*cvtOp, bodyMapping);
+    newCvt->getResult(0).setType(updateTensorType(dstTy, tileShape));
     cpu::YieldOp::create(rewriter, loc, newCvt->getResults());
 
     rewriter.replaceOp(cvtOp, generic.getResults());
@@ -1101,7 +1110,7 @@ struct TritonCPUTileAndFusePass
     patterns.add<WrapStores>(context, benefitDefault + 1);
     patterns.add<WrapReduceOp>(context, benefitDefault + 1);
     patterns.add<WrapKLoopWithDotOp>(context, benefitDefault + 1);
-    // patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
+    patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
