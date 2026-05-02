@@ -792,6 +792,25 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         auto newResultType = updateTensorType(resultType, tileShape);
         auto sliceEncodingAttr =
             dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
+        if (!sliceEncodingAttr) {
+          // check to see if a slice encoding attr exists downstream from a cvt
+          // op that was previously rematerialized
+          ForwardSliceOptions fwdOpt;
+          fwdOpt.filter = [&](Operation *op) {
+            auto cvtInSlice = dyn_cast<gpu::ConvertLayoutOp>(op);
+            if (cvtInSlice) {
+              auto localSliceEncodingAttr = dyn_cast<gpu::SliceEncodingAttr>(
+                  cast<RankedTensorType>(cvtInSlice.getType()).getEncoding());
+              if (localSliceEncodingAttr) {
+                sliceEncodingAttr = localSliceEncodingAttr;
+                return false;
+              }
+            }
+            return true;
+          };
+          SetVector<Operation *> slice;
+          getForwardSlice(blockArg, &slice, fwdOpt);
+        }
         unsigned dim;
         if (!sliceEncodingAttr) {
           assert(rank == 1 && "make dynamic range op without slice encoding "
