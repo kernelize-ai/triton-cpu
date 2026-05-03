@@ -6,6 +6,7 @@
 #include "llvm/Support/Debug.h"
 
 #include "triton/Analysis/Utility.h"
+#include "triton/Tools/StrUtil.h"
 
 #include <numeric>
 
@@ -70,23 +71,53 @@ getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
                                       RankedTensorType dstTy) {
   // only support blocked -> blocked conversions
   auto srcEnc = dyn_cast<gpu::BlockedEncodingAttr>(srcTy.getEncoding());
-  auto dstEnc = dyn_cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding());
-  if (!srcEnc || !dstEnc)
+  if (!srcEnc)
     return std::nullopt;
 
   auto srcSPT = srcEnc.getSizePerThread();
+
+  SmallVector<unsigned> dstOrder;
+  auto dstEnc = dyn_cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding());
+  if (!dstEnc) {
+    auto dstDotEncoding =
+        dyn_cast<gpu::DotOperandEncodingAttr>(dstTy.getEncoding());
+    if (dstDotEncoding) {
+      dstEnc = dyn_cast<gpu::BlockedEncodingAttr>(dstDotEncoding.getParent());
+      dstOrder = gpu::getOrderForDotOperand(dstDotEncoding.getOpIdx(),
+                                            dstTy.getRank(), /*kContig*/ false);
+    }
+  }
+  if (!dstEnc)
+    return std::nullopt;
+
+  if (dstOrder.empty())
+    dstOrder = llvm::to_vector(dstEnc.getOrder());
+
+  // Both getSizePerThread() arrays are tensor-dimension indexed; compare
+  // directly.
   auto dstSPT = dstEnc.getSizePerThread();
   assert(srcSPT.size() == dstSPT.size());
 
   auto shape = srcTy.getShape();
-  SmallVector<int32_t> tileShape;
+  unsigned rank = shape.size();
 
-  for (auto [s, d, dimSize] : llvm::zip(srcSPT, dstSPT, shape)) {
-    int32_t tile = std::lcm((int32_t)s, (int32_t)d);
-    // Tile must evenly divide the tensor dimension
-    if (dimSize % tile != 0)
+  // Compute naive LCM per tensor dimension.
+  SmallVector<int32_t> tileNaive(rank);
+  for (unsigned dim = 0; dim < rank; dim++) {
+    int32_t tile = std::lcm((int32_t)srcSPT[dim], (int32_t)dstSPT[dim]);
+    if (shape[dim] % tile != 0)
       return std::nullopt;
-    tileShape.push_back(tile);
+    tileNaive[dim] = tile;
+  }
+
+  // Apply the order permutation
+  SmallVector<int32_t> tileShape(rank);
+  for (unsigned i = 0; i < rank; i++)
+    tileShape[i] = tileNaive[dstOrder[i]];
+
+  for (unsigned i = 0; i < rank; i++) {
+    if (shape[i] % tileShape[i] != 0)
+      return std::nullopt;
   }
 
   return tileShape;
@@ -681,6 +712,13 @@ struct WrapConvertLayoutOp
     auto srcTy = cast<RankedTensorType>(src.getType());
     auto dstTy = cast<RankedTensorType>(cvtOp.getType());
 
+    // src encodings are validated in getBlockedRegisterConversionTileShape, but
+    // dst encodings other than blocked are allowed. Disable those in standalone
+    // generics as we can usually fuse blocked -> non-blocked cvts (i.e. blocked
+    // -> dot_op)
+    if (!isa<gpu::BlockedEncodingAttr>(dstTy.getEncoding()))
+      return failure();
+
     auto layout = minimalCvtLayout(srcTy, dstTy);
     auto outDims = to_vector(layout.getOutDimNames());
     MLIRContext *ctx = srcTy.getContext();
@@ -1136,6 +1174,8 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
           continue;
 
         auto required = *requiredTileShape;
+        LDBG("Required tile shape for register shuffle: "
+             << triton::join(required));
         bool fits = llvm::all_of(llvm::zip(tileShape, required), [](auto pair) {
           auto [cur, req] = pair;
           return cur % req == 0;
