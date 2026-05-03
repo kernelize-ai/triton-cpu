@@ -814,10 +814,25 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 
       BlockArgument blockArg = body->getArgument(numIV + i);
       auto tiledType = dyn_cast<RankedTensorType>(blockArg.getType());
-      if (!tiledType)
-        continue;
+      SmallVector<int32_t> tileShape;
+      if (!tiledType) {
+        const bool hasTensorOperands =
+            llvm::any_of(op->getOperands(), [&](Value operand) {
+              return isa<RankedTensorType>(operand.getType());
+            });
+        const bool isArithElementwise =
+            (isa<arith::ArithDialect, math::MathDialect>(op->getDialect())) &&
+            op->hasTrait<OpTrait::Elementwise>();
 
-      SmallVector<int32_t> tileShape(tiledType.getShape());
+        // fuse scalar elementwise ops too
+        if (hasTensorOperands || !isArithElementwise)
+          continue;
+      } else {
+        tileShape = llvm::map_to_vector(tiledType.getShape(), [](int64_t dim) {
+          return static_cast<int32_t>(dim);
+        });
+      }
+
       SmallVector<Value> newIns(genericOp.getIns());
 
       IRMapping mapping;
