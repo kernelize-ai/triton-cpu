@@ -284,6 +284,62 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
   }
 };
 
+struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
+  using OpRewritePattern<triton::DotOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(triton::DotOp dotOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Location loc = dotOp.getLoc();
+
+    if (dotOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    // Dot result must have BlockedEncoding so we can derive
+    // blockShape/vectorShape.
+    auto resultTy = dyn_cast<RankedTensorType>(dotOp.getType());
+    if (!resultTy || !isa<gpu::BlockedEncodingAttr>(resultTy.getEncoding()))
+      return failure();
+
+    auto encoding = cast<gpu::BlockedEncodingAttr>(resultTy.getEncoding());
+
+    // use the MxN (result) shape for block/tile shapes. The K loop is not
+    // currently tiled.
+    auto [blockShape, tileShape] = getBlockAndTileShapes(resultTy, encoding);
+
+    auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
+    assert(aTy.getRank() == 2 && "only 2D dot op supported");
+    int32_t kSize = (int32_t)aTy.getShape()[1];
+
+    SmallVector<int32_t> aTileShape = {tileShape[0], kSize};
+    SmallVector<int32_t> bTileShape = {kSize, tileShape[1]};
+
+    SmallVector<TiledInput> ins;
+    ins.push_back(TiledInput{dotOp.getA(), aTileShape});
+    ins.push_back(TiledInput{dotOp.getB(), bTileShape});
+    ins.push_back(TiledInput{dotOp.getC(), tileShape});
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+
+    SmallVector<Value> blockShapeValues =
+        buildBlockShapeValues(loc, blockShape, rewriter);
+
+    auto generic = cpu::GenericOp::create(rewriter, loc, {resultTy}, insValues,
+                                          blockShapeValues, tileShape);
+
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+
+    // clone the dot op
+    auto *newDot = rewriter.clone(*dotOp, bodyMapping);
+    newDot->getResult(0).setType(updateTensorType(resultTy, tileShape));
+    cpu::YieldOp::create(rewriter, loc, newDot->getResults());
+
+    rewriter.replaceOp(dotOp, generic.getResults());
+    return success();
+  }
+};
+
 struct WrapKLoopWithDotOp : public mlir::OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
@@ -1133,12 +1189,14 @@ struct TritonCPUTileAndFusePass
     // Step 1: Create the generic ops
     patterns.add<WrapStores>(context, benefitDefault + 1);
     patterns.add<WrapReduceOp>(context, benefitDefault + 1);
-    patterns.add<WrapKLoopWithDotOp>(context, benefitDefault + 1);
+    patterns.add<WrapDotOp>(context, benefitDefault + 1);
     patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }
+
+    LDBG("Module before fusion " << m);
 
     // Step 2: Fuse elementwise ops and loads into each generic
     RewritePatternSet fusePatterns(context);
