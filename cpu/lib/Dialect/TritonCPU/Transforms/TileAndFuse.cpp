@@ -110,15 +110,21 @@ getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
     tileNaive[dim] = tile;
   }
 
+  LDBG("Tile shape without order: " << triton::join(tileNaive));
+
+  for (unsigned i = 0; i < rank; i++) {
+    LDBG("Checking that tile shape " << shape[i] << " divides tile shape "
+                                     << tileNaive[i]);
+    if (shape[i] % tileNaive[i] != 0)
+      return std::nullopt;
+  }
+
   // Apply the order permutation
   SmallVector<int32_t> tileShape(rank);
   for (unsigned i = 0; i < rank; i++)
     tileShape[i] = tileNaive[dstOrder[i]];
 
-  for (unsigned i = 0; i < rank; i++) {
-    if (shape[i] % tileShape[i] != 0)
-      return std::nullopt;
-  }
+  LDBG("Tile shape after applying dst order: " << triton::join(tileShape));
 
   return tileShape;
 }
@@ -728,6 +734,8 @@ struct WrapConvertLayoutOp
     if (outDims.empty() || (ArrayRef(outDims) != ArrayRef({kRegister})))
       return failure();
 
+    LDBG("Getting required tile shape for " << cvtOp);
+
     //  get blocked register conversion tile shape
     auto requiredTileShape =
         getBlockedRegisterConversionTileShape(srcTy, dstTy);
@@ -1238,7 +1246,7 @@ struct TritonCPUTileAndFusePass
 
     LDBG("Module before fusion " << m);
 
-    // Step 2: Fuse elementwise ops and loads into each generic
+    // Step 2: Fuse ops into each generic
     RewritePatternSet fusePatterns(context);
 
     fusePatterns.add<FuseElementwiseIntoGeneric>(context, benefitDefault);
