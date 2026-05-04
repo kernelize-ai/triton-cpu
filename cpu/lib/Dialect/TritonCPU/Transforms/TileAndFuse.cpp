@@ -93,15 +93,15 @@ getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
   if (dstOrder.empty())
     dstOrder = llvm::to_vector(dstEnc.getOrder());
 
-  // Both getSizePerThread() arrays are tensor-dimension indexed; compare
-  // directly.
+  // Both getSizePerThread() arrays are tensor-dimension indexed, so the LCM
+  // per tensor dimension is computed by direct positional comparison.
   auto dstSPT = dstEnc.getSizePerThread();
   assert(srcSPT.size() == dstSPT.size());
 
   auto shape = srcTy.getShape();
   unsigned rank = shape.size();
 
-  // Compute naive LCM per tensor dimension.
+  // Compute LCM of src and dst sizePerThread per tensor dimension.
   SmallVector<int32_t> tileNaive(rank);
   for (unsigned dim = 0; dim < rank; dim++) {
     int32_t tile = std::lcm((int32_t)srcSPT[dim], (int32_t)dstSPT[dim]);
@@ -112,14 +112,11 @@ getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
 
   LDBG("Tile shape without order: " << triton::join(tileNaive));
 
-  for (unsigned i = 0; i < rank; i++) {
-    LDBG("Checking that tile shape " << shape[i] << " divides tile shape "
-                                     << tileNaive[i]);
-    if (shape[i] % tileNaive[i] != 0)
-      return std::nullopt;
-  }
-
-  // Apply the order permutation
+  // Permute tileNaive by dstOrder to produce a tile shape in the dst
+  // encoding's storage-order space. Callers compare this result positionally
+  // against the outer generic's tileShape (which is also order-indexed via
+  // sizePerThread), so the permutation is required for the fits check to be
+  // correct. Returning tileNaive directly would misalign the dimensions.
   SmallVector<int32_t> tileShape(rank);
   for (unsigned i = 0; i < rank; i++)
     tileShape[i] = tileNaive[dstOrder[i]];
