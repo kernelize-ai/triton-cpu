@@ -1365,6 +1365,14 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     IRMapping mapping;
     mapping.map(forOp.getInductionVar(), newFor.getInductionVar());
+    for (auto [i, operand]: llvm::enumerate(genericOp.getIns())) {
+      // map the existing block argument corresponding to old for op induction var to the new for op induction var 
+      if (operand == forOp.getInductionVar()) {
+        mapping.map(genericBody.getArgument(numIV + i), newFor.getInductionVar());
+        break;
+      }
+    }
+
     for (auto [bodyArg, newIterArg] :
          llvm::zip(iterArgBodyArgs, newFor.getRegionIterArgs()))
       mapping.map(bodyArg, newIterArg);
