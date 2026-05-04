@@ -1237,6 +1237,280 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   }
 };
 
+struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+#if 1
+    // check fusion criteria
+
+    // (1) For loop must have iter args — excludes persistent block-dispatch
+    // loops which have no iter args.
+    if (forOp.getNumRegionIterArgs() == 0)
+      return failure();
+
+    // (2) For step must be the constant 1 (can probably relax this later)
+    auto stepCst = forOp.getStep().getDefiningOp<arith::ConstantOp>();
+    if (!stepCst || cast<IntegerAttr>(stepCst.getValue()).getInt() != 1)
+      return failure();
+
+    Block *forBody = forOp.getBody();
+
+    // (3) Match a very specific genericOp/addPtr pattern. Again, this can
+    // probably be relaxed as we see more examples that are good candidates
+    // for fusion
+    cpu::GenericOp genericOp;
+    bool bodyValid = true;
+    for (Operation &bodyOp : forBody->without_terminator()) {
+      if (auto bodyGenericOp = dyn_cast<cpu::GenericOp>(bodyOp)) {
+        if (genericOp) {
+          bodyValid = false; // >1 generic
+          break;
+        }
+        genericOp = bodyGenericOp;
+      } else if (auto addptr = dyn_cast<triton::AddPtrOp>(bodyOp)) {
+        if (!llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr())) {
+          bodyValid = false;
+          break;
+        }
+      } else {
+        bodyValid = false;
+        break;
+      }
+    }
+    if (!bodyValid)
+      return failure();
+
+    // (4) Every scf.yield operand must come from either the inner generic
+    // or an addptr that advances a for iter arg.
+    auto yieldOp = cast<scf::YieldOp>(forBody->getTerminator());
+    bool yieldValid = llvm::all_of(yieldOp.getOperands(), [&](Value v) {
+      Operation *def = v.getDefiningOp();
+      if (!def)
+        return false;
+      if (def == genericOp.getOperation())
+        return true;
+      if (auto addptr = dyn_cast<triton::AddPtrOp>(def))
+        return llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr());
+      return false;
+    });
+    if (!yieldValid)
+      return failure();
+
+    llvm::errs() << "fusing candidate for op : " << forOp << "\n";
+
+    // (5) all iter args of the for op must be consumed by the generic
+    // we also compute the tile shapes for each of the iter args
+
+    unsigned numIV = genericOp.getNumInductionVars();
+    Block &genericBody = genericOp.getBody().front();
+
+    SmallVector<TiledInput> tiledIterArgs;
+    for (auto [iterArgIdx, forBlockArg] :
+         llvm::enumerate(forOp.getRegionIterArgs())) {
+      std::optional<unsigned> insIdx;
+      for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+        if (insVal == forBlockArg) {
+          insIdx = i;
+          break;
+        }
+      }
+      if (!insIdx)
+        return failure();
+
+      BlockArgument genericBodyArg = genericBody.getArgument(numIV + *insIdx);
+      llvm::errs() << "for block arg " << forBlockArg
+                   << " consumed by generic block arg: " << genericBodyArg
+                   << "\n";
+
+      SmallVector<int32_t> tileShape;
+      if (auto tensorTy = dyn_cast<RankedTensorType>(genericBodyArg.getType()))
+        tileShape = SmallVector<int32_t>(tensorTy.getShape());
+
+      tiledIterArgs.push_back(
+          TiledInput{forOp.getInitArgs()[iterArgIdx], tileShape});
+    }
+    // update the generic to take the new ins parameters and add the block args
+    SmallVector<Value> newIns(genericOp.getIns());
+    SmallVector<Value> newForOpInitVals;
+
+    IRMapping mapping;
+    // 1. Add new block args for source op inputs at body end
+    for (auto [i, tiledInput] : llvm::enumerate(tiledIterArgs)) {
+      newIns.push_back(tiledInput.value);
+
+      auto newGenericBodyArg = genericBody.addArgument(
+          updateTensorType(tiledInput.value.getType(), tiledInput.shape),
+          tiledInput.value.getLoc());
+      // map the forOp iter arg to the new block arg
+      mapping.map(forOp.getRegionIterArgs()[i], newGenericBodyArg);
+      newForOpInitVals.push_back(newGenericBodyArg);
+    }
+
+    // clone the for op, replacing inputs with generic body arguments
+    rewriter.setInsertionPointToStart(&genericBody);
+    auto newFor = scf::ForOp::create(
+        rewriter, forOp.getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
+        forOp.getStep(), newForOpInitVals);
+    llvm::errs() << "newFor: " << newFor << "\n";
+
+    // now clone the body -- this is likely all wrong 
+#if 0
+    mapping.map(forOp.getInductionVar(), newFor.getInductionVar());
+
+    for (auto [oldArg, newArg] :
+         llvm::zip(forOp.getRegionIterArgs(), newFor.getRegionIterArgs()))
+      mapping.map(oldArg, newArg);
+
+    rewriter.setInsertionPointToStart(newFor.getBody());
+    for (Operation &op : forOp.getBody()->without_terminator()) {
+      if (auto innerGeneric = dyn_cast<cpu::GenericOp>(op)) {
+        IRMapping innerMapping = mapping;
+        Block *innerBody = &innerGeneric.getBody().front();
+        unsigned innerNumIV = innerGeneric.getNumInductionVars();
+
+        Value zero = rewriter.create<arith::ConstantIntOp>(
+            innerGeneric.getLoc(), 0, rewriter.getI32Type());
+        for (unsigned i = 0; i < innerNumIV; i++)
+          innerMapping.map(innerBody->getArgument(i), zero);
+        // body args → (mapped) operands
+        for (auto [bodyArg, operand] :
+             llvm::zip(innerBody->getArguments().drop_front(innerNumIV),
+                       innerGeneric.getIns()))
+          innerMapping.map(bodyArg, mapping.lookupOrDefault(operand));
+        // clone body ops without the yield
+        for (Operation &bodyOp : innerBody->without_terminator())
+          rewriter.clone(bodyOp, innerMapping);
+        // wire up the result
+        auto innerYield = cast<cpu::YieldOp>(innerBody->getTerminator());
+        for (auto [result, yieldVal] :
+             llvm::zip(innerGeneric.getResults(), innerYield.getValues()))
+          mapping.map(result, innerMapping.lookup(yieldVal));
+      } else {
+        rewriter.clone(op, mapping);
+      }
+    }
+    rewriter.clone(*forOp.getBody()->getTerminator(), mapping);
+#endif 
+#if 0
+    // now clone the forop body. TODO
+    for (auto &bodyOp : forBody->without_terminator()) {
+      Operation *cloned = rewriter.clone(bodyOp, mapping);
+      // remap the addptr results to the new for op block args
+      if (auto addptr = dyn_cast<triton::AddPtrOp>(bodyOp)) {
+        for (auto [res, clonedRes] :
+             llvm::zip(addptr->getResults(), cloned->getResults())) {
+          auto it = mapping.find(res);
+          if (it != mapping.end()) {
+            it->second.replaceAllUsesWith(clonedRes);
+            mapping.map(res, clonedRes);
+          }
+        }
+      }
+    }
+#endif
+
+    llvm::errs() << "generic op current state: " << genericOp << "\n";
+
+    // TODO: fuse
+    assert(false && "TODO");
+    return success();
+#else
+    Block *body = &genericOp.getBody().front();
+    unsigned numIV = genericOp.getNumInductionVars();
+
+    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+      Operation *op = insVal.getDefiningOp();
+      if (!op)
+        continue;
+
+      auto forOp = dyn_cast<scf::ForOp>(op);
+      if (!forOp)
+        continue;
+
+      // check fusion criteria
+
+      // (1) For loop must have iter args — excludes persistent block-dispatch
+      // loops which have no iter args.
+      if (forOp.getNumRegionIterArgs() == 0)
+        continue;
+
+      // (2) For step must be the constant 1 (can probably relax this later)
+      auto stepCst = forOp.getStep().getDefiningOp<arith::ConstantOp>();
+      if (!stepCst || cast<IntegerAttr>(stepCst.getValue()).getInt() != 1)
+        continue;
+
+      Block *forBody = forOp.getBody();
+
+      // (3) Match a very specific genericOp/addPtr pattern. Again, this can
+      // probably be relaxed as we see more examples that are good candidates
+      // for fusion
+      bool bodyValid = true;
+      for (Operation &bodyOp : forBody->without_terminator()) {
+        if (auto bodyGenericOp = dyn_cast<cpu::GenericOp>(bodyOp)) {
+          if (bodyGenericOp != genericOp) {
+            bodyValid = false; // >1 generic
+            break;
+          }
+        } else if (auto addptr = dyn_cast<triton::AddPtrOp>(bodyOp)) {
+          if (!llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr())) {
+            bodyValid = false;
+            break;
+          }
+        } else {
+          bodyValid = false;
+          break;
+        }
+      }
+      if (!bodyValid)
+        continue;
+
+      // TODO: should we verify that all iter args are generic op operands?
+
+      // (4) Every scf.yield operand must come from either the inner generic
+      // or an addptr that advances a for iter arg.
+      auto yieldOp = cast<scf::YieldOp>(forBody->getTerminator());
+      bool yieldValid = llvm::all_of(yieldOp.getOperands(), [&](Value v) {
+        Operation *def = v.getDefiningOp();
+        if (!def)
+          return false;
+        if (def == genericOp.getOperation())
+          return true;
+        if (auto addptr = dyn_cast<triton::AddPtrOp>(def))
+          return llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr());
+        return false;
+      });
+      if (!yieldValid)
+        continue;
+
+      // (5) The specific forOp result consumed by our genericOp must be the
+      // accumulator — i.e., it must come directly from the inner generic, not
+      // from an addptr. This confirms we are on the accumulator path and not
+      // accidentally matching a pointer result.
+      unsigned resultIdx = cast<OpResult>(insVal).getResultNumber();
+      Value yielded = yieldOp.getOperand(resultIdx);
+      if (!yielded.getDefiningOp<cpu::GenericOp>())
+        continue;
+
+      // TODO: determine tiled shapes for each of the for op iter args
+      for (auto forBlockArg :
+           forBody->getArguments().drop_front(forOp.getNumInductionVars())) {
+        llvm::errs() << "for iter arg: " << forBlockArg << "\n";
+      }
+
+      // TODO: fuse
+      llvm::errs() << "candidate for op for fusion found!\n";
+      llvm::errs() << "for op: " << *forOp << "\n";
+      assert(false && "TODO");
+      return success();
+    }
+    return failure();
+#endif
+  }
+};
+
 } // namespace
 
 struct TritonCPUTileAndFusePass
@@ -1270,6 +1544,8 @@ struct TritonCPUTileAndFusePass
     fusePatterns.add<FuseMakeRangeIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
+
+    fusePatterns.add<FuseParentForOpIntoGeneric>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
       signalPassFailure();
