@@ -1374,6 +1374,9 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
                     newFor.getInductionVar());
 
     // Map generic body args at iter-arg positions → new for iter args.
+    // Also map the for iter args themselves → new for iter args so that ops
+    // cloned from the old for body (e.g. addptr advancing pointers) resolve
+    // to the current-iteration value rather than the initial value.
     for (auto [i, forOpIterArg] : llvm::enumerate(forOp.getRegionIterArgs())) {
       for (auto [j, operand] : llvm::enumerate(genericOp.getIns())) {
         if (operand == forOpIterArg) {
@@ -1382,6 +1385,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
           break;
         }
       }
+      mapping.map(forOpIterArg, newFor.getRegionIterArgs()[i]);
     }
 
     // 4. clone body ops
