@@ -1365,14 +1365,25 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     IRMapping mapping;
     mapping.map(forOp.getInductionVar(), newFor.getInductionVar());
-    for (auto [i, operand]: llvm::enumerate(genericOp.getIns())) {
-      // map the existing block argument corresponding to old for op induction var to the new for op induction var 
-      if (operand == forOp.getInductionVar()) {
+    // Map all generic body args that received the for IV → new for IV.
+    // The IV may appear multiple times in the generic's ins.
+    for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+      if (operand == forOp.getInductionVar())
         mapping.map(genericBody.getArgument(numIV + i), newFor.getInductionVar());
-        break;
+    }
+
+    // Map old generic body args at for-iter-arg positions → new for iter args.
+    // These are used by the cloned generic body ops (e.g. tt.dot).
+    for (auto [iterArgIdx, newIterArg] :
+         llvm::enumerate(newFor.getRegionIterArgs())) {
+      auto forIterArg = forOp.getRegionIterArg(iterArgIdx);
+      for (auto [j, operand] : llvm::enumerate(genericOp.getIns())) {
+        if (operand == forIterArg)
+          mapping.map(genericBody.getArgument(numIV + j), newIterArg);
       }
     }
 
+    // Map for iter args → new for iter args (used by cloned addptr ops).
     for (auto [bodyArg, newIterArg] :
          llvm::zip(iterArgBodyArgs, newFor.getRegionIterArgs()))
       mapping.map(bodyArg, newIterArg);
@@ -1423,10 +1434,8 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     SetVector<unsigned> operandsToDrop;
     for (auto arg : forOp.getBody()->getArguments()) {
       for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
-        if (operand == arg) {
+        if (operand == arg)
           operandsToDrop.insert(i);
-          break;
-        }
       }
     }
 
