@@ -915,20 +915,16 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
-  LogicalResult
-  matchAndRewrite(scf::ForOp forOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    // check fusion criteria
-
+  std::optional<cpu::GenericOp> findTargetGenericOp(scf::ForOp forOp) const {
     // (1) For loop must have iter args — excludes persistent block-dispatch
     // loops which have no iter args.
     if (forOp.getNumRegionIterArgs() == 0)
-      return failure();
+      return std::nullopt;
 
     // (2) For step must be the constant 1 (can probably relax this later)
     auto stepCst = forOp.getStep().getDefiningOp<arith::ConstantOp>();
     if (!stepCst || cast<IntegerAttr>(stepCst.getValue()).getInt() != 1)
-      return failure();
+      return std::nullopt;
 
     Block *forBody = forOp.getBody();
 
@@ -955,7 +951,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
       }
     }
     if (!bodyValid)
-      return failure();
+      return std::nullopt;
 
     // (4) Every scf.yield operand must come from either the inner generic
     // or an addptr that advances a for iter arg.
@@ -971,11 +967,24 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
       return false;
     });
     if (!yieldValid)
+      return std::nullopt;
+
+    return genericOp;
+  }
+
+  LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    // check fusion criteria
+    auto targetGenericOp = findTargetGenericOp(forOp);
+    if (!targetGenericOp)
       return failure();
+
+    cpu::GenericOp genericOp = *targetGenericOp;
 
     unsigned numIV = genericOp.getNumInductionVars();
     Block &genericBody = genericOp.getBody().front();
-    
+
     // 1. forward forOp upper/lower/step args and init args through the generic
     // op so the cloned forOp can re-use them
 
@@ -1114,6 +1123,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     }
 
     // clone the for op yield
+    Block *forBody = forOp.getBody();
     rewriter.clone(*forBody->getTerminator(), mapping);
 
     // 5. build the generic ttc.yield op
