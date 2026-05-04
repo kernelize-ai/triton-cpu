@@ -949,6 +949,8 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     }
     if (!bodyValid)
       return std::nullopt;
+    if (!genericOp)
+      return std::nullopt;
 
     // (4) Every scf.yield operand must come from either the inner generic
     // or an addptr that advances a for iter arg.
@@ -1063,7 +1065,6 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
         if (operand == forOpIterArg) {
           mapping.map(genericBody.getArgument(numIV + j),
                       newFor.getRegionIterArgs()[i]);
-          break;
         }
       }
       mapping.map(forOpIterArg, newFor.getRegionIterArgs()[i]);
@@ -1075,7 +1076,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     for (Operation *op : oldBodyOps)
       rewriter.clone(*op, mapping);
 
-    // map generics results to cloned vlaues so the other for body ops can
+    // map generics results to cloned values so the other for body ops can
     // reference them
     auto genericYield = cast<cpu::YieldOp>(genericBody.getTerminator());
     for (auto [genericResult, yieldOperand] :
