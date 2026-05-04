@@ -1311,6 +1311,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     SmallVector<Value>
         newForInitVals; // tiled init values for the fused for loop
 
+    IRMapping mapping;
     for (auto [i, forOpOperand] : llvm::enumerate(forOp.getOperands())) {
       if (i > forOp.getNumControlOperands() + forOp.getNumRegionIterArgs())
         break; // only consider control operands args and init args
@@ -1339,6 +1340,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
             BlockArgument bodyArg = genericBody.addArgument(
                 updateTensorType(forOpOperand.getType(), tileShape),
                 forOpOperand.getLoc());
+            mapping.map(forOpIterArg, bodyArg);
             newIns.push_back(forOpOperand);
             newForInitVals.push_back(bodyArg);
             break;
@@ -1362,8 +1364,6 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     auto newFor = scf::ForOp::create(
         rewriter, forOp.getLoc(), newForControlOperands[0],
         newForControlOperands[1], newForControlOperands[2], newForInitVals);
-
-    IRMapping mapping;
 
     // 3. map old for-arg body args to new iter args / induction vars
 
@@ -1399,11 +1399,41 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
          llvm::zip(genericOp.getResults(), genericYield.getValues()))
       mapping.map(genericResult, mapping.lookup(yieldOperand));
 
-    // TODO: do we need to update types here?
     // Clone addptr ops from the old for body
-    for (Operation &op : forOp.getBody()->without_terminator())
-      if (!isa<cpu::GenericOp>(op))
-        rewriter.clone(op, mapping);
+    for (Operation &op : forOp.getBody()->without_terminator()) {
+      if (!isa<cpu::GenericOp>(op)) {
+        SmallVector<int32_t> tileShape;
+        for (auto operand : op.getOperands()) {
+          if (mapping.contains(operand)) {
+            auto mapped = mapping.lookup(operand);
+            if (auto mappedTensorTy =
+                    dyn_cast<RankedTensorType>(mapped.getType())) {
+              // assuming all tensor operands have the same shape
+              tileShape = llvm::map_to_vector(
+                  mappedTensorTy.getShape(),
+                  [](int64_t dim) { return static_cast<int32_t>(dim); });
+              break;
+            }
+          }
+        }
+        if (!tileShape.empty()) {
+          for (auto operand : op.getOperands()) {
+            // update types
+            newIns.push_back(operand);
+            mapping.map(operand,
+                        genericBody.addArgument(
+                            updateTensorType(operand.getType(), tileShape),
+                            operand.getLoc()));
+          }
+        }
+        Operation *newOp = rewriter.clone(op, mapping);
+        assert(newOp->getNumResults() == 1 &&
+               "expected cloned for op body ops to have only 1 result");
+        if (!tileShape.empty())
+          newOp->getResult(0).setType(
+              updateTensorType(newOp->getResult(0).getType(), tileShape));
+      }
+    }
 
     // clone the for op yield
     rewriter.clone(*forBody->getTerminator(), mapping);
