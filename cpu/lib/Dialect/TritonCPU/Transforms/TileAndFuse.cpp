@@ -1302,7 +1302,171 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     unsigned numIV = genericOp.getNumInductionVars();
     Block &genericBody = genericOp.getBody().front();
+#if 1
+    // 1. forward forOp upper/lower/step args and init args through the generic
+    // op so the cloned forOp can re-use them
 
+    SmallVector<Value> newIns(genericOp.getIns());
+    SmallVector<Value> newForControlOperands;
+    SmallVector<Value>
+        newForInitVals; // tiled init values for the fused for loop
+
+    for (auto [i, forOpOperand] : llvm::enumerate(forOp.getOperands())) {
+      if (i > forOp.getNumControlOperands() + forOp.getNumRegionIterArgs())
+        break; // only consider control operands args and init args
+
+      if (i < forOp.getNumControlOperands()) {
+        BlockArgument bodyArg = genericBody.addArgument(forOpOperand.getType(),
+                                                        forOpOperand.getLoc());
+        newIns.push_back(forOpOperand); // forward control operands to generic
+                                        // op directly, no need to update types
+        newForControlOperands.push_back(bodyArg);
+      } else {
+        auto forOpIterArg =
+            forOp.getRegionIterArg(i - forOp.getNumControlOperands());
+        // use the for op iter arg to lookup the tiling for this operand
+        for (auto [j, operand] : llvm::enumerate(genericOp.getIns())) {
+          if (operand == forOpIterArg) {
+
+            auto existingGenericBodyArg = genericBody.getArgument(numIV + j);
+            SmallVector<int32_t> tileShape;
+            if (auto rankedTensorType = dyn_cast<RankedTensorType>(
+                    existingGenericBodyArg.getType()))
+              tileShape = llvm::map_to_vector(
+                  rankedTensorType.getShape(),
+                  [](int64_t dim) { return static_cast<int32_t>(dim); });
+
+            BlockArgument bodyArg = genericBody.addArgument(
+                updateTensorType(forOpOperand.getType(), tileShape),
+                forOpOperand.getLoc());
+            newIns.push_back(forOpOperand);
+            newForInitVals.push_back(bodyArg);
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. clone the for op into the generic body
+
+    // Snapshot old body ops before inserting newFor
+    SmallVector<Operation *> oldBodyOps;
+    for (Operation &op : genericBody.without_terminator())
+      oldBodyOps.push_back(&op);
+
+    // TODO: let's make sure we check to see that the generic op is the first op
+    // in the for op body
+    rewriter.setInsertionPointToStart(&genericBody);
+    assert(newForControlOperands.size() == forOp.getNumControlOperands() &&
+           "expected to forward all for op control operands to generic");
+    auto newFor = scf::ForOp::create(
+        rewriter, forOp.getLoc(), newForControlOperands[0],
+        newForControlOperands[1], newForControlOperands[2], newForInitVals);
+
+    IRMapping mapping;
+
+    // 3. map old for-arg body args to new iter args / induction vars
+
+    // Map all generic body args that received the for IV → new for IV.
+    // The IV may appear multiple times in the generic's ins (no break).
+    mapping.map(forOp.getInductionVar(), newFor.getInductionVar());
+    for (auto [j, operand] : llvm::enumerate(genericOp.getIns()))
+      if (operand == forOp.getInductionVar())
+        mapping.map(genericBody.getArgument(numIV + j),
+                    newFor.getInductionVar());
+
+    // Map generic body args at iter-arg positions → new for iter args.
+    for (auto [i, forOpIterArg] : llvm::enumerate(forOp.getRegionIterArgs())) {
+      for (auto [j, operand] : llvm::enumerate(genericOp.getIns())) {
+        if (operand == forOpIterArg) {
+          mapping.map(genericBody.getArgument(numIV + j),
+                      newFor.getRegionIterArgs()[i]);
+          break;
+        }
+      }
+    }
+
+    // 4. clone body ops
+    rewriter.setInsertionPointToStart(newFor.getBody());
+    // Clone old generic body ops (without yield)
+    for (Operation *op : oldBodyOps)
+      rewriter.clone(*op, mapping);
+
+    // map generics results to cloned vlaues so the other for body ops can
+    // reference them
+    auto genericYield = cast<cpu::YieldOp>(genericBody.getTerminator());
+    for (auto [genericResult, yieldOperand] :
+         llvm::zip(genericOp.getResults(), genericYield.getValues()))
+      mapping.map(genericResult, mapping.lookup(yieldOperand));
+
+    // TODO: do we need to update types here?
+    // Clone addptr ops from the old for body
+    for (Operation &op : forOp.getBody()->without_terminator())
+      if (!isa<cpu::GenericOp>(op))
+        rewriter.clone(op, mapping);
+
+    // clone the for op yield
+    rewriter.clone(*forBody->getTerminator(), mapping);
+
+    // 5. build the generic ttc.yield op
+    scf::YieldOp oldForYield = cast<scf::YieldOp>(forBody->getTerminator());
+    auto oldGenericYield = cast<cpu::YieldOp>(genericBody.getTerminator());
+    SmallVector<Value> newGenericYieldVals;
+    for (auto [j, oldResult] : llvm::enumerate(genericOp.getResults())) {
+      for (auto [i, operand] : llvm::enumerate(oldForYield.getOperands())) {
+        if (operand == oldResult) {
+          newGenericYieldVals.push_back(newFor.getResult(i));
+          break;
+        }
+      }
+    }
+    rewriter.setInsertionPoint(oldGenericYield);
+    rewriter.replaceOpWithNewOp<cpu::YieldOp>(oldGenericYield,
+                                              newGenericYieldVals);
+
+    // 6. clean up
+    // erase old body ops
+    for (Operation *op : llvm::reverse(oldBodyOps))
+      rewriter.eraseOp(op);
+
+    // drop generic ins operands that come from the old for op
+    SetVector<unsigned> operandsToDrop;
+    for (auto arg : forOp.getBody()->getArguments()) {
+      for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+        if (operand == arg)
+          operandsToDrop.insert(i);
+      }
+    }
+    SmallVector<unsigned> sortedToDrop(operandsToDrop.begin(),
+                                       operandsToDrop.end());
+    llvm::sort(sortedToDrop, std::greater<unsigned>());
+    for (auto idx : sortedToDrop) {
+      llvm::errs() << "erase generic body argument " << (numIV + idx)
+                   << " for operand " << genericOp.getIns()[idx] << "\n";
+      genericBody.eraseArgument(numIV + idx);
+      newIns.erase(newIns.begin() + idx);
+    }
+
+    rewriter.modifyOpInPlace(
+        genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
+
+    rewriter.moveOpBefore(genericOp, forOp);
+
+    // update for op users to use the generic op results. if the pattern match
+    // is correct, this should result in the existing for op being unused
+    for (auto [j, newForResult] : llvm::enumerate(newGenericYieldVals)) {
+      unsigned i = cast<OpResult>(newForResult).getResultNumber();
+      llvm::errs() << "replacing uses of for result: " << i << " --> "
+                   << newForResult << "\n";
+      llvm::errs() << "with generic result: " << j << " --> "
+                   << genericOp.getResult(j) << "\n";
+      rewriter.replaceAllUsesWith(forOp.getResult(i), genericOp.getResult(j));
+    }
+    rewriter.eraseOp(forOp);
+
+    llvm::errs() << "rewritten generic op: " << genericOp << "\n";
+    return success();
+#else
     SmallVector<Value> newIns(genericOp.getIns());
     SmallVector<Value>
         newForInitVals; // tiled init values for the fused for loop
@@ -1310,7 +1474,8 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
         iterArgBodyArgs; // existing body args to remap → for iter args
 
 #if 1
-    // iterate existing forOp init args and add them to the generic
+    // iterate existing forOp init args and add them to the generic. create a
+    // new generic block arg with tiled type
     for (auto [i, initArg] : llvm::enumerate(forOp.getInitArgs())) {
       auto forOpIterArg = forOp.getRegionIterArg(i);
       // use the for op iter arg to lookup the tiling for this operand
@@ -1365,13 +1530,21 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     IRMapping mapping;
     mapping.map(forOp.getInductionVar(), newFor.getInductionVar());
+
+    // 2. forop iter args previously mapped to generic ins. the corresponding
+    // generic block args need to map to the new forop iter args so we can drop
+    // the old ins/block args
+
     // Map all generic body args that received the for IV → new for IV.
     // The IV may appear multiple times in the generic's ins.
     for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
-      if (operand == forOp.getInductionVar())
-        mapping.map(genericBody.getArgument(numIV + i), newFor.getInductionVar());
+      for (auto [j, arg] : llvm::enumerate(forOp.getBody()->getArguments())) {
+        if (operand == arg)
+          mapping.map(genericBody.getArgument(numIV + i),
+                      newFor.getBody()->getArgument(j));
+      }
     }
-
+#if 0
     // Map old generic body args at for-iter-arg positions → new for iter args.
     // These are used by the cloned generic body ops (e.g. tt.dot).
     for (auto [iterArgIdx, newIterArg] :
@@ -1382,7 +1555,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
           mapping.map(genericBody.getArgument(numIV + j), newIterArg);
       }
     }
-
+#endif
     // Map for iter args → new for iter args (used by cloned addptr ops).
     for (auto [bodyArg, newIterArg] :
          llvm::zip(iterArgBodyArgs, newFor.getRegionIterArgs()))
@@ -1496,6 +1669,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     llvm::errs() << "generic op after fusion: " << genericOp << "\n";
     return success();
+#endif
   }
 };
 
