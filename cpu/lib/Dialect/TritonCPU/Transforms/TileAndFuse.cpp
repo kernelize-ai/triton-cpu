@@ -1298,8 +1298,6 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     if (!yieldValid)
       return failure();
 
-    llvm::errs() << "fusing candidate for op : " << forOp << "\n";
-
     unsigned numIV = genericOp.getNumInductionVars();
     Block &genericBody = genericOp.getBody().front();
 #if 1
@@ -1418,7 +1416,8 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
         }
         if (!tileShape.empty()) {
           for (auto operand : op.getOperands()) {
-            // update types
+            if (mapping.contains(operand))
+              continue; // already mapped (e.g. for iter arg) — don't re-add
             newIns.push_back(operand);
             mapping.map(operand,
                         genericBody.addArgument(
@@ -1471,8 +1470,6 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
                                        operandsToDrop.end());
     llvm::sort(sortedToDrop, std::greater<unsigned>());
     for (auto idx : sortedToDrop) {
-      llvm::errs() << "erase generic body argument " << (numIV + idx)
-                   << " for operand " << genericOp.getIns()[idx] << "\n";
       genericBody.eraseArgument(numIV + idx);
       newIns.erase(newIns.begin() + idx);
     }
@@ -1486,15 +1483,10 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     // is correct, this should result in the existing for op being unused
     for (auto [j, newForResult] : llvm::enumerate(newGenericYieldVals)) {
       unsigned i = cast<OpResult>(newForResult).getResultNumber();
-      llvm::errs() << "replacing uses of for result: " << i << " --> "
-                   << newForResult << "\n";
-      llvm::errs() << "with generic result: " << j << " --> "
-                   << genericOp.getResult(j) << "\n";
       rewriter.replaceAllUsesWith(forOp.getResult(i), genericOp.getResult(j));
     }
     rewriter.eraseOp(forOp);
 
-    llvm::errs() << "rewritten generic op: " << genericOp << "\n";
     return success();
 #else
     SmallVector<Value> newIns(genericOp.getIns());
