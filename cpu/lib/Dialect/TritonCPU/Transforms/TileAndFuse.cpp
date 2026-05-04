@@ -1318,7 +1318,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
           // Existing body arg at this slot becomes the for loop's init
           BlockArgument bodyArg = genericBody.getArgument(numIV + insIdx);
           newForInitVals.push_back(bodyArg);
-          iterArgBodyArgs.push_back(bodyArg);
+          iterArgBodyArgs.push_back(forBlockArg);
           break;
         }
       }
@@ -1383,15 +1383,25 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     rewriter.replaceOpWithNewOp<cpu::YieldOp>(oldGenericYield,
                                               newGenericYieldVals);
 
+    // TODO: drop generic ins operands from the old forop
+
+    // (c) Move genericOp to the level of the old for loop.
+    rewriter.moveOpBefore(genericOp, forOp);
+
     // update for op users to use the generic op results. if the pattern match
     // is correct, this should result in the existing for op being unused
     for (auto [j, newForResult] : llvm::enumerate(newGenericYieldVals)) {
       unsigned i = cast<OpResult>(newForResult).getResultNumber();
-      llvm::errs() << "replacing uses of for result: " << i << " --> " << newForResult
-                   << "\n";
-      llvm::errs() << "with generic result: " << j << " --> " << genericOp.getResult(j) << "\n";
+      llvm::errs() << "replacing uses of for result: " << i << " --> "
+                   << newForResult << "\n";
+      llvm::errs() << "with generic result: " << j << " --> "
+                   << genericOp.getResult(j) << "\n";
       rewriter.replaceAllUsesWith(forOp.getResult(i), genericOp.getResult(j));
     }
+
+    // erase old body ops
+    for (Operation *op : llvm::reverse(oldBodyOps))
+      rewriter.eraseOp(op);
 
 #if 0
 
@@ -1422,10 +1432,11 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
       }
     }
 #endif
-    // (e) Erase the old for loop.
-    // rewriter.eraseOp(forOp);
 
-    // llvm::errs() << "generic op after fusion: " << genericOp << "\n";
+    // (e) Erase the old for loop.
+    rewriter.eraseOp(forOp);
+
+    llvm::errs() << "generic op after fusion: " << genericOp << "\n";
     return success();
   }
 };
