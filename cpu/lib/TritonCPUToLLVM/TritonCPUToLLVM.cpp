@@ -113,6 +113,8 @@ struct ConvertTritonCPUToLLVM
 
     cpu::populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
                                            axisInfoAnalysis, benefit);
+    cpu::populateMemoryOpToLLVMPatterns(typeConverter, targetInfo, patterns,
+                                        benefit);
     mlir::triton::populateReduceOpToLLVMPatterns(typeConverter, patterns,
                                                  targetInfo, benefit);
     mlir::triton::populateScanOpToLLVMPatterns(typeConverter, patterns,

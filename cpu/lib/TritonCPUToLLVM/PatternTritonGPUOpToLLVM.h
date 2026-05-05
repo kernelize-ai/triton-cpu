@@ -45,6 +45,11 @@ void populateMakeDynamicRangeOpToLLVMPattern(LLVMTypeConverter &typeConverter,
                                              RewritePatternSet &patterns,
                                              PatternBenefit benefit);
 
+void populateMemoryOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                    const TargetInfoBase &targetInfo,
+                                    RewritePatternSet &patterns,
+                                    PatternBenefit benefit);
+
 } // namespace cpu
 } // namespace triton
 } // namespace mlir
