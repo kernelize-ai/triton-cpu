@@ -6,6 +6,7 @@
 #include "llvm/Support/Debug.h"
 
 #include "triton/Analysis/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/StrUtil.h"
 
 #include <numeric>
@@ -28,6 +29,41 @@ namespace {
 // Replace the shape of a RankedTensorType with tileShape, preserving element
 // type and encoding. Non-tensor types are returned unchanged.
 static Type updateTensorType(Type t, ArrayRef<int32_t> tileShape) {
+  auto memDescType = dyn_cast<gpu::MemDescType>(t);
+  if (memDescType) {
+    // for memdesc tensor types we need to update the memdesc shape and the
+    // encoding. note that only shared linear encoding is supported.
+    auto shape = memDescType.getShape();
+    if (llvm::all_of(llvm::zip(shape, tileShape), [](auto p) {
+          auto [s, t] = p;
+          return s == t;
+        })) {
+      return t;
+    }
+
+    auto encoding =
+        cast<gpu::SharedLinearEncodingAttr>(memDescType.getEncoding());
+    auto layout = encoding.getLinearLayout();
+    assert(layout.getNumOutDims() == tileShape.size());
+
+    // TODO: this breaks the surjectivity of the layout. do we care that the in
+    // dims don't get updated? update the layout in dim size to equal the number
+    // of elements in the tensor layout =
+    // layout.resizeInDim(mlir::StringAttr::get(t.getContext(), "offset"),
+    // std::accumulate(tileShape.begin(), tileShape.end(), 1,
+    // std::multiplies<int32_t>()));
+    auto dims = standardOutDimNames(t.getContext(), tileShape.size());
+    for (auto [idx, dim] : llvm::enumerate(dims)) {
+      layout = layout.resizeOutDim(dim, tileShape[idx]);
+    }
+    llvm::errs() << "new layout = " << layout << "\n";
+    auto newEncoding = gpu::SharedLinearEncodingAttr::get(
+        t.getContext(), layout, encoding.getLayoutAlignment());
+    SmallVector<int64_t> tileShape64(tileShape.begin(), tileShape.end());
+    return gpu::MemDescType::get(tileShape64, memDescType.getElementType(),
+                                 newEncoding, memDescType.getMemorySpace(),
+                                 memDescType.getMutableMemory());
+  }
   auto tensorType = dyn_cast<RankedTensorType>(t);
   if (!tensorType)
     return t;
@@ -468,7 +504,7 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
     // note: load isn't really "elementwise", but the tensor of ptrs can be
     // indexed elementwise and the output truncated based on the input size, so
     // we treat it as elementwise
-    if (isa<triton::LoadOp>(op))
+    if (isa<triton::LoadOp, triton::gpu::LocalLoadOp>(op))
       return true;
     return false;
   }
@@ -482,6 +518,11 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
       if (!isFusibleElementwise(op))
+        continue;
+      // Only fuse ops in the same block. Ops from outer scopes are captured
+      // values that must stay as ins so that FuseParentForOpIntoGeneric can
+      // later position them correctly relative to any enclosing loop.
+      if (op->getBlock() != genericOp->getBlock())
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
@@ -553,6 +594,8 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         continue;
       triton::MakeRangeOp makeRangeOp = dyn_cast<triton::MakeRangeOp>(op);
       if (!makeRangeOp)
+        continue;
+      if (op->getBlock() != genericOp->getBlock())
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
@@ -651,6 +694,8 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       auto constantOp = dyn_cast<arith::ConstantOp>(op);
       if (!constantOp)
         continue;
+      if (op->getBlock() != genericOp->getBlock())
+        continue;
 
       auto resultTensorType =
           dyn_cast<RankedTensorType>(constantOp.getResult().getType());
@@ -706,6 +751,8 @@ struct FuseBroadcastIntoGeneric
 
       auto broadcastOp = dyn_cast<triton::BroadcastOp>(op);
       if (!broadcastOp)
+        continue;
+      if (op->getBlock() != genericOp->getBlock())
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
@@ -771,6 +818,8 @@ struct FuseExpandDimsIntoGeneric
       auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op);
       if (!expandDimsOp)
         continue;
+      if (op->getBlock() != genericOp->getBlock())
+        continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
       auto tiledType = cast<RankedTensorType>(blockArg.getType());
@@ -835,6 +884,8 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 
       auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
       if (!cvtOp)
+        continue;
+      if (op->getBlock() != genericOp->getBlock())
         continue;
 
       LDBG("Evaluate cvt for fusion: " << cvtOp);
@@ -909,6 +960,61 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   }
 };
 
+struct FuseLocalAllocIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
+  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(cpu::GenericOp genericOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Block *body = &genericOp.getBody().front();
+    unsigned numIV = genericOp.getNumInductionVars();
+
+    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+      Operation *op = insVal.getDefiningOp();
+      if (!op)
+        continue;
+
+      auto localAllocOp = dyn_cast<gpu::LocalAllocOp>(op);
+      if (!localAllocOp)
+        continue;
+      if (op->getBlock() != genericOp->getBlock())
+        continue;
+
+      BlockArgument blockArg = body->getArgument(numIV + i);
+
+      auto memDescType = cast<gpu::MemDescType>(blockArg.getType());
+      SmallVector<int32_t> tileShape(memDescType.getShape());
+      SmallVector<Value> newIns(genericOp.getIns());
+
+      IRMapping mapping;
+      // 1. Add new block args for source op inputs at body end
+      if (auto src = localAllocOp.getSrc()) {
+        auto srcTy = cast<RankedTensorType>(src.getType());
+        newIns.push_back(src);
+        mapping.map(src, body->addArgument(updateTensorType(srcTy, tileShape),
+                                           src.getLoc()));
+      }
+
+      // 2. clone
+      rewriter.setInsertionPointToStart(body);
+      Operation *newOp = rewriter.clone(*op, mapping);
+      newOp->getResult(0).setType(
+          updateTensorType(localAllocOp.getType(), tileShape));
+
+      // 3. update existing uses
+      blockArg.replaceAllUsesWith(newOp->getResult(0));
+      body->eraseArgument(numIV + i);
+      newIns.erase(newIns.begin() + i);
+
+      rewriter.modifyOpInPlace(
+          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
+
+      return success();
+    }
+    return failure();
+  }
+};
+
 struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
@@ -939,6 +1045,11 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
         genericOp = bodyGenericOp;
       } else if (auto addptr = dyn_cast<triton::AddPtrOp>(bodyOp)) {
         if (!llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr())) {
+          bodyValid = false;
+          break;
+        }
+      } else if (auto localStoreOp = dyn_cast<gpu::LocalStoreOp>(bodyOp)) {
+        if (localStoreOp.getSrc().getDefiningOp() != genericOp) {
           bodyValid = false;
           break;
         }
@@ -1112,11 +1223,39 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
           }
         }
         Operation *newOp = rewriter.clone(op, mapping);
-        assert(newOp->getNumResults() == 1 &&
-               "expected cloned for op body ops to have only 1 result");
-        if (!tileShape.empty())
-          newOp->getResult(0).setType(
-              updateTensorType(newOp->getResult(0).getType(), tileShape));
+        if (newOp->getNumResults() > 0) {
+          assert(newOp->getNumResults() == 1 &&
+                 "expected cloned for op body ops to have only 1 result");
+          if (!tileShape.empty())
+            newOp->getResult(0).setType(
+                updateTensorType(newOp->getResult(0).getType(), tileShape));
+        } else {
+          // TODO: can we update op type generically?
+          auto localStoreOp = cast<gpu::LocalStoreOp>(op);
+          // TODO: update type
+
+          // TODO: we need to update the memdesc type for these stores,
+          // unfortunately. this is no good: fortunately, we can probbably apply
+          // the same fix to handling the tiled types like for the accumulator
+          // allocator though this might be tricky - what happens if the local
+          // load tensor size does not match the alloc? I guess this is actually
+          // not a problem -- we can resize the accumulator for one iteration of
+          // the generic and the inter-loop boundaries will handle writing back
+          // to the outputs. so yeah - support memdesc updates - in update
+          // tensor type maybe?
+          /**
+           *
+            %218 = "ttg.local_load"(%arg79) : (!ttg.memdesc<4x16xf32, #shared,
+          #smem, mutable>) -> tensor<4x4xf32, #blocked> %219 = "tt.dot"(%217,
+          %208, %218) <{inputPrecision = 2 : i32, maxNumImpreciseAcc = 0 : i32}>
+          : (tensor<4x8xf16, #ttg.dot_op<{opIdx = 0, parent = #blocked}>>,
+          tensor<8x4xf16, #ttg.dot_op<{opIdx = 1, parent = #blocked}>>,
+          tensor<4x4xf32, #blocked>) -> tensor<4x4xf32, #blocked>
+          "ttg.local_store"(%219, %arg86) : (tensor<4x4xf32, #blocked>,
+          !ttg.memdesc<4x16xf32, #shared, #smem, mutable>) -> ()
+           *
+           */
+        }
       }
     }
 
@@ -1211,6 +1350,7 @@ struct TritonCPUTileAndFusePass
     fusePatterns.add<FuseMakeRangeIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
+    fusePatterns.add<FuseLocalAllocIntoGeneric>(context, benefitDefault);
 
     fusePatterns.add<FuseParentForOpIntoGeneric>(context, benefitDefault);
 
