@@ -1,10 +1,13 @@
 #include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
 
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 
 namespace mlir {
 namespace triton {
@@ -84,6 +87,98 @@ public:
   }
 };
 
+class MaterializeAccumulator : public mlir::OpRewritePattern<DotOp> {
+public:
+  using OpRewritePattern<DotOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(triton::DotOp dotOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    MLIRContext *context = getContext();
+
+    auto accumulator = dotOp.getC();
+
+    Operation *accumulatorSrcOp = nullptr;
+    Operation *accumulatorParent = accumulator.getDefiningOp();
+    if (!accumulatorParent) {
+      auto blockArg = dyn_cast<BlockArgument>(accumulator);
+      if (blockArg) {
+        auto parentOp = blockArg.getOwner()->getParentOp();
+        if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
+          auto initVal = forOp.getInitArgs()[blockArg.getArgNumber() - 1];
+          if (initVal.getDefiningOp()) {
+            accumulatorSrcOp =
+                dyn_cast<arith::ConstantOp>(initVal.getDefiningOp());
+          }
+        }
+      }
+    } else {
+      accumulatorSrcOp = dyn_cast<arith::ConstantOp>(accumulatorParent);
+    }
+    if (!accumulatorSrcOp)
+      return failure();
+
+    llvm::errs() << "accumulator source: " << *accumulatorSrcOp << "\n";
+
+    // 1. find the appropriate location
+    if (!accumulatorParent) {
+      auto blockArg = cast<BlockArgument>(accumulator);
+      auto parentOp = blockArg.getOwner()->getParentOp();
+      rewriter.setInsertionPoint(parentOp);
+    } else {
+      rewriter.setInsertionPoint(accumulatorSrcOp);
+    }
+
+    // 2. create the accumulator source in shared memory
+    auto accumulatorTensorType = cast<RankedTensorType>(accumulator.getType());
+    auto accumulatorEncoding =
+        dyn_cast<gpu::BlockedEncodingAttr>(accumulatorTensorType.getEncoding());
+    if (!accumulatorEncoding)
+      return failure();
+
+    // create a shared linear encoding that describes the layout of the
+    // accumulator.
+    SmallVector<unsigned> shape(accumulatorTensorType.getShape().begin(),
+                                accumulatorTensorType.getShape().end());
+    LinearLayout layout =
+        identityStandardND(StringAttr::get(context, "offset"), shape,
+                           accumulatorEncoding.getOrder());
+    layout *= LinearLayout::identity1D(1, StringAttr::get(context, "kBlock"),
+                                       StringAttr::get(context, "dim0"));
+
+    Attribute SharedMemorySpace = gpu::SharedMemorySpaceAttr::get(context);
+    auto sharedEncoding =
+        gpu::SharedLinearEncodingAttr::get(context, layout, /*alignment=*/4);
+    auto accMemDesc = gpu::MemDescType::get(
+         accumulatorTensorType.getShape(), accumulatorTensorType.getElementType(), sharedEncoding,
+        SharedMemorySpace, /*mutable=*/true);
+
+    auto alloc =
+        gpu::LocalAllocOp::create(rewriter, accumulatorSrcOp->getLoc(),
+                                  accMemDesc, accumulatorSrcOp->getResult(0));
+
+    // 3. replace the accumulator usage in the dot op with a load from shared
+    // memory
+    rewriter.setInsertionPoint(dotOp);
+    auto loadedAcc = gpu::LocalLoadOp::create(
+        rewriter, accumulatorSrcOp->getLoc(), accumulatorTensorType, alloc.getResult());
+
+    // 3.5: replace all accumulator values downstream of the dot with localLoad
+    // TODO
+
+    auto newDot = rewriter.replaceOpWithNewOp<triton::DotOp>(
+        dotOp, dotOp.getType(), dotOp.getA(), dotOp.getB(), loadedAcc,
+        dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc());
+
+    // 4. store the return value of the dot op back to shared memory, dropping
+    // the loop carried accumulator if needed
+    gpu::LocalStoreOp::create(rewriter, accumulatorSrcOp->getLoc(),
+                              newDot.getD(), alloc.getResult());
+
+    return success();
+  }
+};
+
 } // namespace
 
 class TritonCPUAccelerateMatmulPass
@@ -98,7 +193,8 @@ public:
     ModuleOp m = getOperation();
     mlir::RewritePatternSet patterns(context);
     constexpr int benefitDefault = 1;
-    patterns.add<OptimizeBlockedLayout>(context, benefitDefault);
+    // patterns.add<OptimizeBlockedLayout>(context, benefitDefault);
+    patterns.add<MaterializeAccumulator>(context, benefitDefault);
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }
