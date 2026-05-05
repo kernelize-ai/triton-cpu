@@ -118,7 +118,7 @@ public:
     if (!accumulatorSrcOp)
       return failure();
 
-    llvm::errs() << "accumulator source: " << *accumulatorSrcOp << "\n";
+    Location loc = accumulatorSrcOp->getLoc();
 
     // 1. find the appropriate location
     if (!accumulatorParent) {
@@ -155,16 +155,14 @@ public:
         accumulatorTensorType.getElementType(), sharedEncoding,
         SharedMemorySpace, /*mutable=*/true);
 
-    auto alloc =
-        gpu::LocalAllocOp::create(rewriter, accumulatorSrcOp->getLoc(),
-                                  accMemDesc, accumulatorSrcOp->getResult(0));
+    auto alloc = gpu::LocalAllocOp::create(rewriter, loc, accMemDesc,
+                                           accumulatorSrcOp->getResult(0));
 
     // 3. replace the accumulator usage in the dot op with a load from shared
     // memory
     rewriter.setInsertionPoint(dotOp);
-    auto loadedAcc =
-        gpu::LocalLoadOp::create(rewriter, accumulatorSrcOp->getLoc(),
-                                 accumulatorTensorType, alloc.getResult());
+    auto loadedAcc = gpu::LocalLoadOp::create(
+        rewriter, loc, accumulatorTensorType, alloc.getResult());
 
     auto newDot = rewriter.replaceOpWithNewOp<triton::DotOp>(
         dotOp, dotOp.getType(), dotOp.getA(), dotOp.getB(), loadedAcc,
@@ -172,8 +170,7 @@ public:
 
     // 4. store the return value of the dot op back to shared memory, dropping
     // the loop carried accumulator if needed
-    gpu::LocalStoreOp::create(rewriter, accumulatorSrcOp->getLoc(),
-                              newDot.getD(), alloc.getResult());
+    gpu::LocalStoreOp::create(rewriter, loc, newDot.getD(), alloc.getResult());
 
     // 5. clean up the loop, if it exists
     if (auto blockArg = dyn_cast<BlockArgument>(accumulator)) {
@@ -183,7 +180,7 @@ public:
       // Replace the for result's downstream uses with a local_load from alloc.
       rewriter.setInsertionPointAfter(forOp);
       auto finalLoad = gpu::LocalLoadOp::create(
-          rewriter, dotOp.getLoc(), accumulatorTensorType, alloc.getResult());
+          rewriter, loc, accumulatorTensorType, alloc.getResult());
       forOp.getResult(iterArgIdx).replaceAllUsesWith(finalLoad);
 
       // Turn the yield operand into a pass-through of the iter arg itself.
