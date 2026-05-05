@@ -143,14 +143,16 @@ public:
     LinearLayout layout =
         identityStandardND(StringAttr::get(context, "offset"), shape,
                            accumulatorEncoding.getOrder());
-    layout *= LinearLayout::identity1D(1, StringAttr::get(context, "kBlock"),
+    layout *= LinearLayout::identity1D(1, StringAttr::get(context, "block"),
                                        StringAttr::get(context, "dim0"));
+    layout = layout.transposeOuts(standardOutDimNames(context, shape.size()));
 
     Attribute SharedMemorySpace = gpu::SharedMemorySpaceAttr::get(context);
     auto sharedEncoding =
         gpu::SharedLinearEncodingAttr::get(context, layout, /*alignment=*/4);
     auto accMemDesc = gpu::MemDescType::get(
-         accumulatorTensorType.getShape(), accumulatorTensorType.getElementType(), sharedEncoding,
+        accumulatorTensorType.getShape(),
+        accumulatorTensorType.getElementType(), sharedEncoding,
         SharedMemorySpace, /*mutable=*/true);
 
     auto alloc =
@@ -160,11 +162,9 @@ public:
     // 3. replace the accumulator usage in the dot op with a load from shared
     // memory
     rewriter.setInsertionPoint(dotOp);
-    auto loadedAcc = gpu::LocalLoadOp::create(
-        rewriter, accumulatorSrcOp->getLoc(), accumulatorTensorType, alloc.getResult());
-
-    // 3.5: replace all accumulator values downstream of the dot with localLoad
-    // TODO
+    auto loadedAcc =
+        gpu::LocalLoadOp::create(rewriter, accumulatorSrcOp->getLoc(),
+                                 accumulatorTensorType, alloc.getResult());
 
     auto newDot = rewriter.replaceOpWithNewOp<triton::DotOp>(
         dotOp, dotOp.getType(), dotOp.getA(), dotOp.getB(), loadedAcc,
@@ -174,6 +174,24 @@ public:
     // the loop carried accumulator if needed
     gpu::LocalStoreOp::create(rewriter, accumulatorSrcOp->getLoc(),
                               newDot.getD(), alloc.getResult());
+
+    // 5. clean up the loop, if it exists
+    if (auto blockArg = dyn_cast<BlockArgument>(accumulator)) {
+      auto forOp = cast<scf::ForOp>(blockArg.getOwner()->getParentOp());
+      unsigned iterArgIdx = blockArg.getArgNumber() - 1;
+
+      // Replace the for result's downstream uses with a local_load from alloc.
+      rewriter.setInsertionPointAfter(forOp);
+      auto finalLoad = gpu::LocalLoadOp::create(
+          rewriter, dotOp.getLoc(), accumulatorTensorType, alloc.getResult());
+      forOp.getResult(iterArgIdx).replaceAllUsesWith(finalLoad);
+
+      // Turn the yield operand into a pass-through of the iter arg itself.
+      // Canonicalize will recognize this and remove the dead iter arg.
+      auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+      rewriter.modifyOpInPlace(
+          yieldOp, [&]() { yieldOp.setOperand(iterArgIdx, blockArg); });
+    }
 
     return success();
   }
