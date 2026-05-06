@@ -87,6 +87,7 @@ public:
   }
 };
 
+// SpillAccumulatorToSharedMem ?
 class MaterializeAccumulator : public mlir::OpRewritePattern<DotOp> {
 public:
   using OpRewritePattern<DotOp>::OpRewritePattern;

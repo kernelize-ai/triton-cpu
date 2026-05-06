@@ -387,7 +387,20 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
     SmallVector<TiledInput> ins;
     ins.push_back(TiledInput{dotOp.getA(), aTileShape});
     ins.push_back(TiledInput{dotOp.getB(), bTileShape});
-    ins.push_back(TiledInput{dotOp.getC(), tileShape});
+
+    bool hasInMemoryAccumulator = false;
+    auto cDefOp = dotOp.getC().getDefiningOp();
+    if (cDefOp && isa<gpu::LocalLoadOp>(cDefOp)) {
+      // accumulator spills to shared memory, inline the shared memory load and
+      // store into the generic and replace other pull the alloc into the
+      // generic since we currently tile over M/N. when we start tiling over K,
+      // we will need to ensure the allocate is hoisted into the M/N tiled loop
+      hasInMemoryAccumulator = true;
+    } else {
+      // loop carried accumulator
+      ins.push_back(TiledInput{dotOp.getC(), tileShape});
+    }
+
     SmallVector<Value> insValues =
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
 
@@ -400,10 +413,56 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
 
-    // TODO: if we have a materialized accumulator, clone that chain too
-    // clone the dot op
+    gpu::LocalAllocOp accAlloc = nullptr;
+    if (hasInMemoryAccumulator) {
+#if 1
+      // find and clone the alloc op
+      SetVector<Operation *> slice;
+      BackwardSliceOptions opt;
+      opt.filter = [](Operation *op) { return isa<gpu::LocalAllocOp>(op); };
+      (void)mlir::getBackwardSlice(cDefOp, &slice);
+      assert(!slice.empty() && "expected backward slice to contain at least "
+                               "the accumulator load op");
+      slice.insert(cDefOp);
+      // accAlloc = cast<gpu::LocalAllocOp>(slice.back());
+
+      // clone the alloc slice chain updating types as we go
+      for (auto *op : slice) {
+        llvm::errs() << "cloning op in slice: " << *op << "\n";
+        // TODO: update arith.constant operand types, otherwise this loks ok
+        Operation *cloned = rewriter.clone(*op, bodyMapping);
+        for (auto result : cloned->getResults())
+          result.setType(updateTensorType(result.getType(), tileShape));
+      }
+#else
+
+      // clone the load op into the generic and use it as the accumulator source
+      // update the type to match the smaller generic tile shape
+      auto accumulatorSrcOp = rewriter.clone(*cDefOp, bodyMapping);
+      accumulatorSrcOp->getResult(0).setType(
+          updateTensorType(dotOp.getC().getType(), tileShape));
+#endif
+    }
+
     auto *newDot = rewriter.clone(*dotOp, bodyMapping);
     newDot->getResult(0).setType(updateTensorType(resultTy, tileShape));
+
+    if (hasInMemoryAccumulator) {
+      // clone the store op into the generic. add a local load after the store
+      // and use it as the new dot op's accumulator source. the store will be
+      // the last operation in the block, so we can insert the load right before
+      // it.
+      // TODO: this would segfault if getDefiningOp was not defined, clean it up
+      auto dotUsers = llvm::to_vector(dotOp.getD().getDefiningOp()->getUsers());
+      assert(dotUsers.size() == 1 &&
+             "expected original dot op to have exactly one user");
+      auto localStoreOp = cast<gpu::LocalStoreOp>(dotUsers.front());
+      auto newLocalStore = rewriter.clone(*localStoreOp, bodyMapping);
+      // TODO: type mismatch?
+      // newLocalStore->setType(updateTensorType(localStoreOp->getType(),
+      // tileShape));
+    }
+
     cpu::YieldOp::create(rewriter, loc, newDot->getResults());
 
     rewriter.replaceOp(dotOp, generic.getResults());
@@ -521,7 +580,8 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       if (!isFusibleElementwise(op))
         continue;
 
-      if (!mlir::isMemoryEffectFree(op) && op->getBlock() != genericOp->getBlock())
+      if (!mlir::isMemoryEffectFree(op) &&
+          op->getBlock() != genericOp->getBlock())
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
