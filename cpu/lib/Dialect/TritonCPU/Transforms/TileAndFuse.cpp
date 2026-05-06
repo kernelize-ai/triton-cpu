@@ -400,6 +400,7 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
 
+    // TODO: if we have a materialized accumulator, clone that chain too
     // clone the dot op
     auto *newDot = rewriter.clone(*dotOp, bodyMapping);
     newDot->getResult(0).setType(updateTensorType(resultTy, tileShape));
@@ -504,7 +505,7 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
     // note: load isn't really "elementwise", but the tensor of ptrs can be
     // indexed elementwise and the output truncated based on the input size, so
     // we treat it as elementwise
-    if (isa<triton::LoadOp, triton::gpu::LocalLoadOp>(op))
+    if (isa<triton::LoadOp>(op))
       return true;
     return false;
   }
@@ -519,10 +520,8 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       Operation *op = insVal.getDefiningOp();
       if (!isFusibleElementwise(op))
         continue;
-      // Only fuse ops in the same block. Ops from outer scopes are captured
-      // values that must stay as ins so that FuseParentForOpIntoGeneric can
-      // later position them correctly relative to any enclosing loop.
-      if (op->getBlock() != genericOp->getBlock())
+
+      if (!mlir::isMemoryEffectFree(op) && op->getBlock() != genericOp->getBlock())
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
@@ -694,8 +693,6 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       auto constantOp = dyn_cast<arith::ConstantOp>(op);
       if (!constantOp)
         continue;
-      if (op->getBlock() != genericOp->getBlock())
-        continue;
 
       auto resultTensorType =
           dyn_cast<RankedTensorType>(constantOp.getResult().getType());
@@ -751,8 +748,6 @@ struct FuseBroadcastIntoGeneric
 
       auto broadcastOp = dyn_cast<triton::BroadcastOp>(op);
       if (!broadcastOp)
-        continue;
-      if (op->getBlock() != genericOp->getBlock())
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
@@ -818,8 +813,6 @@ struct FuseExpandDimsIntoGeneric
       auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op);
       if (!expandDimsOp)
         continue;
-      if (op->getBlock() != genericOp->getBlock())
-        continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
       auto tiledType = cast<RankedTensorType>(blockArg.getType());
@@ -884,8 +877,6 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 
       auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
       if (!cvtOp)
-        continue;
-      if (op->getBlock() != genericOp->getBlock())
         continue;
 
       LDBG("Evaluate cvt for fusion: " << cvtOp);
@@ -977,6 +968,7 @@ struct FuseLocalAllocIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       auto localAllocOp = dyn_cast<gpu::LocalAllocOp>(op);
       if (!localAllocOp)
         continue;
+
       if (op->getBlock() != genericOp->getBlock())
         continue;
 
@@ -1350,7 +1342,7 @@ struct TritonCPUTileAndFusePass
     fusePatterns.add<FuseMakeRangeIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseLocalAllocIntoGeneric>(context, benefitDefault);
+    // fusePatterns.add<FuseLocalAllocIntoGeneric>(context, benefitDefault);
 
     fusePatterns.add<FuseParentForOpIntoGeneric>(context, benefitDefault);
 
