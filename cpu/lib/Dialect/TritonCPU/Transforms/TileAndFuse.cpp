@@ -484,6 +484,10 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       if (!isFusibleElementwise(op))
         continue;
 
+      if (!mlir::isMemoryEffectFree(op) &&
+          op->getBlock() != genericOp->getBlock())
+        continue;
+
       BlockArgument blockArg = body->getArgument(numIV + i);
       auto tiledType = dyn_cast<RankedTensorType>(blockArg.getType());
       SmallVector<int32_t> tileShape;
