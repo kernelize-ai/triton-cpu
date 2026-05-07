@@ -76,62 +76,65 @@ LogicalResult GenericOp::verify() {
       return emitOpError("body induction variable ") << i << " must be i32";
   }
 
-  // Collect scalar result types for init_vals and combiner validation.
-  SmallVector<Type> scalarResultTypes;
-  for (Value result : getResults())
-    if (!isa<RankedTensorType>(result.getType()))
-      scalarResultTypes.push_back(result.getType());
-
-  // init_vals must be empty when there are no combiners.
+  auto reductionDims = getReductionDims();
   auto initVals = getInitVals();
-  Region &combiners = getCombiners();
-  if (combiners.getBlocks().empty() && !initVals.empty())
-    return emitOpError("init_vals must be empty when there are no combiners");
 
-  // When init_vals is provided it must match the scalar results in count and
-  // type.
-  if (!initVals.empty()) {
-    if (initVals.size() != scalarResultTypes.size())
-      return emitOpError("init_vals has ")
-             << initVals.size() << " value(s) but there are "
-             << scalarResultTypes.size() << " scalar result(s)";
-    for (auto [i, initVal] : llvm::enumerate(initVals)) {
-      Type resultTy = scalarResultTypes[i];
-      if (initVal.getType() != resultTy)
-        return emitOpError("init_vals[")
-               << i << "] has type " << initVal.getType()
-               << " but scalar result " << i << " has type " << resultTy;
-    }
+  // reductionDims entries must be valid indices into blockShape.
+  for (auto [i, dim] : llvm::enumerate(reductionDims)) {
+    if (dim < 0 || (unsigned)dim >= blockShape.size())
+      return emitOpError("reductionDims[")
+             << i << "] = " << dim << " is out of range for blockShape of size "
+             << blockShape.size();
   }
 
-  // Combiners region must have one block per scalar result.
-  if (!combiners.getBlocks().empty()) {
-    // if we have combiners we are currently limited to only one block in the
-    // body region
-    if (body.getBlocks().size() != 1)
-      return emitOpError("currently only supports one block in "
-                         "the body region with populated combiners, got ")
-             << body.getBlocks().size();
+  // reductionDims must not contain duplicates.
+  SmallVector<int32_t> sortedDims(reductionDims.begin(), reductionDims.end());
+  llvm::sort(sortedDims);
+  if (llvm::adjacent_find(sortedDims) != sortedDims.end())
+    return emitOpError("reductionDims must not contain duplicate entries");
+
+  // init_vals count must match reductionDims count.
+  if (initVals.size() != reductionDims.size())
+    return emitOpError("init_vals has ")
+           << initVals.size() << " value(s) but reductionDims has "
+           << reductionDims.size() << " entry(ies)";
+
+  // Body block must have numIVs + numIns + numIterArgs arguments.
+  unsigned numIns = getIns().size();
+  unsigned numIterArgs = reductionDims.size();
+  unsigned expectedArgs = numInductionVars + numIns + numIterArgs;
+  if (bodyBlock.getNumArguments() != expectedArgs)
+    return emitOpError("body block has ")
+           << bodyBlock.getNumArguments() << " argument(s) but expects "
+           << expectedArgs << " (numIVs=" << numInductionVars
+           << " + numIns=" << numIns << " + numIterArgs=" << numIterArgs << ")";
+
+  // Each iter arg block arg type must match the corresponding init_vals type.
+  for (auto [i, initVal] : llvm::enumerate(initVals)) {
+    BlockArgument iterArg =
+        bodyBlock.getArgument(numInductionVars + numIns + i);
+    if (iterArg.getType() != initVal.getType())
+      return emitOpError("body iter arg ")
+             << i << " has type " << iterArg.getType() << " but init_vals[" << i
+             << "] has type " << initVal.getType();
   }
-  unsigned numScalarResults = std::accumulate(
-      getResults().begin(), getResults().end(), 0, [](int sum, Value v) {
-        if (!isa<RankedTensorType>(v.getType()))
-          return sum + 1;
-        return sum;
-      });
-  if (combiners.getBlocks().size() != numScalarResults) {
-    return emitOpError("expects combiners region to have ")
-           << numScalarResults << " block(s), got "
-           << combiners.getBlocks().size();
-  }
-  for (auto [i, block] : llvm::enumerate(combiners.getBlocks())) {
-    Type resultTy = getResultTypes()[i];
-    if (block.getNumArguments() != 2 ||
-        block.getArgument(0).getType() != resultTy ||
-        block.getArgument(1).getType() != resultTy) {
-      return emitOpError("combiner block ")
-             << i << " expects two arguments of type " << resultTy;
-    }
+
+  // ttc.yield leading values must match iter arg types.
+  auto yieldOp = dyn_cast<cpu::YieldOp>(bodyBlock.getTerminator());
+  if (!yieldOp)
+    return emitOpError("body block must be terminated by ttc.yield");
+  if (yieldOp.getValues().size() < numIterArgs)
+    return emitOpError("ttc.yield must return at least ")
+           << numIterArgs << " value(s) for iter args, got "
+           << yieldOp.getValues().size();
+  for (unsigned i = 0; i < numIterArgs; ++i) {
+    Type yieldTy = yieldOp.getValues()[i].getType();
+    Type iterArgTy =
+        bodyBlock.getArgument(numInductionVars + numIns + i).getType();
+    if (yieldTy != iterArgTy)
+      return emitOpError("ttc.yield value ")
+             << i << " has type " << yieldTy << " but iter arg " << i
+             << " expects type " << iterArgTy;
   }
 
   return success();

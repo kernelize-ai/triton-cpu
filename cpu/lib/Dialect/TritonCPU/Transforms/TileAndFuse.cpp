@@ -1,8 +1,11 @@
 #include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/APFloat.h"
 #include "llvm/Support/Debug.h"
 
 #include "triton/Analysis/Utility.h"
@@ -126,6 +129,24 @@ getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
   return tileShape;
 }
 
+// Get the neutral (identity) element for a reduction op. Handles
+// MaxNumFOp/MinNumFOp which are missing from mlir::arith::getNeutralElement,
+// and delegates everything else to it.
+// note: copied from optimizethreadlocality.cpp
+static std::optional<TypedAttr> getNeutralElement(Operation *op) {
+  if (isa<arith::MaxNumFOp>(op)) {
+    Type ty = op->getResult(0).getType();
+    const llvm::fltSemantics &sem = cast<FloatType>(ty).getFloatSemantics();
+    return FloatAttr::get(ty, APFloat::getInf(sem, /*Negative=*/true));
+  }
+  if (isa<arith::MinNumFOp>(op)) {
+    Type ty = op->getResult(0).getType();
+    const llvm::fltSemantics &sem = cast<FloatType>(ty).getFloatSemantics();
+    return FloatAttr::get(ty, APFloat::getInf(sem, /*Negative=*/false));
+  }
+  return mlir::arith::getNeutralElement(op);
+}
+
 struct TiledInput {
   Value value;
   SmallVector<int32_t> shape;
@@ -134,7 +155,8 @@ struct TiledInput {
 // Create the body block of a GenericOp, adding one block arg per ins value
 // with tensor types replaced to the vector (chunk) shape. Populates `mapping`
 // with ins value → block arg entries and sets the insertion point to the start
-// of the block. Returns the new block.
+// of the block. Iter args (one per reduction dim init val) are appended after
+// ins args. Returns the new block.
 static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                               ArrayRef<TiledInput> ins,
                               ArrayRef<int32_t> tileShape, IRMapping &mapping) {
@@ -148,6 +170,11 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
     Type argTy = updateTensorType(v.getType(), inputTileShape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
+
+  // Iter args trail ins args — one block arg per reduction dim init val.
+  for (Value initVal : generic.getInitVals())
+    body->addArgument(initVal.getType(), initVal.getLoc());
+
   rewriter.setInsertionPointToStart(body);
   return body;
 }
@@ -257,6 +284,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
     SmallVector<Value> blockShapeValues =
         buildBlockShapeValues(loc, blockShape, rewriter);
+
+    // TODO: add init vals, reduction dims, and drop the combiners stuff
     auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, insValues,
                                           blockShapeValues, tileShape);
 

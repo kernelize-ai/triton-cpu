@@ -234,18 +234,20 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
     Variadic<AnyType>:$init_vals,
 
     Variadic<I32>:$blockShape,
-    DenseI32ArrayAttr:$tileShape
+    DenseI32ArrayAttr:$tileShape,
+    DenseI32ArrayAttr:$reductionDims
   );
 
   let results = (outs Variadic<AnyType>:$results);
 
+  // TODO: remove combiners once genericoptollvm is updated
   let regions = (region AnyRegion:$body, AnyRegion:$combiners);
 
   let hasVerifier = 1;
 
   let builders = [
     OpBuilder<(ins "TypeRange":$results, "ValueRange":$ins, "ValueRange":$blockShape, "ArrayRef<int32_t>":$tileShape), [{
-      build($_builder, $_state, results, ins, ValueRange(), blockShape, tileShape);
+      build($_builder, $_state, results, ins, ValueRange(), blockShape, tileShape, SmallVector<int32_t>{});
     }]>
   ];
 
@@ -256,8 +258,13 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
   let extraClassDeclaration = [{
     Value getTileOffset(unsigned dim) { return getBody().front().getArgument(dim); }
     unsigned getNumInductionVars() { return getBlockShape().size(); }
+    unsigned getNumIterArgs() { return getReductionDims().size(); }
     unsigned getNumRegionIterArgs() {
       return getBody().front().getNumArguments() - getNumInductionVars();
+    }
+    BlockArgument getIterArg(unsigned i) {
+      return getBody().front().getArgument(
+          getNumInductionVars() + getIns().size() + i);
     }
   }];
 }
