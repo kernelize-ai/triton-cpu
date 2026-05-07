@@ -76,8 +76,35 @@ LogicalResult GenericOp::verify() {
       return emitOpError("body induction variable ") << i << " must be i32";
   }
 
-  // Combiners region must have one block per scalar result.
+  // Collect scalar result types for init_vals and combiner validation.
+  SmallVector<Type> scalarResultTypes;
+  for (Value result : getResults())
+    if (!isa<RankedTensorType>(result.getType()))
+      scalarResultTypes.push_back(result.getType());
+
+  // init_vals must be empty when there are no combiners.
+  auto initVals = getInitVals();
   Region &combiners = getCombiners();
+  if (combiners.getBlocks().empty() && !initVals.empty())
+    return emitOpError("init_vals must be empty when there are no combiners");
+
+  // When init_vals is provided it must match the scalar results in count and
+  // type.
+  if (!initVals.empty()) {
+    if (initVals.size() != scalarResultTypes.size())
+      return emitOpError("init_vals has ")
+             << initVals.size() << " value(s) but there are "
+             << scalarResultTypes.size() << " scalar result(s)";
+    for (auto [i, initVal] : llvm::enumerate(initVals)) {
+      Type resultTy = scalarResultTypes[i];
+      if (initVal.getType() != resultTy)
+        return emitOpError("init_vals[")
+               << i << "] has type " << initVal.getType()
+               << " but scalar result " << i << " has type " << resultTy;
+    }
+  }
+
+  // Combiners region must have one block per scalar result.
   if (!combiners.getBlocks().empty()) {
     // if we have combiners we are currently limited to only one block in the
     // body region

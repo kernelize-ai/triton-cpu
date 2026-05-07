@@ -187,10 +187,11 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
     The `combiners` region contains one block per scalar result. Each block takes
     two arguments `(acc, partial)` of the result type and yields the updated
-    accumulator. The lowering bootstraps the accumulator from the first tile's
-    partial result and applies the combiner for each subsequent tile. The combiners
-    region is only used for scalar reductions. Combining (concatenating) tensor tiles
-    for Generics that output tensors is handled separately by the lowering.
+    accumulator. When `init_vals` is provided, `init_vals[i]` seeds the
+    accumulator for combiner `i` before the first tile; when absent the lowering
+    bootstraps from the first tile's partial result. The combiners region is only
+    used for scalar reductions. Combining (concatenating) tensor tiles for
+    Generics that output tensors is handled separately by the lowering.
 
     Constraints:
     - `blockShape` and `tileShape` must have the same rank.
@@ -230,6 +231,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
   let arguments = (ins
     Variadic<TT_Type>:$ins,
+    Variadic<AnyType>:$init_vals,
 
     Variadic<I32>:$blockShape,
     DenseI32ArrayAttr:$tileShape
@@ -241,8 +243,14 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
   let hasVerifier = 1;
 
+  let builders = [
+    OpBuilder<(ins "TypeRange":$results, "ValueRange":$ins, "ValueRange":$blockShape, "ArrayRef<int32_t>":$tileShape), [{
+      build($_builder, $_state, results, ins, ValueRange(), blockShape, tileShape);
+    }]>
+  ];
+
   let assemblyFormat = [{
-    `(` $ins `)` `blocks` `[` $blockShape `:` type($blockShape) `]` attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type($ins, $results)
+    `(` $ins `)` (`init` `(` $init_vals^ `:` type($init_vals) `)`)? `blocks` `[` $blockShape `:` type($blockShape) `]` attr-dict-with-keyword `body` $body `combiners` $combiners `:` functional-type($ins, $results)
   }];
 
   let extraClassDeclaration = [{
