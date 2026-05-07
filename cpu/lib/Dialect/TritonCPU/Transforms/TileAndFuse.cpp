@@ -100,6 +100,21 @@ buildBlockShapeValues(Location loc, ArrayRef<int32_t> blockShape,
   });
 }
 
+static arith::ConstantOp tileConstantOp(arith::ConstantOp constantOp,
+                                        ArrayRef<int32_t> tileShape,
+                                        OpBuilder &rewriter) {
+  auto resultTensorType =
+      cast<RankedTensorType>(constantOp.getResult().getType());
+  auto newTensorType =
+      cast<RankedTensorType>(updateTensorType(resultTensorType, tileShape));
+  auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
+  assert(denseAttr.isSplat() &&
+         "non-splat tensor constants not yet supported in fuseInputs");
+  auto newAttr = DenseElementsAttr::get(
+      newTensorType, *denseAttr.getValues<Attribute>().begin());
+  return arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
+}
+
 // Note: this helper assumes the conversion only involves reordering of
 // registers
 static std::optional<SmallVector<int32_t>>
@@ -396,6 +411,8 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
       // generic since we currently tile over M/N. when we start tiling over K,
       // we will need to ensure the allocate is hoisted into the M/N tiled loop
       hasInMemoryAccumulator = true;
+      auto accLocalLoad = cast<gpu::LocalLoadOp>(cDefOp);
+      ins.push_back(TiledInput{accLocalLoad.getSrc(), tileShape});
     } else {
       // loop carried accumulator
       ins.push_back(TiledInput{dotOp.getC(), tileShape});
@@ -406,8 +423,10 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
 
     SmallVector<Value> blockShapeValues =
         buildBlockShapeValues(loc, blockShape, rewriter);
+    SmallVector<Type> resultTypes =
+        hasInMemoryAccumulator ? TypeRange{} : TypeRange{resultTy};
 
-    auto generic = cpu::GenericOp::create(rewriter, loc, {resultTy}, insValues,
+    auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, insValues,
                                           blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
@@ -415,7 +434,7 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
 
     gpu::LocalAllocOp accAlloc = nullptr;
     if (hasInMemoryAccumulator) {
-#if 1
+#if 0
       // find and clone the alloc op
       SetVector<Operation *> slice;
       BackwardSliceOptions opt;
@@ -429,7 +448,10 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
       // clone the alloc slice chain updating types as we go
       for (auto *op : slice) {
         llvm::errs() << "cloning op in slice: " << *op << "\n";
-        // TODO: update arith.constant operand types, otherwise this loks ok
+        if (auto constOp = dyn_cast<arith::ConstantOp>(op)) {
+          auto newConstant = tileConstantOp(constOp, tileShape, rewriter);
+          continue;
+        }
         Operation *cloned = rewriter.clone(*op, bodyMapping);
         for (auto result : cloned->getResults())
           result.setType(updateTensorType(result.getType(), tileShape));
@@ -438,9 +460,9 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
 
       // clone the load op into the generic and use it as the accumulator source
       // update the type to match the smaller generic tile shape
-      auto accumulatorSrcOp = rewriter.clone(*cDefOp, bodyMapping);
-      accumulatorSrcOp->getResult(0).setType(
-          updateTensorType(dotOp.getC().getType(), tileShape));
+      auto cloned = rewriter.clone(*cDefOp, bodyMapping);
+      for (auto result : cloned->getResults())
+        result.setType(updateTensorType(result.getType(), tileShape));
 #endif
     }
 
@@ -457,15 +479,15 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
       assert(dotUsers.size() == 1 &&
              "expected original dot op to have exactly one user");
       auto localStoreOp = cast<gpu::LocalStoreOp>(dotUsers.front());
-      auto newLocalStore = rewriter.clone(*localStoreOp, bodyMapping);
-      // TODO: type mismatch?
-      // newLocalStore->setType(updateTensorType(localStoreOp->getType(),
-      // tileShape));
+      auto newLocalStore =
+          cast<gpu::LocalStoreOp>(rewriter.clone(*localStoreOp, bodyMapping));
+      cpu::YieldOp::create(rewriter, loc, ValueRange{});
+      rewriter.eraseOp(localStoreOp);
+      rewriter.eraseOp(dotOp);
+    } else {
+      cpu::YieldOp::create(rewriter, loc, newDot->getResults());
+      rewriter.replaceOp(dotOp, generic.getResults());
     }
-
-    cpu::YieldOp::create(rewriter, loc, newDot->getResults());
-
-    rewriter.replaceOp(dotOp, generic.getResults());
     return success();
   }
 };
@@ -767,15 +789,7 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 
       // 1. clone. constants have no operands to update
       rewriter.setInsertionPointToStart(body);
-      auto newTensorType =
-          cast<RankedTensorType>(updateTensorType(resultTensorType, tileShape));
-      auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
-      assert(denseAttr.isSplat() &&
-             "non-splat tensor constants not yet supported in fuseInputs");
-      auto newAttr = DenseElementsAttr::get(
-          newTensorType, *denseAttr.getValues<Attribute>().begin());
-      auto newConstant =
-          arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
+      auto newConstant = tileConstantOp(constantOp, tileShape, rewriter);
 
       // 3. update existing uses
       blockArg.replaceAllUsesWith(newConstant.getResult());
@@ -1097,11 +1111,6 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
         genericOp = bodyGenericOp;
       } else if (auto addptr = dyn_cast<triton::AddPtrOp>(bodyOp)) {
         if (!llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr())) {
-          bodyValid = false;
-          break;
-        }
-      } else if (auto localStoreOp = dyn_cast<gpu::LocalStoreOp>(bodyOp)) {
-        if (localStoreOp.getSrc().getDefiningOp() != genericOp) {
           bodyValid = false;
           break;
         }
