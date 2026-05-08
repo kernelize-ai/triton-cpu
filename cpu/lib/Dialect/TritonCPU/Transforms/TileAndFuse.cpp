@@ -165,15 +165,15 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
     body->addArgument(rewriter.getI32Type(),
                       generic.getLoc()); // tile offset per vector shape dim
 
+  // Iter args before ins args — one block arg per reduction dim init val.
+  for (Value initVal : generic.getInitVals())
+    body->addArgument(initVal.getType(), initVal.getLoc());
+
   for (auto pair : ins) {
     auto [v, inputTileShape] = pair;
     Type argTy = updateTensorType(v.getType(), inputTileShape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
-
-  // Iter args trail ins args — one block arg per reduction dim init val.
-  for (Value initVal : generic.getInitVals())
-    body->addArgument(initVal.getType(), initVal.getLoc());
 
   rewriter.setInsertionPointToStart(body);
   return body;
@@ -296,9 +296,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
                                               neutralVal.value());
     SmallVector<Value> initVals = {newAccum.getResult()};
 
-    auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, insValues,
-                                          initVals, blockShapeValues, tileShape,
-                                          /*reductionDims=*/{0});
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, resultTypes, initVals, insValues,
+                               blockShapeValues, tileShape,
+                               /*reductionDims=*/{0});
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
@@ -503,7 +504,8 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    // TODO: rename variable?
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -575,7 +577,7 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -671,7 +673,7 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -727,7 +729,7 @@ struct FuseBroadcastIntoGeneric
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -791,7 +793,7 @@ struct FuseExpandDimsIntoGeneric
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -856,7 +858,7 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -1011,6 +1013,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     cpu::GenericOp genericOp = *targetGenericOp;
 
+    // TODO: handle carefully
     unsigned numIV = genericOp.getNumInductionVars();
     Block &genericBody = genericOp.getBody().front();
 

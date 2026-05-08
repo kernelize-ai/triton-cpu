@@ -230,8 +230,8 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
   }];
 
   let arguments = (ins
-    Variadic<TT_Type>:$ins,
     Variadic<AnyType>:$init_vals,
+    Variadic<TT_Type>:$ins,
 
     Variadic<I32>:$blockShape,
     DenseI32ArrayAttr:$tileShape,
@@ -247,7 +247,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
   let builders = [
     OpBuilder<(ins "TypeRange":$results, "ValueRange":$ins, "ValueRange":$blockShape, "ArrayRef<int32_t>":$tileShape), [{
-      build($_builder, $_state, results, ins, ValueRange(), blockShape, tileShape, SmallVector<int32_t>{});
+      build($_builder, $_state, results, ValueRange(), ins, blockShape, tileShape, SmallVector<int32_t>{});
     }]>
   ];
 
@@ -263,8 +263,11 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
       return getBody().front().getNumArguments() - getNumInductionVars();
     }
     BlockArgument getIterArg(unsigned i) {
-      return getBody().front().getArgument(
-          getNumInductionVars() + getIns().size() + i);
+      return getBody().front().getArgument(getNumInductionVars() + i);
+    }
+    // Index of the first ins block argument: ivs + iter_args precede ins.
+    unsigned getInsArgOffset() {
+      return getNumInductionVars() + getNumIterArgs();
     }
   }];
 }

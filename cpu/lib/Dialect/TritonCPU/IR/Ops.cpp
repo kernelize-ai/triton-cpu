@@ -99,10 +99,10 @@ LogicalResult GenericOp::verify() {
            << initVals.size() << " value(s) but reductionDims has "
            << reductionDims.size() << " entry(ies)";
 
-  // Body block must have numIVs + numIns + numIterArgs arguments.
+  // Body block must have numIVs + numIterArgs + numIns arguments.
   unsigned numIns = getIns().size();
   unsigned numIterArgs = reductionDims.size();
-  unsigned expectedArgs = numInductionVars + numIns + numIterArgs;
+  unsigned expectedArgs = numInductionVars + numIterArgs + numIns;
   if (bodyBlock.getNumArguments() != expectedArgs)
     return emitOpError("body block has ")
            << bodyBlock.getNumArguments() << " argument(s) but expects "
@@ -111,8 +111,7 @@ LogicalResult GenericOp::verify() {
 
   // Each iter arg block arg type must match the corresponding init_vals type.
   for (auto [i, initVal] : llvm::enumerate(initVals)) {
-    BlockArgument iterArg =
-        bodyBlock.getArgument(numInductionVars + numIns + i);
+    BlockArgument iterArg = bodyBlock.getArgument(numInductionVars + i);
     if (iterArg.getType() != initVal.getType())
       return emitOpError("body iter arg ")
              << i << " has type " << iterArg.getType() << " but init_vals[" << i
@@ -129,8 +128,7 @@ LogicalResult GenericOp::verify() {
            << yieldOp.getValues().size();
   for (unsigned i = 0; i < numIterArgs; ++i) {
     Type yieldTy = yieldOp.getValues()[i].getType();
-    Type iterArgTy =
-        bodyBlock.getArgument(numInductionVars + numIns + i).getType();
+    Type iterArgTy = bodyBlock.getArgument(numInductionVars + i).getType();
     if (yieldTy != iterArgTy)
       return emitOpError("ttc.yield value ")
              << i << " has type " << yieldTy << " but iter arg " << i
