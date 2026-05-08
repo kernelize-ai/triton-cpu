@@ -270,6 +270,13 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
           return user != reduceOp.getOperation(); // or just != reduceOp?
         });
 
+    Operation *combiner = reduceOp.getSingleCombiner();
+    if (!combiner)
+      return failure();
+    auto neutralVal = getNeutralElement(combiner);
+    if (!neutralVal)
+      return failure();
+
     auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
 
     SmallVector<TiledInput> ins = {TiledInput{srcs[0], tileShape}};
@@ -285,51 +292,41 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     SmallVector<Value> blockShapeValues =
         buildBlockShapeValues(loc, blockShape, rewriter);
 
-    // TODO: add init vals, reduction dims, and drop the combiners stuff
+    auto newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
+                                              neutralVal.value());
+    SmallVector<Value> initVals = {newAccum.getResult()};
+
     auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, insValues,
-                                          blockShapeValues, tileShape);
+                                          initVals, blockShapeValues, tileShape,
+                                          /*reductionDims=*/{0});
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
+    Value acc = newReduce->getResult(0);
 
-    SmallVector<Value> partials(newReduce->getResults().begin(),
-                                newReduce->getResults().end());
-    if (srcUsedElsewhere)
-      partials.push_back(bodyMapping.lookup(srcs[0]));
-    cpu::YieldOp::create(rewriter, loc, partials);
+    // manually combine with the iter args source
+    auto partial = generic.getIterArg(0);
 
-    // Each block takes (acc, partial) and applies the same combining op as the
-    // tt.reduce combiner, replacing tt.reduce.return with ttc.yield.
-    Region &combiners = generic.getCombiners();
     Region &reduceCombiner = reduceOp.getCombineOp();
     Block &srcBlock = reduceCombiner.front();
 
-    // Only scalar (reduction) results need combiner blocks. The tensor result
-    // (if present) uses scatter semantics and has no combiner.
-    for (Type resultTy : reduceOp.getResultTypes()) {
-      Block *combBlock = rewriter.createBlock(&combiners);
-      Value acc = combBlock->addArgument(resultTy, loc);
-      Value partial = combBlock->addArgument(resultTy, loc);
+    IRMapping combMapping;
+    // The reduce combiner block has args [lhs..., rhs...] interleaved per
+    // src. With a single src the layout is simply [lhs, rhs].
+    combMapping.map(srcBlock.getArgument(0), acc);
+    combMapping.map(srcBlock.getArgument(1), partial);
+    auto newCombiner = rewriter.clone(*combiner, combMapping);
 
-      IRMapping combMapping;
-      // The reduce combiner block has args [lhs..., rhs...] interleaved per
-      // src. With a single src the layout is simply [lhs, rhs].
-      combMapping.map(srcBlock.getArgument(0), acc);
-      combMapping.map(srcBlock.getArgument(1), partial);
+    SmallVector<Value> partials(newCombiner->getResults().begin(),
+                                newCombiner->getResults().end());
 
-      rewriter.setInsertionPointToStart(combBlock);
-      for (Operation &op : srcBlock.without_terminator())
-        rewriter.clone(op, combMapping);
-
-      // Replace tt.reduce.return with ttc.yield.
-      SmallVector<Value> yieldVals;
-      for (Value rv : srcBlock.getTerminator()->getOperands())
-        yieldVals.push_back(combMapping.lookupOrDefault(rv));
-      cpu::YieldOp::create(rewriter, loc, yieldVals);
-    }
+    // TODO: we should really handle this during fusion...
+    if (srcUsedElsewhere)
+      partials.push_back(bodyMapping.lookup(srcs[0]));
+    cpu::YieldOp::create(rewriter, loc, partials);
 
     // Replace uses of srcs[0] outside the generic with the materialized tensor
     // result. Must go through the rewriter and exclude the generic's own
