@@ -32,7 +32,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     if (!defGeneric)
       return {};
     // TODO: overly defensive?
-    if (result.getResultNumber() < defGeneric.getCombiners().getBlocks().size())
+    if (result.getResultNumber() < defGeneric.getNumIterArgs())
       return {};
 
     assert(isa<LLVM::LLVMStructType>(llvmArg.getType()) &&
@@ -56,9 +56,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     Block *body = &op.getBody().front();
     SmallVector<Value> chunkedArgs;
 
-    for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
-             body->getArguments().drop_front(op.getNumInductionVars()),
-             adaptor.getIns())) {
+    for (auto [opIdx, origArg, llvmArg] :
+         llvm::enumerate(body->getArguments().drop_front(op.getInsArgOffset()),
+                         adaptor.getIns())) {
       LDBG("Chunk operand " << opIdx << " = " << origArg << " --> " << llvmArg);
       if (!isa<RankedTensorType>(origArg.getType())) {
         // forward constants and scalars without chunking
@@ -120,7 +120,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     assert(op.getBody().getBlocks().size() == 1 &&
            "expected generic op body to have one block");
     Block *body = &op.getBody().front();
-    const bool hasReductions = !op.getCombiners().empty();
+    const bool hasReductions = false; //! op.getCombiners().empty();
 
     // clone the body of the generic op for this chunk only
     IRMapping mapping;
@@ -128,7 +128,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
              body->getArguments().take_front(tileOffsets.size()), tileOffsets))
       mapping.map(blockArg, offset);
     for (auto [bodyArg, chunkedArg] :
-         llvm::zip(body->getArguments().drop_front(op.getNumInductionVars()),
+         llvm::zip(body->getArguments().drop_front(op.getInsArgOffset()),
                    chunkedArgs))
       mapping.map(bodyArg, chunkedArg);
 
@@ -169,6 +169,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
           // materialzied tensor values are currently added to yield op after
           // scalars
+          // TODO: remove, but this entire code block is false anyways
           unsigned numCombinerBlocks = op.getCombiners().getBlocks().size();
           for (unsigned k = numCombinerBlocks; k < yieldOpValues.size(); ++k)
             tensorTiles.push_back(yieldOpValues[k]);
@@ -222,9 +223,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     SmallVector<Value> tileArgs;
 
-    for (auto [opIdx, origArg, llvmArg] : llvm::enumerate(
-             body->getArguments().drop_front(op.getNumInductionVars()),
-             adaptor.getIns())) {
+    for (auto [opIdx, origArg, llvmArg] :
+         llvm::enumerate(body->getArguments().drop_front(op.getInsArgOffset()),
+                         adaptor.getIns())) {
       if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
         // Load this tile's elements from the alloca produced by the prior
         // generic and pack them into the tile struct.
@@ -462,7 +463,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           continue;
 
         rewriter.setInsertionPoint(yieldOp);
-        SmallVector<Value> loopTiles = llvm::to_vector(yieldOp.getValues());
+        // only scatter non-iter arg yields
+        SmallVector<Value> loopTiles(yieldOp.getValues().begin() +
+                                         op.getNumIterArgs(),
+                                     yieldOp.getValues().end());
         scatterTiles(rewriter, loc, loopTiles, flatElemOffset, vectorSize,
                      tensorAccPtrs, tensorElemTys);
 
@@ -526,12 +530,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       numChunks *= blockShape[d] / tileShape[d];
     }
 
-    const bool hasReductions = !op.getCombiners().empty();
-    const unsigned numCombinerBlocks = op.getCombiners().getBlocks().size();
+    // TODO: disable existing reductions pathway and use iter args consistently
+    const bool hasReductions = false; //! op.getCombiners().empty();
 
     LDBG("Lowering genericOp with vectorSize = "
-         << vectorSize << ", numChunks = " << numChunks << ", hasReductions = "
-         << hasReductions << ", numCombinerBlocks = " << numCombinerBlocks);
+         << vectorSize << ", numChunks = " << numChunks);
 
     // Tensor results are materialized as thread-local global arrays rather than
     // LLVM vectors. This avoids loop-carried <blockSize x elemTy> phi nodes
@@ -551,7 +554,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto module = op->getParentOfType<ModuleOp>();
     assert(module && "expected generic op to be inside a module");
     for (Type resultTy :
-         llvm::drop_begin(op.getResultTypes(), numCombinerBlocks)) {
+         llvm::drop_begin(op.getResultTypes(), op.getNumIterArgs())) {
       auto tensorTy = cast<RankedTensorType>(resultTy);
       int64_t blockSize = std::accumulate(blockShape.begin(), blockShape.end(),
                                           int64_t{1}, std::multiplies<>());
@@ -589,19 +592,19 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // Tensor args passed as LLVM structs require static tile indices
     // (llvm.extractvalue only accepts attribute indices). Alloca-backed tensors
     // from a prior generic are GEP-indexed and support dynamic offsets.
-    const bool requiresTensorArgMaterialization = llvm::any_of(
-        llvm::enumerate(
-            llvm::zip(body->getArguments().drop_front(op.getNumInductionVars()),
-                      adaptor.getIns())),
-        [this, &op](auto pair) {
-          auto [opIdx, argPair] = pair;
-          auto [origArg, llvmArg] = argPair;
-          if (!isa<RankedTensorType>(origArg.getType()))
-            return false;
-          if (getGenericOutputTensorAsPtr(op, opIdx, llvmArg))
-            return false;
-          return true;
-        });
+    const bool requiresTensorArgMaterialization =
+        llvm::any_of(llvm::enumerate(llvm::zip(
+                         body->getArguments().drop_front(op.getInsArgOffset()),
+                         adaptor.getIns())),
+                     [this, &op](auto pair) {
+                       auto [opIdx, argPair] = pair;
+                       auto [origArg, llvmArg] = argPair;
+                       if (!isa<RankedTensorType>(origArg.getType()))
+                         return false;
+                       if (getGenericOutputTensorAsPtr(op, opIdx, llvmArg))
+                         return false;
+                       return true;
+                     });
 
     Value result;
     if (requiresTensorArgMaterialization || numChunks == 1) {
@@ -632,14 +635,29 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                       tensorAccPtrs, tensorElemTys);
     }
 
+#if 1
+    // TODO: this is broken
     SmallVector<Value> replacements;
     if (result)
       replacements.push_back(result);
     replacements.append(tensorAccPtrs);
-    if (!replacements.empty())
+    if (!replacements.empty()) {
+#if 1
+      assert(replacements.size() == op.getNumIterArgs() &&
+             "expected one replacement value per iter-arg result");
+      for (auto [result, repl] :
+           llvm::zip(op.getResults().drop_back(op.getNumResults() -
+                                               op.getNumIterArgs()),
+                     replacements)) {
+        rewriter.replaceAllUsesWith(result, repl);
+      }
+    }
+#else
       rewriter.replaceOp(op, replacements);
-    else
-      rewriter.eraseOp(op);
+    } else
+#endif
+#endif
+    rewriter.eraseOp(op);
     return success();
   }
 };
