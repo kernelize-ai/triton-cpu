@@ -617,6 +617,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                      });
 
     // Iter arg values start from init_vals and are updated tile-by-tile.
+    // TODO: these probably have to be tiled?
     SmallVector<Value> iterArgVals(adaptor.getInitVals().begin(),
                                    adaptor.getInitVals().end());
 
@@ -657,13 +658,16 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // assertions in the framework; a single replaceOp call avoids that.
     unsigned numIterArgs = op.getNumIterArgs();
     SmallVector<Value> allReplacements(iterArgVals.begin(), iterArgVals.end());
+#if 0
     for (auto [res, accPtr] :
          llvm::zip(op.getResults().drop_front(numIterArgs), tensorAccPtrs)) {
       allReplacements.push_back(UnrealizedConversionCastOp::create(
                                     rewriter, loc, res.getType(), accPtr)
                                     .getResult(0));
     }
-
+#else
+    allReplacements.append(tensorAccPtrs);
+#endif
     if (allReplacements.empty())
       rewriter.eraseOp(op);
     else
