@@ -25,7 +25,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   Value getGenericOutputTensorAsPtr(cpu::GenericOp op, unsigned opIdx,
                                     Value llvmArg) const {
     // find the generic op producing this tensor
-    auto result = dyn_cast<OpResult>(op.getOperand(opIdx));
+    auto result = dyn_cast<OpResult>(op.getIns()[opIdx]);
     if (!result)
       return {};
     auto defGeneric = dyn_cast<cpu::GenericOp>(result.getOwner());
@@ -66,7 +66,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                origArg.getType() == llvmArg.getType() &&
                    "expected non-tensor arguments to be unchanged by type "
                    "conversion");
-        chunkedArgs.push_back(op.getOperand(opIdx));
+        chunkedArgs.push_back(op.getIns()[opIdx]);
       } else if (Value ptrArg =
                      getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
         // Load this tile's elements from the alloca produced by the prior
@@ -221,10 +221,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         if (origArg.getType() != llvmArg.getType()) {
           tileArgs.push_back(
               UnrealizedConversionCastOp::create(
-                  rewriter, loc, llvmArg.getType(), op.getOperand(opIdx))
+                  rewriter, loc, llvmArg.getType(), op.getIns()[opIdx])
                   .getResult(0));
         } else {
-          tileArgs.push_back(op.getOperand(opIdx));
+          tileArgs.push_back(op.getIns()[opIdx]);
         }
       } else {
         assert(!isa<RankedTensorType>(origArg.getType()) &&
@@ -233,7 +233,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         assert(origArg.getType() == llvmArg.getType() &&
                "expected non-tensor arguments to be unchanged by type "
                "conversion");
-        tileArgs.push_back(op.getOperand(opIdx));
+        tileArgs.push_back(op.getIns()[opIdx]);
       }
     }
     return tileArgs;
@@ -455,7 +455,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       // entryArgs: [IVs..., iterArgs..., insArgs...]
       SmallVector<Value> entryArgs(accOffsets.begin(), accOffsets.end());
+      for (auto arg : iterArgVals)
+        LDBG("iterArgVals: " << arg);
       entryArgs.append(iterArgVals.begin(), iterArgVals.end());
+      for (auto arg : tileArgs)
+        LDBG("tileArgs: " << arg);
       entryArgs.append(tileArgs.begin(), tileArgs.end());
       LLVM::BrOp::create(rewriter, loc, entryArgs, bodyEntry);
 
