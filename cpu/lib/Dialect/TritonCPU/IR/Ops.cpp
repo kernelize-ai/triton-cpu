@@ -119,9 +119,19 @@ LogicalResult GenericOp::verify() {
   }
 
   // ttc.yield leading values must match iter arg types.
-  auto yieldOp = dyn_cast<cpu::YieldOp>(bodyBlock.getTerminator());
+  // The body may have multiple blocks after SCF-to-CF lowering (e.g. a K-loop
+  // inside the body). Scan all blocks to find the unique ttc.yield.
+  cpu::YieldOp yieldOp;
+  for (Block &block : body) {
+    auto y = dyn_cast<cpu::YieldOp>(block.getTerminator());
+    if (!y)
+      continue;
+    if (yieldOp)
+      return emitOpError("body region must have exactly one ttc.yield");
+    yieldOp = y;
+  }
   if (!yieldOp)
-    return emitOpError("body block must be terminated by ttc.yield");
+    return emitOpError("body region must contain a ttc.yield terminator");
   if (yieldOp.getValues().size() < numIterArgs)
     return emitOpError("ttc.yield must return at least ")
            << numIterArgs << " value(s) for iter args, got "
