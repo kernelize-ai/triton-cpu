@@ -1013,7 +1013,9 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     cpu::GenericOp genericOp = *targetGenericOp;
 
-    // TODO: handle carefully
+    // TODO: this assumes no iter args for dot cases where we want to fuse the
+    // for loop. when we fuse the for loop and expand the generic to handle the
+    // K dimension, this code will be wrong.
     unsigned numIV = genericOp.getNumInductionVars();
     Block &genericBody = genericOp.getBody().front();
 
