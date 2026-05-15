@@ -1043,7 +1043,6 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     llvm::errs() << "fusing for op: " << forOp << "\n";
 
-    auto kSize = forOp.getUpperBound();
     auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
     gpu::BlockedEncodingAttr aOperandEncoding = dyn_cast<gpu::BlockedEncodingAttr>(aOperandType.getEncoding());
     if (!aOperandEncoding) {
@@ -1066,6 +1065,10 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     // 1. rewrite the generic to tile over m, n, and k. but we actually want to order k, m, n. 
     assert(genericOp.getBlockShape().size() == 2 &&
            "expected target generic to have 2D block shape");
+    rewriter.setInsertionPoint(forOp);
+    auto kSizeLoc = forOp.getUpperBound().getLoc();
+    Value kTileConst = arith::ConstantOp::create(rewriter, kSizeLoc, rewriter.getI32IntegerAttr(kTileShape));
+    Value kSize = arith::MulIOp::create(rewriter, kSizeLoc, forOp.getUpperBound(), kTileConst);
     SmallVector<Value> newBlockShapes = {kSize, genericOp.getBlockShape()[0], genericOp.getBlockShape()[1]};
     SmallVector<int32_t> newTileShapes = {kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
 
@@ -1099,11 +1102,31 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     }
     Block* body = initGenericBody(rewriter, newGeneric, newIns, newGeneric.getTileShape(), mapping);
     
+    llvm::errs() << "new generic: " << newGeneric << "\n";
+
     // map IVs 
     mapping.map(genericBody.getArgument(0), body->getArgument(1));
     mapping.map(genericBody.getArgument(1), body->getArgument(2));
     mapping.map(forOp.getInductionVar(), body->getArgument(0));
 #endif 
+
+    for (unsigned i = 0; i < forOp.getNumRegionIterArgs(); ++i) {
+      auto iterArg = forOp.getRegionIterArg(i);
+      llvm::errs() << "iter arg: " << iterArg << "\n";
+
+      for (auto user : iterArg.getUsers()) {
+        // the for op loop structure is constrained by the matcher to be generic op -> add ptr -> add ptr -> yield a_ptr, b_ptr, accumulator 
+        if (auto addPtrOp = dyn_cast<triton::AddPtrOp>(user)) {
+          Value init = forOp.getInitArgs()[i];
+          Value step = addPtrOp.getOffset();
+
+          llvm::errs() << "  addptr user: " << addPtrOp << "\n";
+          llvm::errs() << "    init: " << init << "\n";
+          llvm::errs() << "    step: " << step << "\n";
+        }
+      }
+    }
+
 
     assert(false && "TODO");
 
