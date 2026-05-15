@@ -155,8 +155,8 @@ struct TiledInput {
 // Create the body block of a GenericOp, adding one block arg per ins value
 // with tensor types replaced to the vector (chunk) shape. Populates `mapping`
 // with ins value → block arg entries and sets the insertion point to the start
-// of the block. Iter args (one per reduction dim init val) are appended after
-// ins args. Returns the new block.
+// of the block. Init values for iter args come first, then ins args. Returns
+// the new block.
 static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                               ArrayRef<TiledInput> ins,
                               ArrayRef<int32_t> tileShape, IRMapping &mapping) {
@@ -306,10 +306,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
-    Value acc = newReduce->getResult(0);
+    Value partial = newReduce->getResult(0);
 
     // manually combine with the iter args source
-    auto partial = generic.getIterArg(0);
+    auto acc = generic.getIterArg(0);
 
     Region &reduceCombiner = reduceOp.getCombineOp();
     Block &srcBlock = reduceCombiner.front();
