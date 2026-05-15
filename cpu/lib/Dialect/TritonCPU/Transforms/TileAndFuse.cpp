@@ -984,7 +984,32 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     if (!genericOp)
       return std::nullopt;
 
-    // (4) Every scf.yield operand must come from either the inner generic
+    // (4) For loop lower bound must be 0. 
+    {
+      APInt lbVal;
+      if (!matchPattern(forOp.getLowerBound(), m_ConstantInt(&lbVal)) ||
+          lbVal.getSExtValue() != 0)
+        return std::nullopt;
+    }
+
+    // (5) The generic must contain a tt.dot op — this identifies it as a
+    // K-reduction matmul tile rather than an elementwise generic.
+    bool hasDot = false;
+    genericOp.getBody().walk([&](triton::DotOp) { hasDot = true; });
+    if (!hasDot)
+      return std::nullopt;
+
+    // (6) The for op's induction variable must be used inside the generic's
+    // body (passed as an ins arg). This confirms the generic is actually
+    // iterating over the K dimension rather than some unrelated loop.
+    Value forIV = forOp.getInductionVar();
+    bool ivUsedByGeneric = llvm::any_of(genericOp.getIns(), [&](Value ins) {
+      return ins == forIV;
+    });
+    if (!ivUsedByGeneric)
+      return std::nullopt;
+
+    // (7) Every scf.yield operand must come from either the inner generic
     // or an addptr that advances a for iter arg.
     auto yieldOp = cast<scf::YieldOp>(forBody->getTerminator());
     bool yieldValid = llvm::all_of(yieldOp.getOperands(), [&](Value v) {
@@ -1012,32 +1037,95 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
       return failure();
 
     cpu::GenericOp genericOp = *targetGenericOp;
+    triton::DotOp dotOp;
+    genericOp.getBody().walk([&](triton::DotOp op) { dotOp = op; });
+    assert(dotOp && "expected to find a dot op in the generic body");
 
-    // TODO: this assumes no iter args for dot cases where we want to fuse the
-    // for loop. when we fuse the for loop and expand the generic to handle the
-    // K dimension, this code will be wrong.
-    unsigned numIV = genericOp.getNumInductionVars();
+    llvm::errs() << "fusing for op: " << forOp << "\n";
+
+    auto kSize = forOp.getUpperBound();
+    auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
+    gpu::BlockedEncodingAttr aOperandEncoding = dyn_cast<gpu::BlockedEncodingAttr>(aOperandType.getEncoding());
+    if (!aOperandEncoding) {
+      auto aDotOperandEncoding = cast<gpu::DotOperandEncodingAttr>(aOperandType.getEncoding());
+      aOperandEncoding = cast<gpu::BlockedEncodingAttr>(aDotOperandEncoding.getParent());
+    }
+
+    auto [blockShape, tileShape] = getBlockAndTileShapes(
+        aOperandType, aOperandEncoding);
+    int32_t kTileShape = blockShape[1]; // use the block shape as the kTile shape. The k block shape is the runtime value of K (the for loop upper bound)
+    llvm::errs() << "m, k block shape: ";
+        for (auto s : blockShape)
+    llvm::errs() << s << " ";
+    llvm::errs() << "\nm, k tile shape: ";
+        for (auto s : tileShape)
+    llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+    // TODO: get the k tile size. we can probably get this from the dotOp a operand. 
+
+    // 1. rewrite the generic to tile over m, n, and k. but we actually want to order k, m, n. 
+    assert(genericOp.getBlockShape().size() == 2 &&
+           "expected target generic to have 2D block shape");
+    SmallVector<Value> newBlockShapes = {kSize, genericOp.getBlockShape()[0], genericOp.getBlockShape()[1]};
+    SmallVector<int32_t> newTileShapes = {kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
+
+    // TODO: sure feels like this should be tiled...
+    SmallVector<Value> initVals = forOp.getInitArgs();
+
+    auto newGeneric = cpu::GenericOp::create(rewriter, genericOp.getLoc(), genericOp.getResultTypes(),
+                                          initVals, genericOp.getIns(), newBlockShapes,
+                                          newTileShapes, /*reductionDims=*/{0});
+  #if 0 
+    // TODO: this won't work, we need to clone the body and update the block args to shift induction variables
+
+    rewriter.inlineRegionBefore(genericOp.getRegion(), newGeneric.getRegion(),
+                                   newGeneric.getRegion().end());
+#else
     Block &genericBody = genericOp.getBody().front();
 
-    // 1. forward forOp upper/lower/step args and init args through the generic
-    // op so the cloned forOp can re-use them
+    IRMapping mapping;
 
-    SmallVector<Value> newIns(genericOp.getIns());
+    SmallVector<TiledInput> newIns; 
+    auto getTileShapeForValue = [](Value v) -> SmallVector<int32_t> {
+      if (auto tensorTy = dyn_cast<RankedTensorType>(v.getType())) {
+       return llvm::map_to_vector(tensorTy.getShape(), [](int64_t dim) {
+          return static_cast<int32_t>(dim);
+        });
+      } 
+      return {};
+    };
+    for (auto v : genericOp.getIns()) {
+      newIns.push_back(TiledInput{v, getTileShapeForValue(v)});
+    }
+    Block* body = initGenericBody(rewriter, newGeneric, newIns, newGeneric.getTileShape(), mapping);
+    
+    // map IVs 
+    mapping.map(genericBody.getArgument(0), body->getArgument(1));
+    mapping.map(genericBody.getArgument(1), body->getArgument(2));
+    mapping.map(forOp.getInductionVar(), body->getArgument(0));
+#endif 
+
+    assert(false && "TODO");
+
+#if 0
+    // forward forOp init args through the generic
     SmallVector<Value> newForControlOperands;
     SmallVector<Value>
         newForInitVals; // tiled init values for the fused for loop
 
-    IRMapping mapping;
+    // IRMapping mapping;
     for (auto [i, forOpOperand] : llvm::enumerate(forOp.getOperands())) {
       if (i > forOp.getNumControlOperands() + forOp.getNumRegionIterArgs())
         break; // only consider control operands args and init args
 
       if (i < forOp.getNumControlOperands()) {
+        if (i == 0) continue; // ignore induction var 
         BlockArgument bodyArg = genericBody.addArgument(forOpOperand.getType(),
                                                         forOpOperand.getLoc());
-        newIns.push_back(forOpOperand); // forward control operands to generic
+        // newIns.push_back(forOpOperand); // forward control operands to generic
                                         // op directly, no need to update types
         newForControlOperands.push_back(bodyArg);
+        // TODO: update mapping? 
       } else {
         auto forOpIterArg =
             forOp.getRegionIterArg(i - forOp.getNumControlOperands());
@@ -1057,7 +1145,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
                 updateTensorType(forOpOperand.getType(), tileShape),
                 forOpOperand.getLoc());
             mapping.map(forOpIterArg, bodyArg);
-            newIns.push_back(forOpOperand);
+            // newIns.push_back(forOpOperand);
             newForInitVals.push_back(bodyArg);
             break;
           }
@@ -1065,6 +1153,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
       }
     }
 
+    assert(false && "TODO");
     // 2. clone the for op into the generic body
 
     // Snapshot old body ops before inserting newFor
@@ -1117,7 +1206,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     for (auto [genericResult, yieldOperand] :
          llvm::zip(genericOp.getResults(), genericYield.getValues()))
       mapping.map(genericResult, mapping.lookup(yieldOperand));
-
+#if 0
     // Clone addptr ops from the old for body
     for (Operation &op : forOp.getBody()->without_terminator()) {
       if (!isa<cpu::GenericOp>(op)) {
@@ -1158,7 +1247,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
     // clone the for op yield
     Block *forBody = forOp.getBody();
     rewriter.clone(*forBody->getTerminator(), mapping);
-
+#endif 
     // 5. build the generic ttc.yield op
     scf::YieldOp oldForYield = cast<scf::YieldOp>(forBody->getTerminator());
     auto oldGenericYield = cast<cpu::YieldOp>(genericBody.getTerminator());
@@ -1208,7 +1297,7 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
       rewriter.replaceAllUsesWith(forOp.getResult(i), genericOp.getResult(j));
     }
     rewriter.eraseOp(forOp);
-
+#endif 
     return success();
   }
 };
