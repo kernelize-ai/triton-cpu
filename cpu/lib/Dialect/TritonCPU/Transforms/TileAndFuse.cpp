@@ -1,8 +1,11 @@
 #include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
 
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/APFloat.h"
 #include "llvm/Support/Debug.h"
 
 #include "triton/Analysis/Utility.h"
@@ -126,6 +129,24 @@ getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
   return tileShape;
 }
 
+// Get the neutral (identity) element for a reduction op. Handles
+// MaxNumFOp/MinNumFOp which are missing from mlir::arith::getNeutralElement,
+// and delegates everything else to it.
+// note: copied from optimizethreadlocality.cpp
+static std::optional<TypedAttr> getNeutralElement(Operation *op) {
+  if (isa<arith::MaxNumFOp>(op)) {
+    Type ty = op->getResult(0).getType();
+    const llvm::fltSemantics &sem = cast<FloatType>(ty).getFloatSemantics();
+    return FloatAttr::get(ty, APFloat::getInf(sem, /*Negative=*/true));
+  }
+  if (isa<arith::MinNumFOp>(op)) {
+    Type ty = op->getResult(0).getType();
+    const llvm::fltSemantics &sem = cast<FloatType>(ty).getFloatSemantics();
+    return FloatAttr::get(ty, APFloat::getInf(sem, /*Negative=*/false));
+  }
+  return mlir::arith::getNeutralElement(op);
+}
+
 struct TiledInput {
   Value value;
   SmallVector<int32_t> shape;
@@ -134,7 +155,8 @@ struct TiledInput {
 // Create the body block of a GenericOp, adding one block arg per ins value
 // with tensor types replaced to the vector (chunk) shape. Populates `mapping`
 // with ins value → block arg entries and sets the insertion point to the start
-// of the block. Returns the new block.
+// of the block. Init values for iter args come first, then ins args. Returns
+// the new block.
 static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                               ArrayRef<TiledInput> ins,
                               ArrayRef<int32_t> tileShape, IRMapping &mapping) {
@@ -143,11 +165,16 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
     body->addArgument(rewriter.getI32Type(),
                       generic.getLoc()); // tile offset per vector shape dim
 
+  // Iter args before ins args — one block arg per reduction dim init val.
+  for (Value initVal : generic.getInitVals())
+    body->addArgument(initVal.getType(), initVal.getLoc());
+
   for (auto pair : ins) {
     auto [v, inputTileShape] = pair;
     Type argTy = updateTensorType(v.getType(), inputTileShape);
     mapping.map(v, body->addArgument(argTy, v.getLoc()));
   }
+
   rewriter.setInsertionPointToStart(body);
   return body;
 }
@@ -243,6 +270,13 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
           return user != reduceOp.getOperation(); // or just != reduceOp?
         });
 
+    Operation *combiner = reduceOp.getSingleCombiner();
+    if (!combiner)
+      return failure();
+    auto neutralVal = getNeutralElement(combiner);
+    if (!neutralVal)
+      return failure();
+
     auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
 
     SmallVector<TiledInput> ins = {TiledInput{srcs[0], tileShape}};
@@ -257,50 +291,43 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
     SmallVector<Value> blockShapeValues =
         buildBlockShapeValues(loc, blockShape, rewriter);
-    auto generic = cpu::GenericOp::create(rewriter, loc, resultTypes, insValues,
-                                          blockShapeValues, tileShape);
+
+    auto newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
+                                              neutralVal.value());
+    SmallVector<Value> initVals = {newAccum.getResult()};
+
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, resultTypes, initVals, insValues,
+                               blockShapeValues, tileShape,
+                               /*reductionDims=*/{0});
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
+    Value partial = newReduce->getResult(0);
 
-    SmallVector<Value> partials(newReduce->getResults().begin(),
-                                newReduce->getResults().end());
-    if (srcUsedElsewhere)
-      partials.push_back(bodyMapping.lookup(srcs[0]));
-    cpu::YieldOp::create(rewriter, loc, partials);
+    // manually combine with the iter args source
+    auto acc = generic.getIterArg(0);
 
-    // Each block takes (acc, partial) and applies the same combining op as the
-    // tt.reduce combiner, replacing tt.reduce.return with ttc.yield.
-    Region &combiners = generic.getCombiners();
     Region &reduceCombiner = reduceOp.getCombineOp();
     Block &srcBlock = reduceCombiner.front();
 
-    // Only scalar (reduction) results need combiner blocks. The tensor result
-    // (if present) uses scatter semantics and has no combiner.
-    for (Type resultTy : reduceOp.getResultTypes()) {
-      Block *combBlock = rewriter.createBlock(&combiners);
-      Value acc = combBlock->addArgument(resultTy, loc);
-      Value partial = combBlock->addArgument(resultTy, loc);
+    IRMapping combMapping;
+    // The reduce combiner block has args [lhs..., rhs...] interleaved per
+    // src. With a single src the layout is simply [lhs, rhs].
+    combMapping.map(srcBlock.getArgument(0), acc);
+    combMapping.map(srcBlock.getArgument(1), partial);
+    auto newCombiner = rewriter.clone(*combiner, combMapping);
 
-      IRMapping combMapping;
-      // The reduce combiner block has args [lhs..., rhs...] interleaved per
-      // src. With a single src the layout is simply [lhs, rhs].
-      combMapping.map(srcBlock.getArgument(0), acc);
-      combMapping.map(srcBlock.getArgument(1), partial);
+    SmallVector<Value> partials(newCombiner->getResults().begin(),
+                                newCombiner->getResults().end());
 
-      rewriter.setInsertionPointToStart(combBlock);
-      for (Operation &op : srcBlock.without_terminator())
-        rewriter.clone(op, combMapping);
-
-      // Replace tt.reduce.return with ttc.yield.
-      SmallVector<Value> yieldVals;
-      for (Value rv : srcBlock.getTerminator()->getOperands())
-        yieldVals.push_back(combMapping.lookupOrDefault(rv));
-      cpu::YieldOp::create(rewriter, loc, yieldVals);
-    }
+    // TODO: we should really handle this during fusion...
+    if (srcUsedElsewhere)
+      partials.push_back(bodyMapping.lookup(srcs[0]));
+    cpu::YieldOp::create(rewriter, loc, partials);
 
     // Replace uses of srcs[0] outside the generic with the materialized tensor
     // result. Must go through the rewriter and exclude the generic's own
@@ -477,7 +504,8 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    // TODO: rename variable?
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -549,7 +577,7 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -645,7 +673,7 @@ struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -701,7 +729,7 @@ struct FuseBroadcastIntoGeneric
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -765,7 +793,7 @@ struct FuseExpandDimsIntoGeneric
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -830,7 +858,7 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
     Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getNumInductionVars();
+    unsigned numIV = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       Operation *op = insVal.getDefiningOp();
@@ -985,6 +1013,9 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     cpu::GenericOp genericOp = *targetGenericOp;
 
+    // TODO: this assumes no iter args for dot cases where we want to fuse the
+    // for loop. when we fuse the for loop and expand the generic to handle the
+    // K dimension, this code will be wrong.
     unsigned numIV = genericOp.getNumInductionVars();
     Block &genericBody = genericOp.getBody().front();
 

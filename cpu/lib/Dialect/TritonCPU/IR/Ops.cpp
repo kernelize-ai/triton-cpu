@@ -76,35 +76,73 @@ LogicalResult GenericOp::verify() {
       return emitOpError("body induction variable ") << i << " must be i32";
   }
 
-  // Combiners region must have one block per scalar result.
-  Region &combiners = getCombiners();
-  if (!combiners.getBlocks().empty()) {
-    // if we have combiners we are currently limited to only one block in the
-    // body region
-    if (body.getBlocks().size() != 1)
-      return emitOpError("currently only supports one block in "
-                         "the body region with populated combiners, got ")
-             << body.getBlocks().size();
+  auto reductionDims = getReductionDims();
+  auto initVals = getInitVals();
+
+  // reductionDims entries must be valid indices into blockShape.
+  for (auto [i, dim] : llvm::enumerate(reductionDims)) {
+    if (dim < 0 || (unsigned)dim >= blockShape.size())
+      return emitOpError("reductionDims[")
+             << i << "] = " << dim << " is out of range for blockShape of size "
+             << blockShape.size();
   }
-  unsigned numScalarResults = std::accumulate(
-      getResults().begin(), getResults().end(), 0, [](int sum, Value v) {
-        if (!isa<RankedTensorType>(v.getType()))
-          return sum + 1;
-        return sum;
-      });
-  if (combiners.getBlocks().size() != numScalarResults) {
-    return emitOpError("expects combiners region to have ")
-           << numScalarResults << " block(s), got "
-           << combiners.getBlocks().size();
+
+  // reductionDims must not contain duplicates.
+  SmallVector<int32_t> sortedDims(reductionDims.begin(), reductionDims.end());
+  llvm::sort(sortedDims);
+  if (llvm::adjacent_find(sortedDims) != sortedDims.end())
+    return emitOpError("reductionDims must not contain duplicate entries");
+
+  // init_vals count must match reductionDims count.
+  if (initVals.size() != reductionDims.size())
+    return emitOpError("init_vals has ")
+           << initVals.size() << " value(s) but reductionDims has "
+           << reductionDims.size() << " entry(ies)";
+
+  // Body block must have numIVs + numIterArgs + numIns arguments.
+  unsigned numIns = getIns().size();
+  unsigned numIterArgs = reductionDims.size();
+  unsigned expectedArgs = numInductionVars + numIterArgs + numIns;
+  if (bodyBlock.getNumArguments() != expectedArgs)
+    return emitOpError("body block has ")
+           << bodyBlock.getNumArguments() << " argument(s) but expects "
+           << expectedArgs << " (numIVs=" << numInductionVars
+           << " + numIns=" << numIns << " + numIterArgs=" << numIterArgs << ")";
+
+  // Each iter arg block arg type must match the corresponding init_vals type.
+  for (auto [i, initVal] : llvm::enumerate(initVals)) {
+    BlockArgument iterArg = bodyBlock.getArgument(numInductionVars + i);
+    if (iterArg.getType() != initVal.getType())
+      return emitOpError("body iter arg ")
+             << i << " has type " << iterArg.getType() << " but init_vals[" << i
+             << "] has type " << initVal.getType();
   }
-  for (auto [i, block] : llvm::enumerate(combiners.getBlocks())) {
-    Type resultTy = getResultTypes()[i];
-    if (block.getNumArguments() != 2 ||
-        block.getArgument(0).getType() != resultTy ||
-        block.getArgument(1).getType() != resultTy) {
-      return emitOpError("combiner block ")
-             << i << " expects two arguments of type " << resultTy;
-    }
+
+  // ttc.yield leading values must match iter arg types.
+  // The body may have multiple blocks after SCF-to-CF lowering (e.g. a K-loop
+  // inside the body). Scan all blocks to find the unique ttc.yield.
+  cpu::YieldOp yieldOp;
+  for (Block &block : body) {
+    auto y = dyn_cast<cpu::YieldOp>(block.getTerminator());
+    if (!y)
+      continue;
+    if (yieldOp)
+      return emitOpError("body region must have exactly one ttc.yield");
+    yieldOp = y;
+  }
+  if (!yieldOp)
+    return emitOpError("body region must contain a ttc.yield terminator");
+  if (yieldOp.getValues().size() < numIterArgs)
+    return emitOpError("ttc.yield must return at least ")
+           << numIterArgs << " value(s) for iter args, got "
+           << yieldOp.getValues().size();
+  for (unsigned i = 0; i < numIterArgs; ++i) {
+    Type yieldTy = yieldOp.getValues()[i].getType();
+    Type iterArgTy = bodyBlock.getArgument(numInductionVars + i).getType();
+    if (yieldTy != iterArgTy)
+      return emitOpError("ttc.yield value ")
+             << i << " has type " << yieldTy << " but iter arg " << i
+             << " expects type " << iterArgTy;
   }
 
   return success();

@@ -17,11 +17,11 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
         %x_3 = tt.addptr %x, %offsets_1 : tensor<512x!tt.ptr<f32>, #blocked>, tensor<512xi32, #blocked>
 
         // CHECK-COUNT-128: ttc.masked_load {{.*}} -> vector<4xf32>
-        ttc.generic (%x_3) blocks [%c512_i32 : i32] attributes {tileShape = array<i32: 4>} body {
+        ttc.generic (%x_3) blocks [%c512_i32 : i32] attributes {tileShape = array<i32: 4>, reductionDims = array<i32>} body {
             ^bb0(%offset:i32, %arg0: tensor<4x!tt.ptr<f32>, #blocked>):
                 %x_10 = tt.load %arg0 : tensor<4x!tt.ptr<f32>, #blocked>
                 ttc.yield
-        } combiners {}: (tensor<512x!tt.ptr<f32>, #blocked>) -> ()
+        }: (tensor<512x!tt.ptr<f32>, #blocked>) -> ()
         tt.return
     }
 }
@@ -32,7 +32,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shared = 0 : i32, ttg.target = "cpu", "ttg.threads-per-warp" = 1 : i32} {
     tt.func public @load_scalar(%x_ptr: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
         %c1024_i32 = arith.constant 1024 : i32
-        ttc.generic (%x_ptr) blocks [%c1024_i32 : i32] attributes {tileShape = array<i32: 4>} body {
+        ttc.generic (%x_ptr) blocks [%c1024_i32 : i32] attributes {tileShape = array<i32: 4>, reductionDims = array<i32>} body {
             ^bb0(%tileOffset: i32, %ptr: !tt.ptr<f32>):
                 %offsets = ttc.make_dynamic_range %tileOffset : tensor<4xi32, #blocked>
                 %ptrs = tt.splat %ptr : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>, #blocked>
@@ -46,7 +46,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
                 // CHECK: ttc.masked_load {{.*}} -> vector<4xf32>
                 %ret = tt.load %offset_ptrs : tensor<4x!tt.ptr<f32>, #blocked>
                 ttc.yield
-        } combiners {}: (!tt.ptr<f32>) -> ()
+        }: (!tt.ptr<f32>) -> ()
 
         tt.return
     }
@@ -70,7 +70,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
     %c4_i32 = arith.constant 4 : i32
     %c8_i32 = arith.constant 8 : i32
     ttc.generic (%data, %c_ptr, %stride_cm, %M, %N, %offs_am, %offs_bn) blocks
-        [%c4_i32, %c8_i32 : i32, i32] attributes {tileShape = array<i32: 1, 8>} body {
+        [%c4_i32, %c8_i32 : i32, i32] attributes {tileShape = array<i32: 1, 8>, reductionDims = array<i32>} body {
     ^bb0(%tile_m: i32, %tile_n: i32,
          %tile_data: tensor<1x8xf16, #blocked>,
          %ptr: !tt.ptr<f16>, %stride: i32, %m_bound: i32, %n_bound: i32,
@@ -116,7 +116,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
 
       tt.store %ptrs, %tile_data, %mask : tensor<1x8x!tt.ptr<f16>, #blocked>
       ttc.yield
-    } combiners {} : (tensor<4x8xf16, #blocked>, !tt.ptr<f16>, i32, i32, i32, i32, i32) -> ()
+    } : (tensor<4x8xf16, #blocked>, !tt.ptr<f16>, i32, i32, i32, i32, i32) -> ()
 
     tt.return
   }
