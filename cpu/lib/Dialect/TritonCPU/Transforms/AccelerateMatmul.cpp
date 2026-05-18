@@ -221,12 +221,14 @@ public:
     }
 
     // rewrite existing loop body before merging into the new loop
-    rewriter.setInsertionPointToStart(forOp.getBody());
+    rewriter.setInsertionPointToStart(newFor.getBody());
 
     // rewrite each dot operand to feed from the for loop induction variable by
     // computing the add ptr value directly
-    Value kIV = forOp.getInductionVar();
+    Value kIV = newFor.getInductionVar();
 
+    IRMapping mapping;
+    mapping.map(kIV, newFor.getInductionVar());
     auto rewriteAddPtrForOperand = [&](Value operand, BlockArgument iterArg,
                                        triton::AddPtrOp addPtr) {
       Value initValue = forOp.getInitArgs()[iterArg.getArgNumber() -
@@ -241,7 +243,8 @@ public:
           arith::MulIOp::create(rewriter, offset.getLoc(), kSplat, offset);
       auto newAddPtr = triton::AddPtrOp::create(
           rewriter, addPtr.getLoc(), initValue.getType(), initValue, newOffset);
-      rewriter.replaceAllUsesWith(iterArg, newAddPtr.getResult());
+      // rewriter.replaceAllUsesWith(iterArg, newAddPtr.getResult());
+      mapping.map(iterArg, newAddPtr.getResult());
     };
 
     rewriteAddPtrForOperand(dotOp.getA(), aMatchResult->first,
@@ -249,15 +252,19 @@ public:
     rewriteAddPtrForOperand(dotOp.getB(), bMatchResult->first,
                             bMatchResult->second);
 
-    rewriter.mergeBlocks(forOp.getBody(), newFor.getBody(),
-                         newForRegionArgValues);
-
-    auto oldYield = cast<scf::YieldOp>(newFor.getBody()->getTerminator());
-    rewriter.replaceOpWithNewOp<scf::YieldOp>(oldYield, ValueRange{d});
+    for (auto &op : forOp.getBody()->without_terminator()) {
+      if (&op == aMatchResult->second.getOperation() ||
+          &op == bMatchResult->second.getOperation())
+        continue; // already rewritten
+      rewriter.clone(op, mapping);
+    }
+  
+    // auto oldYield = cast<scf::YieldOp>(newFor.getBody()->getTerminator());
+    scf::YieldOp::create(rewriter, newFor.getLoc(), ValueRange{d});
 
     for (auto [i, result] : llvm::enumerate(forOp.getResults())) {
       if (i == c.getArgNumber() - forOp.getNumInductionVars()) {
-        result.replaceAllUsesWith(newFor.getResult(0));
+        rewriter.replaceAllUsesWith(result, newFor.getResult(0));
       } else {
         if (!result.use_empty()) {
           llvm_unreachable(
@@ -265,7 +272,7 @@ public:
         }
       }
     }
-    rewriter.eraseOp(forOp);
+    // rewriter.eraseOp(forOp);
     return success();
   }
 };
