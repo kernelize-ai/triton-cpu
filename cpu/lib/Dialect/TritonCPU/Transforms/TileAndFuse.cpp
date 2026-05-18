@@ -1222,6 +1222,9 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     // step must be 1
     if (!matchPattern(forOp.getStep(), m_One()))
       return std::nullopt;
+    // loop must be from 0 to numKTiles
+    if (!matchPattern(forOp.getLowerBound(), m_Zero()))
+      return std::nullopt;
 
     auto numIterArgs = forOp.getNumRegionIterArgs();
     if (numIterArgs != 1)
@@ -1241,6 +1244,13 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     }
     if (!genericOp)
       return std::nullopt;
+
+    // for safety, we can relax these later
+    if (!genericOp.getBody().hasOneBlock())
+      return std::nullopt;
+    if (genericOp.getNumResults() != 1)
+      return std::nullopt; // generic must have exactly 1 result (the dot op
+                           // result - should we verify that?)
 
     // ensure the sole loop carried iter arg is the dot op accumulator
     triton::DotOp dotOp;
@@ -1274,6 +1284,126 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
 
     auto [genericOp, dotOp] = *targetGenericOp;
     llvm::errs() << "candidate for op: " << forOp << "\n";
+
+    // 1. partition inputs, drop existing for loop inputs
+    Value kIV = forOp.getInductionVar();
+    Value acc = forOp.getRegionIterArg(0);
+    Block &oldBody = genericOp.getBody().front();
+    // insArgOffset is the index of the first ins body arg: skips the tile IV
+    // args (one per tileShape dim) and any initVal args.
+    unsigned insArgOffset = genericOp.getInsArgOffset();
+
+    SmallVector<unsigned> kIVBodyArgPositions;
+    unsigned accBodyArgPos = 0;
+    bool foundAcc = false;
+
+    struct KeptInsEntry {
+      unsigned oldBodyArgPos;
+      Value value;
+      SmallVector<int32_t>
+          tileShape; // tiled shape of the body arg; {} for scalars
+    };
+    SmallVector<KeptInsEntry> keptIns;
+
+    for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+      unsigned bodyArgPos = insArgOffset + i;
+      if (operand == kIV) {
+        kIVBodyArgPositions.push_back(bodyArgPos);
+      } else if (operand == acc) {
+        accBodyArgPos = bodyArgPos;
+        foundAcc = true;
+      } else {
+        SmallVector<int32_t> shape;
+        if (auto tensorTy = dyn_cast<RankedTensorType>(
+                oldBody.getArgument(bodyArgPos).getType()))
+          shape = SmallVector<int32_t>(tensorTy.getShape().begin(),
+                                       tensorTy.getShape().end());
+        keptIns.push_back({bodyArgPos, operand, shape});
+      }
+    }
+
+    // sanity: we must have found both the acc and at least one kIV entry
+    if (!foundAcc || kIVBodyArgPositions.empty())
+      return failure();
+
+    // 2. Build new blockShape and tileShape using the A operand to get the K
+    // block size
+    auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
+    gpu::BlockedEncodingAttr aOperandEncoding =
+        dyn_cast<gpu::BlockedEncodingAttr>(aOperandType.getEncoding());
+    if (!aOperandEncoding) {
+      auto aDotOperandEncoding =
+          cast<gpu::DotOperandEncodingAttr>(aOperandType.getEncoding());
+      aOperandEncoding =
+          cast<gpu::BlockedEncodingAttr>(aDotOperandEncoding.getParent());
+    }
+
+    auto [blockShape, tileShape] =
+        getBlockAndTileShapes(aOperandType, aOperandEncoding);
+    int32_t kTileShape =
+        blockShape[1]; // use the block shape as the kTile shape. The k block
+                       // shape is the runtime value of K (the for loop upper
+                       // bound)
+
+    rewriter.setInsertionPoint(forOp);
+    auto kSizeLoc = forOp.getUpperBound().getLoc();
+    Value kTileConst = arith::ConstantOp::create(
+        rewriter, kSizeLoc, rewriter.getI32IntegerAttr(kTileShape));
+    Value kSize = arith::MulIOp::create(rewriter, kSizeLoc,
+                                        forOp.getUpperBound(), kTileConst);
+
+    SmallVector<Value> newBlockShapes = {kSize, genericOp.getBlockShape()[0],
+                                         genericOp.getBlockShape()[1]};
+    SmallVector<int32_t> newTileShapes = {
+        kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
+
+    // 3. Build new TiledInput list
+    SmallVector<TiledInput> newTiledIns;
+    for (auto &entry : keptIns)
+      newTiledIns.push_back({entry.value, entry.tileShape});
+    auto newInsValues = llvm::map_to_vector(
+        newTiledIns, [](const TiledInput &ti) { return ti.value; });
+
+    // 4. create the new generic op and generic body
+    auto newGeneric = cpu::GenericOp::create(
+        rewriter, genericOp.getLoc(), forOp.getResultTypes(),
+        /*initVals=*/ValueRange{acc}, newInsValues, newBlockShapes,
+        newTileShapes,
+        /*reductionDims=*/{0});
+
+    IRMapping mapping;
+    Block *newBody = initGenericBody(rewriter, newGeneric, newTiledIns,
+                                     newTileShapes, mapping);
+
+    llvm::errs() << "new generic = " << newGeneric << "\n";
+
+    // 5. wire up body arg mappings
+    // Generic tile loop IVs
+    for (unsigned i = 0; i < genericOp.getNumInductionVars(); i++)
+      mapping.map(oldBody.getArgument(i), newBody->getArgument(i + 1));
+
+    // old acc body arg -> new acc tile iter arg
+    mapping.map(oldBody.getArgument(accBodyArgPos), newGeneric.getIterArg(0));
+
+    // K loop IV
+    for (auto pos : kIVBodyArgPositions)
+      mapping.map(oldBody.getArgument(pos), newBody->getArgument(0));
+
+    // 6. clone body ops
+    rewriter.setInsertionPointToStart(newBody);
+    for (Operation &op : oldBody.without_terminator())
+      rewriter.clone(op, mapping);
+    auto oldYield = cast<cpu::YieldOp>(oldBody.getTerminator());
+    cpu::YieldOp::create(rewriter, oldYield.getLoc(),
+                         mapping.lookup(oldYield.getValues()[0]));
+
+    llvm::errs() << "new generic with cloned body: " << newGeneric << "\n";
+
+    // 7. replace old op
+    rewriter.replaceAllUsesWith(forOp.getResults(), newGeneric.getResults());
+    rewriter.eraseOp(forOp);
+#if 0
+
 
     auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
     gpu::BlockedEncodingAttr aOperandEncoding =
@@ -1327,10 +1457,10 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     Block &genericBody = genericOp.getBody().front();
 
     IRMapping mapping;
+#endif
+    // assert(false && "todo");
 
-    assert(false && "todo");
-
-    return failure();
+    return success();
   }
 };
 
