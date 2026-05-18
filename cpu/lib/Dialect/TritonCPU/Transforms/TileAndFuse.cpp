@@ -944,7 +944,7 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
-  std::optional<cpu::GenericOp> findTargetGenericOp(scf::ForOp forOp) const {
+  static std::optional<cpu::GenericOp> findTargetGenericOp(scf::ForOp forOp) {
     // (1) For loop must have iter args — excludes persistent block-dispatch
     // loops which have no iter args.
     if (forOp.getNumRegionIterArgs() == 0)
@@ -1213,6 +1213,127 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
   }
 };
 
+struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  static std::optional<std::pair<cpu::GenericOp, triton::DotOp>>
+  findTargetGenericOp(scf::ForOp forOp) {
+
+    // step must be 1
+    if (!matchPattern(forOp.getStep(), m_One()))
+      return std::nullopt;
+
+    auto numIterArgs = forOp.getNumRegionIterArgs();
+    if (numIterArgs != 1)
+      return std::nullopt;
+
+    // body must contain exactly 1 generic op and a scf.yield
+    cpu::GenericOp genericOp;
+    for (auto &op : forOp.getBody()->without_terminator()) {
+      if (auto bodyGenericOp = dyn_cast<cpu::GenericOp>(op)) {
+        if (genericOp) {
+          return std::nullopt; // >1 generic
+        }
+        genericOp = bodyGenericOp;
+      } else {
+        return std::nullopt; // unexpected op in for body
+      }
+    }
+    if (!genericOp)
+      return std::nullopt;
+
+    // ensure the sole loop carried iter arg is the dot op accumulator
+    triton::DotOp dotOp;
+    BlockArgument accArg = forOp.getRegionIterArg(0);
+    for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+      if (operand == accArg) {
+        BlockArgument genericBodyArg = genericOp.getIterArg(i);
+        for (auto user : genericBodyArg.getUsers()) {
+          if (auto crtDotOp = dyn_cast<triton::DotOp>(user)) {
+            dotOp = crtDotOp;
+            if (genericBodyArg != dotOp.getC())
+              return std::nullopt; // loop carried iter arg is not the
+                                   // accumulator
+          }
+        }
+      }
+    }
+    if (!dotOp)
+      return std::nullopt;
+
+    return std::make_pair(genericOp, dotOp);
+  }
+
+  LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+
+    auto targetGenericOp = findTargetGenericOp(forOp);
+    if (!targetGenericOp)
+      return failure();
+
+    auto [genericOp, dotOp] = *targetGenericOp;
+    llvm::errs() << "candidate for op: " << forOp << "\n";
+
+    auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
+    gpu::BlockedEncodingAttr aOperandEncoding =
+        dyn_cast<gpu::BlockedEncodingAttr>(aOperandType.getEncoding());
+    if (!aOperandEncoding) {
+      auto aDotOperandEncoding =
+          cast<gpu::DotOperandEncodingAttr>(aOperandType.getEncoding());
+      aOperandEncoding =
+          cast<gpu::BlockedEncodingAttr>(aDotOperandEncoding.getParent());
+    }
+
+    auto [blockShape, tileShape] =
+        getBlockAndTileShapes(aOperandType, aOperandEncoding);
+    int32_t kTileShape =
+        blockShape[1]; // use the block shape as the kTile shape. The k block
+                       // shape is the runtime value of K (the for loop upper
+                       // bound)
+    llvm::errs() << "m, k block shape: ";
+    for (auto s : blockShape)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\nm, k tile shape: ";
+    for (auto s : tileShape)
+      llvm::errs() << s << " ";
+    llvm::errs() << "\n";
+
+    // 1. compute the K tiling information and re-create the generic to support
+    // tiling over the K dimension. The new generic will be [K, M, N] tiled
+    rewriter.setInsertionPoint(forOp);
+    auto kSizeLoc = forOp.getUpperBound().getLoc();
+    Value kTileConst = arith::ConstantOp::create(
+        rewriter, kSizeLoc, rewriter.getI32IntegerAttr(kTileShape));
+    Value kSize = arith::MulIOp::create(rewriter, kSizeLoc,
+                                        forOp.getUpperBound(), kTileConst);
+
+    SmallVector<Value> newBlockShapes = {kSize, genericOp.getBlockShape()[0],
+                                         genericOp.getBlockShape()[1]};
+    SmallVector<int32_t> newTileShapes = {
+        kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
+
+    SmallVector<Value> initVals =
+        forOp.getInitArgs(); // TODO: likely have to tile the accumulator?
+
+    auto newGeneric = cpu::GenericOp::create(
+        rewriter, genericOp.getLoc(), genericOp.getResultTypes(), initVals,
+        genericOp.getIns(), newBlockShapes, newTileShapes,
+        /*reductionDims=*/{0});
+    llvm::errs() << "created new generic: " << newGeneric << "\n";
+
+    // 2. clone the old generic body into the new generic. we need to take care to map the induction variable and loop carried dependency, as well as update the K dimension of any tiled operands to use the new tile shape
+
+    Block &genericBody = genericOp.getBody().front();
+
+    IRMapping mapping;
+
+    assert(false && "todo");
+
+    return failure();
+  }
+};
+
 } // namespace
 
 struct TritonCPUTileAndFusePass
@@ -1247,6 +1368,7 @@ struct TritonCPUTileAndFusePass
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
 
+    fusePatterns.add<TileKLoop>(context, benefitDefault + 10);
     fusePatterns.add<FuseParentForOpIntoGeneric>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
