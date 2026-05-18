@@ -198,6 +198,7 @@ public:
     // checked below)
 
     // create a new scf.for with only the accumulator iter arg
+    rewriter.setInsertionPoint(forOp);
     auto newFor = scf::ForOp::create(
         rewriter, forOp.getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
         forOp.getStep(),
@@ -228,7 +229,8 @@ public:
     Value kIV = newFor.getInductionVar();
 
     IRMapping mapping;
-    mapping.map(kIV, newFor.getInductionVar());
+    mapping.map(forOp.getInductionVar(), kIV);
+    mapping.map(c, newFor.getRegionIterArg(0));
     auto rewriteAddPtrForOperand = [&](Value operand, BlockArgument iterArg,
                                        triton::AddPtrOp addPtr) {
       Value initValue = forOp.getInitArgs()[iterArg.getArgNumber() -
@@ -258,9 +260,9 @@ public:
         continue; // already rewritten
       rewriter.clone(op, mapping);
     }
-  
-    // auto oldYield = cast<scf::YieldOp>(newFor.getBody()->getTerminator());
-    scf::YieldOp::create(rewriter, newFor.getLoc(), ValueRange{d});
+
+    scf::YieldOp::create(rewriter, newFor.getLoc(),
+                         ValueRange{mapping.lookup(d)});
 
     for (auto [i, result] : llvm::enumerate(forOp.getResults())) {
       if (i == c.getArgNumber() - forOp.getNumInductionVars()) {
@@ -272,7 +274,7 @@ public:
         }
       }
     }
-    // rewriter.eraseOp(forOp);
+    rewriter.eraseOp(forOp);
     return success();
   }
 };
