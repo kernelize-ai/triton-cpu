@@ -158,7 +158,7 @@ struct TiledInput {
 // of the block. Init values for iter args come first, then ins args. Returns
 // the new block.
 static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
-                              ArrayRef<TiledInput> ins,
+                              ArrayRef<TiledInput> ins, ArrayRef<Type> iterArgs,
                               ArrayRef<int32_t> tileShape, IRMapping &mapping) {
   Block *body = rewriter.createBlock(&generic.getBody());
   for (unsigned i = 0; i < tileShape.size(); i++)
@@ -166,9 +166,9 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                       generic.getLoc()); // tile offset per vector shape dim
 
   // Iter args before ins args — one block arg per reduction dim init val.
-  // TODO: support passing these as parameters so we can tile them
-  for (Value initVal : generic.getInitVals())
-    body->addArgument(initVal.getType(), initVal.getLoc());
+  assert(iterArgs.size() == generic.getInitVals().size());
+  for (auto [i, iterArgType] : llvm::enumerate(iterArgs))
+    body->addArgument(iterArgType, generic.getInitVals()[i].getLoc());
 
   for (auto pair : ins) {
     auto [v, inputTileShape] = pair;
@@ -216,7 +216,7 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
                                insValues, blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
 
     rewriter.clone(*storeOp, bodyMapping);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
@@ -303,7 +303,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
                                /*reductionDims=*/{0});
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {initVals[0].getType()}, tileShape,
+                    bodyMapping);
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
@@ -390,7 +391,7 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
                                           blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
 
     // clone the dot op
     auto *newDot = rewriter.clone(*dotOp, bodyMapping);
@@ -467,7 +468,7 @@ struct WrapConvertLayoutOp
                                insValues, blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
 
     auto newCvt = rewriter.clone(*cvtOp, bodyMapping);
     newCvt->getResult(0).setType(updateTensorType(dstTy, tileShape));
@@ -1284,7 +1285,6 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
       return failure();
 
     auto [genericOp, dotOp] = *targetGenericOp;
-    llvm::errs() << "candidate for op: " << forOp << "\n";
 
     // 1. partition inputs, drop existing for loop inputs
     Value kIV = forOp.getInductionVar();
@@ -1357,6 +1357,9 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
                                          genericOp.getBlockShape()[1]};
     SmallVector<int32_t> newTileShapes = {
         kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
+    Type accIterArgType =
+        updateTensorType(dotOp.getC().getType(), {genericOp.getTileShape()[0],
+                                                  genericOp.getTileShape()[1]});
 
     // 3. Build new TiledInput list
     SmallVector<TiledInput> newTiledIns;
@@ -1368,13 +1371,13 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     // 4. create the new generic op and generic body
     auto newGeneric = cpu::GenericOp::create(
         rewriter, genericOp.getLoc(), forOp.getResultTypes(),
-        /*initVals=*/ValueRange{acc}, newInsValues, newBlockShapes,
-        newTileShapes,
+        /*initVals=*/ValueRange{forOp.getInitArgs()[0]}, newInsValues,
+        newBlockShapes, newTileShapes,
         /*reductionDims=*/{0});
 
     IRMapping mapping;
     Block *newBody = initGenericBody(rewriter, newGeneric, newTiledIns,
-                                     newTileShapes, mapping);
+                                     {accIterArgType}, newTileShapes, mapping);
 
     // 5. wire up body arg mappings
     // Generic tile loop IVs
@@ -1401,70 +1404,8 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     cpu::YieldOp::create(rewriter, oldYield.getLoc(),
                          mapping.lookup(oldYield.getValues()[0]));
 
-    llvm::errs() << "new generic with cloned body: " << newGeneric << "\n";
-
     // 7. replace old op
-    // rewriter.replaceAllUsesWith(forOp.getResults(), newGeneric.getResults());
-    // rewriter.eraseOp(forOp);
     rewriter.replaceOp(forOp, newGeneric.getResults());
-#if 0
-
-
-    auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
-    gpu::BlockedEncodingAttr aOperandEncoding =
-        dyn_cast<gpu::BlockedEncodingAttr>(aOperandType.getEncoding());
-    if (!aOperandEncoding) {
-      auto aDotOperandEncoding =
-          cast<gpu::DotOperandEncodingAttr>(aOperandType.getEncoding());
-      aOperandEncoding =
-          cast<gpu::BlockedEncodingAttr>(aDotOperandEncoding.getParent());
-    }
-
-    auto [blockShape, tileShape] =
-        getBlockAndTileShapes(aOperandType, aOperandEncoding);
-    int32_t kTileShape =
-        blockShape[1]; // use the block shape as the kTile shape. The k block
-                       // shape is the runtime value of K (the for loop upper
-                       // bound)
-    llvm::errs() << "m, k block shape: ";
-    for (auto s : blockShape)
-      llvm::errs() << s << " ";
-    llvm::errs() << "\nm, k tile shape: ";
-    for (auto s : tileShape)
-      llvm::errs() << s << " ";
-    llvm::errs() << "\n";
-
-    // 1. compute the K tiling information and re-create the generic to support
-    // tiling over the K dimension. The new generic will be [K, M, N] tiled
-    rewriter.setInsertionPoint(forOp);
-    auto kSizeLoc = forOp.getUpperBound().getLoc();
-    Value kTileConst = arith::ConstantOp::create(
-        rewriter, kSizeLoc, rewriter.getI32IntegerAttr(kTileShape));
-    Value kSize = arith::MulIOp::create(rewriter, kSizeLoc,
-                                        forOp.getUpperBound(), kTileConst);
-
-    SmallVector<Value> newBlockShapes = {kSize, genericOp.getBlockShape()[0],
-                                         genericOp.getBlockShape()[1]};
-    SmallVector<int32_t> newTileShapes = {
-        kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
-
-    SmallVector<Value> initVals =
-        forOp.getInitArgs(); // TODO: likely have to tile the accumulator?
-
-    auto newGeneric = cpu::GenericOp::create(
-        rewriter, genericOp.getLoc(), genericOp.getResultTypes(), initVals,
-        genericOp.getIns(), newBlockShapes, newTileShapes,
-        /*reductionDims=*/{0});
-    llvm::errs() << "created new generic: " << newGeneric << "\n";
-
-    // 2. clone the old generic body into the new generic. we need to take care to map the induction variable and loop carried dependency, as well as update the K dimension of any tiled operands to use the new tile shape
-
-    Block &genericBody = genericOp.getBody().front();
-
-    IRMapping mapping;
-#endif
-    // assert(false && "todo");
-
     return success();
   }
 };
