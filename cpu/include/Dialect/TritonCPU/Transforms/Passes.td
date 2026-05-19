@@ -8,10 +8,26 @@ def TritonCPUAccelerateMatmul : Pass<"tritoncpu-accelerate-matmul", "mlir::Modul
 
   let description = [{
     Optimize the input/output layout of `dot` instruction to make them compatible hardware accelerators
-    (e.g., Nvidia tensor cores)
+    (e.g., Nvidia tensor cores).
+
+    Optionally rewrites block layout for improved memory access patterns
+    (`optimize-block-layout`), and canonicalizes K-loop pointer iter args into
+    direct per-iteration computations to enable K-loop fusion (`canonicalize-k-loop`).
   }];
 
-  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+  let options = [
+    Option<"optimizeBlockLayout", "optimize-block-layout", "bool",
+           /*default=*/"false",
+           "Rewrite tensor block layouts for improved memory access patterns">,
+    Option<"canonicalizeKLoop", "canonicalize-k-loop", "bool",
+           /*default=*/"false",
+           "Canonicalize K-loop pointer iter args to direct per-iteration "
+           "addptr(init, iv * step) computations, enabling K-loop fusion">,
+  ];
+
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::triton::gpu::TritonGPUDialect",
                            "mlir::triton::TritonDialect"];
 }
 
