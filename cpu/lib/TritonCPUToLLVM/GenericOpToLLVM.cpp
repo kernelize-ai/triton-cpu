@@ -453,6 +453,69 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     iterArgVals.assign(finalCarried.begin(), finalCarried.end());
   }
 
+  struct ArgInfo {
+    enum class Kind { IV, IterArg, Ins };
+    Kind kind;
+    Type tritonType;
+    Type llvmType;
+
+    Value bufferPtr;       // only for global memory backed args
+    unsigned numElems = 0; // only for global memory backed args
+  };
+
+  SmallVector<ArgInfo>
+  buildArgInfos(cpu::GenericOp op, OpAdaptor adaptor,
+                ArrayRef<int32_t> tileShape,
+                ConversionPatternRewriter &rewriter) const {
+    SmallVector<ArgInfo> args;
+
+    // handle loop induction vars first
+    for (unsigned i = 0; i < tileShape.size(); i++) {
+      args.emplace_back(
+          ArgInfo{ArgInfo::Kind::IV, nullptr, i32_ty, Value(), 0});
+    }
+
+    for (unsigned i = 0; i < op.getNumIterArgs(); i++) {
+      Type tritonType = op.getIterArg(i).getType();
+      assert(!isa<RankedTensorType>(tritonType) &&
+             "tensor type iter args not yet supported");
+      Type llvmType = getTypeConverter()->convertType(tritonType);
+
+      // TODO: create alloca backed buffers corresponding to init arg and copy
+      // init arg in if we have a tensor type.
+      args.emplace_back(
+          ArgInfo{ArgInfo::Kind::IterArg, tritonType, llvmType, Value(), 0});
+    }
+
+    Block *body = &op.getBody().front();
+    const auto &ins = op.getIns();
+
+    for (auto [i, origArg, llvmArg] :
+         llvm::enumerate(body->getArguments().drop_front(op.getInsArgOffset()),
+                         adaptor.getIns())) {
+      ArgInfo argInfo;
+      argInfo.kind = ArgInfo::Kind::Ins;
+
+      argInfo.tritonType = origArg.getType();
+      Value ptrArg = getGenericOutputTensorAsPtr(op, i, llvmArg);
+      if (ptrArg) {
+        auto allocationTensorTy = cast<RankedTensorType>(ins[i].getType());
+        int64_t numElems =
+            std::accumulate(allocationTensorTy.getShape().begin(),
+                            allocationTensorTy.getShape().end(), int64_t{1},
+                            std::multiplies<>());
+        argInfo.bufferPtr = ptrArg;
+        argInfo.numElems = numElems;
+        argInfo.llvmType = getTypeConverter()->convertType(origArg.getType());
+      } else {
+        argInfo.llvmType = llvmArg.getType();
+      }
+      args.push_back(argInfo);
+    }
+
+    return args;
+  }
+
   LogicalResult
   matchAndRewrite(cpu::GenericOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -477,6 +540,16 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     op->print(os, OpPrintingFlags().skipRegions());
     LDBG("Lowering generic op: " << s
                                  << "\n  with vectorSize = " << vectorSize);
+
+    SmallVector<ArgInfo> argInfos =
+        buildArgInfos(op, adaptor, tileShape, rewriter);
+    for (auto argInfo : argInfos) {
+      LDBG("ArgInfo: kind = " << static_cast<int>(argInfo.kind)
+                              << ", tritonType = " << argInfo.tritonType
+                              << ", llvmType = " << argInfo.llvmType
+                              << ", bufferPtr = " << argInfo.bufferPtr
+                              << ", numElems = " << argInfo.numElems);
+    }
 
     // Tensor results are materialized as thread-local global arrays rather than
     // LLVM vectors. This avoids loop-carried <blockSize x elemTy> phi nodes
