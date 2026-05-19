@@ -1399,11 +1399,11 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     Value kElemOffset = newBody->getArgument(0);
     Value kTileIdxConst = arith::ConstantOp::create(
         rewriter, forOp.getLoc(), rewriter.getI32IntegerAttr(kTileShape));
-    Value kTileIdx =
-        arith::DivSIOp::create(rewriter, forOp.getLoc(), kElemOffset, kTileIdxConst);
+    Value kTileIdx = arith::DivSIOp::create(rewriter, forOp.getLoc(),
+                                            kElemOffset, kTileIdxConst);
     for (auto pos : kIVBodyArgPositions)
       mapping.map(oldBody.getArgument(pos), kTileIdx);
-      
+
     for (Operation &op : oldBody.without_terminator())
       rewriter.clone(op, mapping);
     auto oldYield = cast<cpu::YieldOp>(oldBody.getTerminator());
