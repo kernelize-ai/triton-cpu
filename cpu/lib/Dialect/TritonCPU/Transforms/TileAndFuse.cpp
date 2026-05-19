@@ -1392,12 +1392,18 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
       mapping.map(oldBody.getArgument(entry.oldBodyArgPos),
                   newBody->getArgument(newGeneric.getInsArgOffset() + newPos));
 
-    // K loop IV
-    for (auto pos : kIVBodyArgPositions)
-      mapping.map(oldBody.getArgument(pos), newBody->getArgument(0));
-
     // 6. clone body ops
     rewriter.setInsertionPointToStart(newBody);
+
+    // convert loop kIV from global idx to tile idx
+    Value kElemOffset = newBody->getArgument(0);
+    Value kTileIdxConst = arith::ConstantOp::create(
+        rewriter, forOp.getLoc(), rewriter.getI32IntegerAttr(kTileShape));
+    Value kTileIdx =
+        arith::DivSIOp::create(rewriter, forOp.getLoc(), kElemOffset, kTileIdxConst);
+    for (auto pos : kIVBodyArgPositions)
+      mapping.map(oldBody.getArgument(pos), kTileIdx);
+      
     for (Operation &op : oldBody.without_terminator())
       rewriter.clone(op, mapping);
     auto oldYield = cast<cpu::YieldOp>(oldBody.getTerminator());
