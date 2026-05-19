@@ -166,6 +166,7 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                       generic.getLoc()); // tile offset per vector shape dim
 
   // Iter args before ins args — one block arg per reduction dim init val.
+  // TODO: support passing these as parameters so we can tile them
   for (Value initVal : generic.getInitVals())
     body->addArgument(initVal.getType(), initVal.getLoc());
 
@@ -1375,8 +1376,6 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     Block *newBody = initGenericBody(rewriter, newGeneric, newTiledIns,
                                      newTileShapes, mapping);
 
-    llvm::errs() << "new generic = " << newGeneric << "\n";
-
     // 5. wire up body arg mappings
     // Generic tile loop IVs
     for (unsigned i = 0; i < genericOp.getNumInductionVars(); i++)
@@ -1384,6 +1383,11 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
 
     // old acc body arg -> new acc tile iter arg
     mapping.map(oldBody.getArgument(accBodyArgPos), newGeneric.getIterArg(0));
+
+    // other kept body args -> new body args
+    for (auto [newPos, entry] : llvm::enumerate(keptIns))
+      mapping.map(oldBody.getArgument(entry.oldBodyArgPos),
+                  newBody->getArgument(newGeneric.getInsArgOffset() + newPos));
 
     // K loop IV
     for (auto pos : kIVBodyArgPositions)
@@ -1400,8 +1404,9 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     llvm::errs() << "new generic with cloned body: " << newGeneric << "\n";
 
     // 7. replace old op
-    rewriter.replaceAllUsesWith(forOp.getResults(), newGeneric.getResults());
-    rewriter.eraseOp(forOp);
+    // rewriter.replaceAllUsesWith(forOp.getResults(), newGeneric.getResults());
+    // rewriter.eraseOp(forOp);
+    rewriter.replaceOp(forOp, newGeneric.getResults());
 #if 0
 
 
