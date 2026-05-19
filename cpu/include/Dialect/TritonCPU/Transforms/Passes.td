@@ -25,7 +25,9 @@ def TritonCPUAccelerateMatmul : Pass<"tritoncpu-accelerate-matmul", "mlir::Modul
            "addptr(init, iv * step) computations, enabling K-loop fusion">,
   ];
 
-  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::triton::gpu::TritonGPUDialect",
                            "mlir::triton::TritonDialect"];
 }
 

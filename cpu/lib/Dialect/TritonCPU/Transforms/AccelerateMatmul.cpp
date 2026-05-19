@@ -205,22 +205,6 @@ public:
         ValueRange{forOp.getInitArgs()[c.getArgNumber() -
                                        forOp.getNumInductionVars()]});
 
-    SmallVector<Value> newForRegionArgValues;
-    newForRegionArgValues.push_back(newFor.getInductionVar());
-    for (auto arg : forOp.getRegionIterArgs()) {
-      if (arg == c) {
-        newForRegionArgValues.push_back(newFor.getRegionIterArg(0));
-      } else {
-        // if not a ptr arg fail
-        if (!llvm::is_contained({aMatchResult->first, bMatchResult->first},
-                                arg))
-          return failure();
-        // arg replacement will not be used (uses already cleared by
-        // replaceAllUsesWith)
-        newForRegionArgValues.push_back(newFor.getInductionVar());
-      }
-    }
-
     // rewrite existing loop body before merging into the new loop
     rewriter.setInsertionPointToStart(newFor.getBody());
 
@@ -231,8 +215,7 @@ public:
     IRMapping mapping;
     mapping.map(forOp.getInductionVar(), kIV);
     mapping.map(c, newFor.getRegionIterArg(0));
-    auto rewriteAddPtrForOperand = [&](Value operand, BlockArgument iterArg,
-                                       triton::AddPtrOp addPtr) {
+    auto rewriteAddPtr = [&](BlockArgument iterArg, triton::AddPtrOp addPtr) {
       Value initValue = forOp.getInitArgs()[iterArg.getArgNumber() -
                                             forOp.getNumInductionVars()];
 
@@ -249,10 +232,8 @@ public:
       mapping.map(iterArg, newAddPtr.getResult());
     };
 
-    rewriteAddPtrForOperand(dotOp.getA(), aMatchResult->first,
-                            aMatchResult->second);
-    rewriteAddPtrForOperand(dotOp.getB(), bMatchResult->first,
-                            bMatchResult->second);
+    rewriteAddPtr(aMatchResult->first, aMatchResult->second);
+    rewriteAddPtr(bMatchResult->first, bMatchResult->second);
 
     for (auto &op : forOp.getBody()->without_terminator()) {
       if (&op == aMatchResult->second.getOperation() ||
