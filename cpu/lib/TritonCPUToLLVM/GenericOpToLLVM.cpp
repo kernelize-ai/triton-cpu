@@ -31,9 +31,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto defGeneric = dyn_cast<cpu::GenericOp>(result.getOwner());
     if (!defGeneric)
       return {};
-    // TODO: overly defensive?
-    if (result.getResultNumber() < defGeneric.getNumIterArgs())
-      return {};
 
     assert(isa<LLVM::LLVMStructType>(llvmArg.getType()) &&
            "expected tensor value adaptor type to be a struct type");
@@ -360,6 +357,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                        unsigned vectorSize, SmallVectorImpl<Value> &iterArgVals,
                        ArrayRef<Value> tensorAccPtrs,
                        ArrayRef<Type> tensorElemTys,
+                       ArrayRef<Value> iterArgPtrs,
+                       ArrayRef<Type> iterArgElemTys,
                        Block *innerAfterBlock = nullptr) const {
     Location loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -387,10 +386,55 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       bodyEntry = rewriter.applySignatureConversion(bodyEntry, sigConv,
                                                     getTypeConverter());
 
+      Value accOffset;
+      auto reductionDims = op.getReductionDims();
+      for (auto [idx, blockDim] : llvm::enumerate(blockShape)) {
+        if (llvm::is_contained(reductionDims, idx)) {
+          continue;
+        }
+        if (accOffset)
+          accOffset = b.add(accOffset, b.mul(blockDim, accOffsets[idx]));
+        else
+          accOffset = accOffsets[idx];
+      }
+
       // entryArgs: [IVs..., iterArgs..., insArgs...]
+      DenseMap<unsigned, unsigned> iterArgIdxNumElements;
       SmallVector<Value> entryArgs(accOffsets.begin(), accOffsets.end());
-      for (auto arg : iterArgVals)
-        LDBG("iterArgVals: " << arg);
+      for (auto [idx, arg] : llvm::enumerate(iterArgVals)) {
+        LDBG("iterArgVals initial: [" << idx << "] " << arg);
+        // need to replace the iterArgVals here with the loaded tile struct from
+        // iter arg ptrs
+        if (auto tensorTy = dyn_cast<RankedTensorType>(arg.getType())) {
+          auto iterArgPtr = iterArgPtrs[idx];
+          Type iterArgElemTy = iterArgElemTys[idx];
+          llvm::errs() << "Loading iter arg " << idx << " from ptr "
+                       << iterArgPtr << " with elem type " << iterArgElemTy
+                       << "\n";
+
+          Type tileStructTy = getTypeConverter()->convertType(arg.getType());
+          auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
+          Type elemTy = structTy.getBody()[0];
+          Value tileStruct = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
+          unsigned numElementsInTile = std::accumulate(
+              tensorTy.getShape().begin(), tensorTy.getShape().end(),
+              int64_t{1}, std::multiplies<int64_t>());
+          iterArgIdxNumElements[idx] = numElementsInTile;
+          for (unsigned j = 0; j < numElementsInTile; ++j) {
+            Value globalIdx =
+                LLVM::AddOp::create(rewriter, loc, accOffset, b.i32_val(j));
+            Value gep = LLVM::GEPOp::create(
+                rewriter, loc,
+                LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
+                iterArgPtr, ValueRange{globalIdx});
+            Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
+            tileStruct = LLVM::InsertValueOp::create(rewriter, loc, tileStruct,
+                                                     elem, {j});
+          }
+          iterArgVals[idx] = tileStruct;
+        }
+      }
+
       entryArgs.append(iterArgVals.begin(), iterArgVals.end());
       for (auto arg : tileArgs)
         LDBG("tileArgs: " << arg);
@@ -415,6 +459,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                      yieldOp.getValues().end());
         scatterTiles(rewriter, loc, loopTiles, flatElemOffset, vectorSize,
                      tensorAccPtrs, tensorElemTys);
+        for (unsigned i = 0; i < numIterArgs; ++i) {
+          if (auto tensorTy =
+                  dyn_cast<RankedTensorType>(iterArgVals[i].getType())) {
+            scatterTiles(rewriter, loc, {iterArgVals[i]}, accOffset,
+                         iterArgIdxNumElements.lookup(i), iterArgPtrs[i],
+                         iterArgElemTys[i]);
+          }
+        }
 
         rewriter.eraseOp(yieldOp);
         rewriter.setInsertionPointToEnd(&block);
@@ -445,7 +497,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                               currentCarried.end());
           emitNestedLoops(op, adaptor, rewriter, dim + 1, accOffsets, newFlat,
                           blockShape, tileShape, vectorSize, innerIterArgVals,
-                          tensorAccPtrs, tensorElemTys, afterBlock);
+                          tensorAccPtrs, tensorElemTys, iterArgPtrs,
+                          iterArgElemTys, afterBlock);
           accOffsets.pop_back();
           return innerIterArgVals;
         });
@@ -522,26 +575,59 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       return globalPtr;
     };
 
-    // TODO: we need separate arrays to track these, which is annoying. let's
-    // add them now but consider a broader struct or class based refactor here?
+    // Iter arg values start from init_vals and are updated tile-by-tile.
+    SmallVector<Value> iterArgVals(adaptor.getInitVals().begin(),
+                                   adaptor.getInitVals().end());
+
+    SmallVector<Value> iterArgPtrs;
+    SmallVector<Type> iterArgElemTys;
     for (auto [i, initVal] : llvm::enumerate(op.getInitVals())) {
       if (auto tensorTy = dyn_cast<RankedTensorType>(initVal.getType())) {
-        llvm::errs() << "tensorTy = " << tensorTy << "\n";
+
         auto iterArg = op.getIterArg(i);
-        llvm::errs() << "iterArg = " << iterArg << "\n";
-        assert(false && "TODO");
+        iterArgVals[i] =
+            iterArg; // replace the iter arg value with the block argument for
+                     // the iter arg, mainly to keep struct types apropriate for
+                     // the block scaled iter arg type. this seems wrong and
+                     // should be looked at again later.
+        assert(isa<RankedTensorType>(iterArg.getType()) &&
+               "expected iter arg to have ranked tensor type matching init val "
+               "ranked tensor type");
+
+        Type elemTy =
+            getTypeConverter()->convertType(tensorTy.getElementType());
+        iterArgElemTys.push_back(elemTy);
+
+        int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
+                                              tensorTy.getShape().end(),
+                                              int64_t{1}, std::multiplies<>());
+        Value globalPtr = allocateScratchBuffer(tensorElems, elemTy);
+        iterArgPtrs.push_back(globalPtr);
+
+        auto b = TritonLLVMOpBuilder(loc, rewriter);
+        Value convertedInitVal = adaptor.getInitVals()[i];
+
+        // copy all elements of the init tensor into the global array
+        for (int64_t idx = 0; idx < tensorElems; ++idx) {
+          Value flatIdx = b.i32_val(idx);
+          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
+                            elemTy, globalPtr, ValueRange{flatIdx});
+          Value elem = b.load(elemTy, gep);
+          Value initElem = b.extract_val(convertedInitVal, idx);
+          b.store(initElem, gep);
+        }
       }
     }
 
     for (Type resultTy :
          llvm::drop_begin(op.getResultTypes(), op.getNumIterArgs())) {
       auto tensorTy = cast<RankedTensorType>(resultTy);
-      int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
-                                            tensorTy.getShape().end(),
-                                            int64_t{1}, std::multiplies<>());
       Type elemTy = getTypeConverter()->convertType(tensorTy.getElementType());
       tensorElemTys.push_back(elemTy);
 
+      int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
+                                            tensorTy.getShape().end(),
+                                            int64_t{1}, std::multiplies<>());
       Value globalPtr = allocateScratchBuffer(tensorElems, elemTy);
       tensorAccPtrs.push_back(globalPtr);
     }
@@ -564,10 +650,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                          return false;
                        return true;
                      });
-
-    // Iter arg values start from init_vals and are updated tile-by-tile.
-    SmallVector<Value> iterArgVals(adaptor.getInitVals().begin(),
-                                   adaptor.getInitVals().end());
 
     int numChunks = -1;
     SmallVector<int32_t> blockShape;
@@ -594,6 +676,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     if (requiresTensorArgMaterialization || numChunks == 1) {
       assert(numChunks > 0 && "expected numChunks to be positive when required "
                               "or statically computable");
+      assert(iterArgPtrs.empty() &&
+             "iter arg ptrs not yet supported in unrolling path");
       emitUnrolled(op, adaptor, rewriter, numChunks, vectorSize, blockShape,
                    tileShape, iterArgVals, tensorAccPtrs, tensorElemTys);
     } else {
@@ -615,13 +699,21 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                         op.getBlockShape().end());
       emitNestedLoops(op, adaptor, rewriter, /*dim=*/0, accOffsets,
                       b.i32_val(0), blockShapeVals, tileShape, vectorSize,
-                      iterArgVals, tensorAccPtrs, tensorElemTys);
+                      iterArgVals, tensorAccPtrs, tensorElemTys, iterArgPtrs,
+                      iterArgElemTys);
     }
 
     // Collect all replacement values atomically. Mixing replaceAllUsesWith +
     // eraseOp in a ConversionPatternRewriter causes double-replacement
     // assertions in the framework; a single replaceOp call avoids that.
     unsigned numIterArgs = op.getNumIterArgs();
+    for (unsigned i = 0; i < numIterArgs; i++) {
+      if (auto tensorTy =
+              dyn_cast<RankedTensorType>(iterArgVals[i].getType())) {
+        // copy final iter arg values from global arrays back into tensors
+        iterArgVals[i] = iterArgPtrs[i];
+      }
+    }
     SmallVector<Value> allReplacements(iterArgVals.begin(), iterArgVals.end());
     allReplacements.append(tensorAccPtrs);
     if (allReplacements.empty())
