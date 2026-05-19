@@ -471,6 +471,12 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       vectorSize *= tileShape[d];
     }
 
+    // TODO: put this into extraClassDefinitions?
+    std::string s;
+    llvm::raw_string_ostream os(s);
+    op->print(os, OpPrintingFlags().skipRegions());
+    LDBG("Lowering generic op: " << s);
+
     // Tensor results are materialized as thread-local global arrays rather than
     // LLVM vectors. This avoids loop-carried <blockSize x elemTy> phi nodes
     // which would allocate tens of kilobytes on the stack and cause stack
@@ -488,21 +494,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     assert(func && "expected generic op to be inside an LLVM function");
     auto module = op->getParentOfType<ModuleOp>();
     assert(module && "expected generic op to be inside a module");
-    for (Type resultTy :
-         llvm::drop_begin(op.getResultTypes(), op.getNumIterArgs())) {
-      auto tensorTy = cast<RankedTensorType>(resultTy);
-      int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
-                                            tensorTy.getShape().end(),
-                                            int64_t{1}, std::multiplies<>());
-      Type elemTy = getTypeConverter()->convertType(tensorTy.getElementType());
-      tensorElemTys.push_back(elemTy);
 
-      auto globalArrayTy = LLVM::LLVMArrayType::get(elemTy, tensorElems);
+    auto allocateScratchBuffer = [&](int64_t numElems, Type elemTy) -> Value {
+      auto globalArrayTy = LLVM::LLVMArrayType::get(elemTy, numElems);
       std::string globalName;
       unsigned nameIdx = tensorAccPtrs.size();
       do {
         globalName =
-            (func.getName() + "_tac_" + std::to_string(nameIdx++)).str();
+            (func.getName() + "_scratch_" + std::to_string(nameIdx++)).str();
       } while (module.lookupSymbol(globalName));
       {
         OpBuilder::InsertionGuard guard(rewriter);
@@ -516,10 +515,34 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(&func.getBody().front());
       LDBG("Creating thread local global allocation `"
-           << globalName << "` for tensor of size " << tensorElems);
+           << globalName << "` for scratch buffer of size " << numElems);
       Value globalPtr = LLVM::AddressOfOp::create(
           rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
           globalName);
+      return globalPtr;
+    };
+
+    // TODO: we need separate arrays to track these, which is annoying. let's
+    // add them now but consider a broader struct or class based refactor here?
+    for (auto [i, initVal] : llvm::enumerate(op.getInitVals())) {
+      if (auto tensorTy = dyn_cast<RankedTensorType>(initVal.getType())) {
+        llvm::errs() << "tensorTy = " << tensorTy << "\n";
+        auto iterArg = op.getIterArg(i);
+        llvm::errs() << "iterArg = " << iterArg << "\n";
+        assert(false && "TODO");
+      }
+    }
+
+    for (Type resultTy :
+         llvm::drop_begin(op.getResultTypes(), op.getNumIterArgs())) {
+      auto tensorTy = cast<RankedTensorType>(resultTy);
+      int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
+                                            tensorTy.getShape().end(),
+                                            int64_t{1}, std::multiplies<>());
+      Type elemTy = getTypeConverter()->convertType(tensorTy.getElementType());
+      tensorElemTys.push_back(elemTy);
+
+      Value globalPtr = allocateScratchBuffer(tensorElems, elemTy);
       tensorAccPtrs.push_back(globalPtr);
     }
 
