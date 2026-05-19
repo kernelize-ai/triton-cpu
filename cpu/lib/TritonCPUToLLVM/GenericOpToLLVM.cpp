@@ -555,7 +555,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     int numChunks = -1;
     SmallVector<int32_t> blockShape;
-    for (Value dim : op.getBlockShape()) {
+    for (auto [i, dim] : llvm::enumerate(op.getBlockShape())) {
       APInt val;
       if (!matchPattern(dim, m_ConstantInt(&val))) {
         numChunks = -1;
@@ -564,9 +564,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       int64_t dimSize = val.getSExtValue();
       blockShape.push_back(static_cast<int32_t>(dimSize));
       if (numChunks == -1) {
-        numChunks = dimSize;
+        numChunks = dimSize / tileShape[i];
       } else {
-        numChunks *= dimSize;
+        numChunks *= (dimSize / tileShape[i]);
       }
     }
     if (requiresTensorArgMaterialization && numChunks < 0) {
