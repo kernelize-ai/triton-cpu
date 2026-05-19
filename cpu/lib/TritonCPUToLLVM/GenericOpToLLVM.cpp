@@ -300,8 +300,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     // afterBlock receives the final carried values
     SmallVector<Type> carriedTys;
-    for (Value v : initCarried)
+    for (Value v : initCarried) {
+      if (isa<RankedTensorType>(v.getType()))
+        continue; // skip tensor valued init args
       carriedTys.push_back(v.getType());
+    }
     for (Type ty : carriedTys)
       afterBlock->addArgument(ty, loc);
 
@@ -449,23 +452,31 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           continue;
 
         rewriter.setInsertionPoint(yieldOp);
-        // extract new iter arg values from the leading yield operands
-        iterArgVals.clear();
-        for (unsigned i = 0; i < numIterArgs; ++i)
-          iterArgVals.push_back(yieldOp.getValues()[i]);
 
         // scatter non-iter-arg tensor tiles
         SmallVector<Value> loopTiles(yieldOp.getValues().begin() + numIterArgs,
                                      yieldOp.getValues().end());
         scatterTiles(rewriter, loc, loopTiles, flatElemOffset, vectorSize,
                      tensorAccPtrs, tensorElemTys);
+
+        SetVector<unsigned> tensorIterArgs;
         for (unsigned i = 0; i < numIterArgs; ++i) {
-          if (auto tensorTy =
-                  dyn_cast<RankedTensorType>(iterArgVals[i].getType())) {
+          if (isa<LLVM::LLVMStructType>(iterArgVals[i].getType())) {
             scatterTiles(rewriter, loc, {iterArgVals[i]}, accOffset,
                          iterArgIdxNumElements.lookup(i), iterArgPtrs[i],
                          iterArgElemTys[i]);
+            tensorIterArgs.insert(i);
           }
+        }
+
+        // extract new iter arg values from the leading yield operands
+        for (unsigned i = 0; i < numIterArgs; ++i) {
+          if (tensorIterArgs.contains(i)) {
+            // this iter arg is a tensor tile that we already scattered, so we
+            // don't need to extract and update iterArgVals for it
+            continue;
+          }
+          iterArgVals[i] = yieldOp.getValues()[i];
         }
 
         rewriter.eraseOp(yieldOp);
@@ -585,14 +596,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       if (auto tensorTy = dyn_cast<RankedTensorType>(initVal.getType())) {
 
         auto iterArg = op.getIterArg(i);
-        iterArgVals[i] =
-            iterArg; // replace the iter arg value with the block argument for
-                     // the iter arg, mainly to keep struct types apropriate for
-                     // the block scaled iter arg type. this seems wrong and
-                     // should be looked at again later.
         assert(isa<RankedTensorType>(iterArg.getType()) &&
                "expected iter arg to have ranked tensor type matching init val "
                "ranked tensor type");
+        iterArgVals[i] = iterArg;
 
         Type elemTy =
             getTypeConverter()->convertType(tensorTy.getElementType());
