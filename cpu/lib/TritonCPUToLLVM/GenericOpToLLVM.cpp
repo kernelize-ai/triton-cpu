@@ -117,6 +117,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     Kind kind;
     Type tritonType;
     Type llvmType;
+    Value operand;
 
     Value bufferPtr;       // only for global memory backed args
     unsigned numElems = 0; // only for global memory backed args
@@ -146,6 +147,68 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     void updateFlatOffset(ConversionPatternRewriter &rewriter, Value inc) {
       auto b = TritonLLVMOpBuilder(flatOffset.getLoc(), rewriter);
       flatOffset = b.add(flatOffset, inc);
+    }
+
+    SmallVector<Value>
+    getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
+                         unsigned vectorSize,
+                         SmallVectorImpl<Value> &iterArgVals) {
+      // start with IVs
+      SmallVector<Value> blockArgs = {tileOffsets.begin(), tileOffsets.end()};
+
+      // Add iter args -- TODO: remove from function arg and hold this state in
+      // the class
+      blockArgs.append(iterArgVals.begin(), iterArgVals.end());
+
+      // Add ins args
+      for (const auto &argInfo : args) {
+        if (argInfo.kind == ArgInfo::Kind::Ins) {
+          Location loc = argInfo.operand.getLoc();
+
+          if (argInfo.bufferPtr) {
+            // load this tiles elements from the global buffer
+            auto tileStructTy = cast<LLVM::LLVMStructType>(argInfo.llvmType);
+            Type elemTy = tileStructTy.getBody()[0];
+            Value tileStruct =
+                LLVM::UndefOp::create(rewriter, loc, tileStructTy);
+            // TODO: should this be vectorSize?
+            auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+            for (unsigned j = 0; j < vectorSize; ++j) {
+              Value globalIdx =
+                  LLVM::AddOp::create(rewriter, loc, flatOffset, b.i32_val(j));
+              Value gep = LLVM::GEPOp::create(
+                  rewriter, loc,
+                  LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
+                  argInfo.bufferPtr, ValueRange{globalIdx});
+              Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
+              tileStruct = LLVM::InsertValueOp::create(rewriter, loc,
+                                                       tileStruct, elem, {j});
+            }
+            blockArgs.push_back(tileStruct);
+          } else if (isa<PointerType>(argInfo.tritonType)) {
+            // we might have a tt.ptr hiding in an unrealized conversion cast
+            // due to late conversion of generic op block arguments. Use
+            // unrealized conversion cast which will be folded away later
+            if (argInfo.tritonType != argInfo.llvmType) {
+              blockArgs.push_back(
+                  UnrealizedConversionCastOp::create(
+                      rewriter, loc, argInfo.llvmType, argInfo.operand)
+                      .getResult(0));
+            } else {
+              blockArgs.push_back(argInfo.operand);
+            }
+          } else {
+            assert(!isa<RankedTensorType>(argInfo.tritonType));
+            assert(argInfo.tritonType == argInfo.llvmType &&
+                   "expected non-tensor arguments to be unchanged by type "
+                   "conversion");
+            blockArgs.push_back(argInfo.operand);
+          }
+        }
+      }
+
+      return blockArgs;
     }
 
     // TODO: delete me
@@ -193,6 +256,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       argInfo.kind = ArgInfo::Kind::Ins;
 
       argInfo.tritonType = origArg.getType();
+      argInfo.operand = op.getIns()[i];
       Value ptrArg = getGenericOutputTensorAsPtr(op, i, llvmArg);
       if (ptrArg) {
         auto allocationTensorTy = cast<RankedTensorType>(ins[i].getType());
@@ -277,66 +341,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         LLVM::StoreOp::create(rewriter, loc, elem, gep);
       }
     }
-  }
-
-  // Builds tile args for a dynamic tile at runtime offset tileOffset.
-  // Mirrors buildStaticChunkedArgs but uses a runtime Value for the offset
-  // instead of a compile-time index. Only valid for temporary storage backed
-  // tensor args and non-tensor args — statically-indexed tensor args must use
-  // the unrolled path.
-  SmallVector<Value>
-  buildDynamicChunkedArgs(cpu::GenericOp op, OpAdaptor adaptor,
-                          ConversionPatternRewriter &rewriter, Value tileOffset,
-                          unsigned vectorSize) const {
-    Location loc = op.getLoc();
-    Block *body = &op.getBody().front();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    SmallVector<Value> tileArgs;
-
-    for (auto [opIdx, origArg, llvmArg] :
-         llvm::enumerate(body->getArguments().drop_front(op.getInsArgOffset()),
-                         adaptor.getIns())) {
-      if (Value ptrArg = getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
-        // Load this tile's elements from the alloca produced by the prior
-        // generic and pack them into the tile struct.
-        Type tileStructTy = getTypeConverter()->convertType(origArg.getType());
-        auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
-        Type elemTy = structTy.getBody()[0];
-        Value tileStruct = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
-        for (unsigned j = 0; j < vectorSize; ++j) {
-          Value globalIdx =
-              LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
-          Value gep = LLVM::GEPOp::create(
-              rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-              elemTy, ptrArg, ValueRange{globalIdx});
-          Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
-          tileStruct =
-              LLVM::InsertValueOp::create(rewriter, loc, tileStruct, elem, {j});
-        }
-        tileArgs.push_back(tileStruct);
-      } else if (isa<PointerType>(origArg.getType())) {
-        // we might have a tt.ptr hiding in an unrealized conversion cast due to
-        // late conversion of generic op block arguments. Use unrealized
-        // conversion cast which will be folded away later
-        if (origArg.getType() != llvmArg.getType()) {
-          tileArgs.push_back(
-              UnrealizedConversionCastOp::create(
-                  rewriter, loc, llvmArg.getType(), op.getIns()[opIdx])
-                  .getResult(0));
-        } else {
-          tileArgs.push_back(op.getIns()[opIdx]);
-        }
-      } else {
-        assert(!isa<RankedTensorType>(origArg.getType()) &&
-               "tensor types are not allowed in compile-time generated "
-               "generic tile loops");
-        assert(origArg.getType() == llvmArg.getType() &&
-               "expected non-tensor arguments to be unchanged by type "
-               "conversion");
-        tileArgs.push_back(op.getIns()[opIdx]);
-      }
-    }
-    return tileArgs;
   }
 
   // statically unroll all tiles. Required when any tensor input uses
@@ -474,8 +478,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       Block *bodyEntry = &bodyRegion.front();
 
       // build tile args before inlining (references block arguments)
-      auto tileArgs = buildDynamicChunkedArgs(
-          op, adaptor, rewriter, helper.getFlatOffset(), vectorSize);
+      auto entryArgs =
+          helper.getLoopBodyBlockArgs(rewriter, vectorSize, iterArgVals);
 
       rewriter.inlineRegionBefore(bodyRegion, *innerAfterBlock->getParent(),
                                   innerAfterBlock->getIterator());
@@ -486,14 +490,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       bodyEntry = rewriter.applySignatureConversion(bodyEntry, sigConv,
                                                     getTypeConverter());
 
-      // entryArgs: [IVs..., iterArgs..., insArgs...]
-      SmallVector<Value> entryArgs = helper.getEntryArgs();
-      for (auto arg : iterArgVals)
-        LDBG("iterArgVals: " << arg);
-      entryArgs.append(iterArgVals.begin(), iterArgVals.end());
-      for (auto arg : tileArgs)
-        LDBG("tileArgs: " << arg);
-      entryArgs.append(tileArgs.begin(), tileArgs.end());
       LLVM::BrOp::create(rewriter, loc, entryArgs, bodyEntry);
 
       unsigned numIterArgs = op.getNumIterArgs();
