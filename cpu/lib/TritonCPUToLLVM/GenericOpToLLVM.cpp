@@ -211,16 +211,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       flatOffset = b.add(flatOffset, inc);
     }
 
-    SmallVector<Value>
-    getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
-                         unsigned vectorSize,
-                         SmallVectorImpl<Value> &iterArgVals) {
+    SmallVector<Value> getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
+                                            unsigned vectorSize) {
       // start with IVs
       SmallVector<Value> blockArgs = {tileOffsets.begin(), tileOffsets.end()};
 
       // Add iter args -- TODO: remove from function arg and hold this state in
       // the class
-      blockArgs.append(iterArgVals.begin(), iterArgVals.end());
+      blockArgs.append(loopIterArgs.begin(), loopIterArgs.end());
 
       // Add ins args
       for (const auto &argInfo : args) {
@@ -295,6 +293,20 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           b.store(elem, gep);
         }
       }
+    }
+
+    void updateIterArgs(ArrayRef<Value> newIterArgVals) {
+      assert(newIterArgVals.size() == loopIterArgs.size());
+      for (auto [i, newVal] : llvm::enumerate(newIterArgVals))
+        loopIterArgs[i] = newVal;
+    }
+
+    SmallVector<Value> getIterArgVals() const { return loopIterArgs; }
+
+    SmallVector<Value> getResults() const {
+      SmallVector<Value> ret(loopIterArgs.begin(), loopIterArgs.end());
+      ret.append(materializedResults.begin(), materializedResults.end());
+      return ret;
     }
 
     // TODO: delete me
@@ -531,6 +543,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // loop body: emit tile, increment counter, branch back with new carried
     rewriter.setInsertionPointToEnd(loopBody);
     Value tileOffset = b.mul(loopI, b.i32_val(tileSize));
+
     SmallVector<Value> newCarried =
         bodyFn(loopI, tileOffset, currentCarried, afterBlock);
 
@@ -544,15 +557,16 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     SmallVector<Value> finalCarried;
     for (unsigned i = 0; i < carriedTys.size(); ++i)
       finalCarried.push_back(afterBlock->getArgument(i));
+
     return finalCarried;
   }
 
   // Emits nested loops over tiles, threading iter arg values as loop-carried
-  // state. iterArgVals is updated in-place to the final accumulated values.
+  // state.
   void emitNestedLoops(cpu::GenericOp op, OpAdaptor adaptor, LoopHelper &helper,
                        ConversionPatternRewriter &rewriter, unsigned dim,
                        ArrayRef<Value> blockShape, ArrayRef<int32_t> tileShape,
-                       unsigned vectorSize, SmallVectorImpl<Value> &iterArgVals,
+                       unsigned vectorSize,
                        Block *innerAfterBlock = nullptr) const {
     Location loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -568,8 +582,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       Block *bodyEntry = &bodyRegion.front();
 
       // build tile args before inlining (references block arguments)
-      auto entryArgs =
-          helper.getLoopBodyBlockArgs(rewriter, vectorSize, iterArgVals);
+      auto entryArgs = helper.getLoopBodyBlockArgs(rewriter, vectorSize);
 
       rewriter.inlineRegionBefore(bodyRegion, *innerAfterBlock->getParent(),
                                   innerAfterBlock->getIterator());
@@ -591,9 +604,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
         rewriter.setInsertionPoint(yieldOp);
         // extract new iter arg values from the leading yield operands
-        iterArgVals.clear();
-        for (unsigned i = 0; i < numIterArgs; ++i)
-          iterArgVals.push_back(yieldOp.getValues()[i]);
+        SmallVector<Value> newIterArgVals(yieldOp.getValues().begin(),
+                                          yieldOp.getValues().begin() +
+                                              numIterArgs);
+        helper.updateIterArgs(newIterArgVals);
 
         // scatter non-iter-arg tensor tiles
         SmallVector<Value> loopTiles(yieldOp.getValues().begin() + numIterArgs,
@@ -603,7 +617,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
               return getTypeConverter()->convertType(tile.getType());
             });
         helper.scatterResults(rewriter, loopTiles, resultTypes, vectorSize);
-
 
         rewriter.eraseOp(yieldOp);
         rewriter.setInsertionPointToEnd(&block);
@@ -622,7 +635,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           b.mul(innerStride, b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
 
     auto finalCarried = emitSingleLoop(
-        rewriter, loc, numChunks, tileShape[dim], iterArgVals,
+        rewriter, loc, numChunks, tileShape[dim], helper.getIterArgVals(),
         [&](Value loopI, Value dimTileOffset, ArrayRef<Value> currentCarried,
             Block *afterBlock) -> SmallVector<Value> {
           helper.addTileOffset(dimTileOffset);
@@ -631,13 +644,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
               rewriter, LLVM::MulOp::create(rewriter, loc, loopI, innerStride));
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
+          helper.updateIterArgs(innerIterArgVals);
           emitNestedLoops(op, adaptor, helper, rewriter, dim + 1, blockShape,
-                          tileShape, vectorSize, innerIterArgVals, afterBlock);
+                          tileShape, vectorSize, afterBlock);
           helper.popTileOffset();
-          return innerIterArgVals;
+          return helper.getIterArgVals();
         });
 
-    iterArgVals.assign(finalCarried.begin(), finalCarried.end());
+    helper.updateIterArgs(finalCarried);
   }
 
   LogicalResult
@@ -710,7 +724,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       return failure();
     }
 
-    SmallVector<Value> materializedTensorResults;
+    SmallVector<Value> results;
     if (requiresTensorArgMaterialization || numChunks == 1) {
       assert(numChunks > 0 && "expected numChunks to be positive when required "
                               "or statically computable");
@@ -722,8 +736,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       emitUnrolled(op, adaptor, rewriter, numChunks, vectorSize, blockShape,
                    tileShape, iterArgVals, helper.getTensorAccPtrs(),
                    helper.getTensorElemTys());
-      materializedTensorResults.append(helper.getTensorAccPtrs().begin(),
-                                       helper.getTensorAccPtrs().end());
+      results = helper.getResults();
     } else {
       const bool genericHasTensorOutputs =
           llvm::any_of(op->getResults(), [](Value result) {
@@ -744,18 +757,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
       emitNestedLoops(op, adaptor, helper, rewriter, /*dim=*/0, blockShapeVals,
-                      tileShape, vectorSize, iterArgVals);
-      materializedTensorResults.append(helper.getTensorAccPtrs().begin(),
-                                       helper.getTensorAccPtrs().end());
+                      tileShape, vectorSize);
+      results = helper.getResults();
     }
 
-    SmallVector<Value> allReplacements(iterArgVals.begin(), iterArgVals.end());
-    allReplacements.append(materializedTensorResults.begin(),
-                           materializedTensorResults.end());
-    if (allReplacements.empty())
+    if (results.empty())
       rewriter.eraseOp(op);
     else
-      rewriter.replaceOp(op, allReplacements);
+      rewriter.replaceOp(op, results);
     return success();
   }
 };
