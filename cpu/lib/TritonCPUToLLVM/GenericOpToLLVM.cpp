@@ -394,7 +394,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     unsigned numIterArgs = op.getNumIterArgs();
     SmallVector<Value> newIterArgVals, tensorTiles;
 
-    // clone the body remapping operands. When handling the. yield, track tiles
+    // clone the body remapping operands. When handling the yield, track tiles
     // requiring materialization separately
     for (Operation &bOp : *body) {
       if (auto yieldOp = dyn_cast<cpu::YieldOp>(bOp)) {
@@ -433,7 +433,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     }
 
     for (unsigned i = 0; i < numChunks; ++i) {
-      SmallVector<Value> perDimOffsets(rank);
       unsigned remaining = i;
       LDBG("i = " << i);
       for (int d = rank - 1; d >= 0; --d) {
@@ -446,14 +445,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         remaining /= nc;
       }
 
-      helper.incrementFlatOffset(rewriter, b.i32_val(vectorSize));
-
       // uses the tile offset state above
       SmallVector<Value> chunkedArgs =
           helper.getLoopBodyBlockArgs(rewriter, vectorSize, i);
 
-      Value flatOffset = b.i32_val(i * vectorSize);
-      LDBG("flatOffset = " << (i * vectorSize));
       auto [newIterArgVals, loopTiles] =
           cloneTileBody(op, rewriter, chunkedArgs);
       helper.updateIterArgs(newIterArgVals);
@@ -462,6 +457,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             return getTypeConverter()->convertType(tile.getType());
           });
       helper.scatterResults(rewriter, loopTiles, resultTypes, vectorSize);
+      helper.incrementFlatOffset(rewriter, b.i32_val(vectorSize));
     }
   }
 
