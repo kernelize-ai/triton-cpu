@@ -66,7 +66,20 @@ struct ArgInfo {
   bool requiresMaterialization() const {
     return kind == Kind::Ins && isa<RankedTensorType>(tritonType) && !bufferPtr;
   }
+
+  void print(llvm::raw_ostream &os) const {
+    static constexpr StringRef kindNames[] = {"IV", "IterArg", "Ins"};
+    os << "ArgInfo{kind=" << kindNames[static_cast<int>(kind)]
+       << ", tritonType=" << tritonType << ", llvmType=" << llvmType
+       << ", operand=" << operand << ", bufferPtr=" << bufferPtr
+       << ", numElems=" << numElems << ", convertedArg=" << convertedArg << "}";
+  }
 };
+
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const ArgInfo &a) {
+  a.print(os);
+  return os;
+}
 
 class LoopHelper {
 public:
@@ -643,13 +656,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     SmallVector<ArgInfo> argInfos =
         buildArgInfos(op, adaptor, tileShape, rewriter);
-    for (auto argInfo : argInfos) {
-      LDBG("ArgInfo: kind = " << static_cast<int>(argInfo.kind)
-                              << ", tritonType = " << argInfo.tritonType
-                              << ", llvmType = " << argInfo.llvmType
-                              << ", bufferPtr = " << argInfo.bufferPtr
-                              << ", numElems = " << argInfo.numElems);
-    }
+
+    LLVM_DEBUG({
+      for (auto [i, argInfo] : llvm::enumerate(argInfos)) {
+        DBGS() << "Arg " << i << ": ";
+        argInfo.print(llvm::dbgs());
+        DBGS() << "\n";
+      }
+    });
 
     // Tensor args passed as LLVM structs require static tile indices
     // (llvm.extractvalue only accepts attribute indices). Alloca-backed tensors
