@@ -163,9 +163,10 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, ArrayRef<Value> loopIterArgs,
   }
 }
 
-SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
-    ConversionPatternRewriter &rewriter, unsigned vectorSize,
-    std::optional<unsigned> loopIndex) {
+SmallVector<Value>
+LoopHelper::getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
+                                 unsigned vectorSize,
+                                 std::optional<unsigned> loopIndex) {
   // start with IVs
   SmallVector<Value> blockArgs = {tileOffsets.begin(), tileOffsets.end()};
 
@@ -214,15 +215,11 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
 
         // TODO: should this be vectorSize?
         for (unsigned j = 0; j < vectorSize; ++j) {
-          // TODO: use builder
-          Value globalIdx =
-              LLVM::AddOp::create(rewriter, loc, flatOffset, b.i32_val(j));
-          Value gep = LLVM::GEPOp::create(
-              rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-              elemTy, argInfo.bufferPtr, ValueRange{globalIdx});
-          Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
-          tileStruct =
-              LLVM::InsertValueOp::create(rewriter, loc, tileStruct, elem, {j});
+          Value globalIdx = b.add(flatOffset, b.i32_val(j));
+          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
+                            elemTy, argInfo.bufferPtr, ValueRange{globalIdx});
+          Value elem = b.load(elemTy, gep);
+          tileStruct = b.insert_val(tileStructTy, tileStruct, elem, j);
         }
         blockArgs.push_back(tileStruct);
       } else if (isa<PointerType>(argInfo.tritonType)) {
