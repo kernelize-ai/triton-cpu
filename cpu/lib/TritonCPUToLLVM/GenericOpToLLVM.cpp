@@ -290,8 +290,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   // Returns the final carried values available after the loop.
   SmallVector<Value>
   emitSingleLoop(ConversionPatternRewriter &rewriter, Location loc,
-                 int32_t numChunks, int32_t tileSize,
-                 ArrayRef<Value> initCarried,
+                 Value numChunks, int32_t tileSize, ArrayRef<Value> initCarried,
                  llvm::function_ref<SmallVector<Value>(
                      Value /*loopI*/, Value /*dimTileOffset*/,
                      ArrayRef<Value> /*carried*/, Block * /*afterBlock*/)>
@@ -329,7 +328,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     for (unsigned i = 0; i < carriedTys.size(); ++i)
       currentCarried.push_back(loopHeader->getArgument(1 + i));
     Value cond = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ult,
-                                      loopI, b.i32_val(numChunks));
+                                      loopI, numChunks);
     LLVM::CondBrOp::create(rewriter, loc, cond, loopBody, {}, afterBlock,
                            currentCarried);
 
@@ -357,16 +356,15 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   void emitNestedLoops(cpu::GenericOp op, OpAdaptor adaptor,
                        ConversionPatternRewriter &rewriter, unsigned dim,
                        SmallVectorImpl<Value> &accOffsets, Value flatElemOffset,
-                       ArrayRef<int32_t> blockShape,
-                       ArrayRef<int32_t> tileShape, unsigned vectorSize,
-                       SmallVectorImpl<Value> &iterArgVals,
+                       ArrayRef<Value> blockShape, ArrayRef<int32_t> tileShape,
+                       unsigned vectorSize, SmallVectorImpl<Value> &iterArgVals,
                        ArrayRef<Value> tensorAccPtrs,
                        ArrayRef<Type> tensorElemTys,
                        Block *innerAfterBlock = nullptr) const {
     Location loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-    unsigned rank = blockShape.size();
+    unsigned rank = tileShape.size();
 
     if (dim == rank) {
       // innermost: inline the body region
@@ -427,21 +425,22 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     }
 
     // emit single loop, recurse to next dimension
-    int32_t numChunks = blockShape[dim] / tileShape[dim];
+    Value numChunks = b.sdiv(blockShape[dim], b.i32_val(tileShape[dim]));
 
-    int32_t innerStride = vectorSize;
+    Value innerStride = b.i32_val(vectorSize);
     for (unsigned d = dim + 1; d < rank; ++d)
-      innerStride *= blockShape[d] / tileShape[d];
+      innerStride =
+          b.mul(innerStride, b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
 
     auto finalCarried = emitSingleLoop(
         rewriter, loc, numChunks, tileShape[dim], iterArgVals,
         [&](Value loopI, Value dimTileOffset, ArrayRef<Value> currentCarried,
             Block *afterBlock) -> SmallVector<Value> {
           accOffsets.push_back(dimTileOffset);
-          Value newFlat =
-              LLVM::AddOp::create(rewriter, loc, flatElemOffset,
-                                  LLVM::MulOp::create(rewriter, loc, loopI,
-                                                      b.i32_val(innerStride)));
+          // TODO: use builder?
+          Value newFlat = LLVM::AddOp::create(
+              rewriter, loc, flatElemOffset,
+              LLVM::MulOp::create(rewriter, loc, loopI, innerStride));
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
           emitNestedLoops(op, adaptor, rewriter, dim + 1, accOffsets, newFlat,
@@ -463,25 +462,21 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     assert(tileShapeAttr && "expected generic op to have tileShape attribute");
     ArrayRef<int32_t> tileShape = tileShapeAttr.asArrayRef();
 
-    SmallVector<int32_t> blockShape;
-    for (Value dim : op.getBlockShape()) {
-      APInt val;
-      assert(matchPattern(dim, m_ConstantInt(&val)) &&
-             "expected blockShape operand to fold to a constant integer");
-      blockShape.push_back(static_cast<int32_t>(val.getSExtValue()));
-    }
-
-    assert(!blockShape.empty() && blockShape.size() == tileShape.size() &&
+    assert(!op.getBlockShape().empty() &&
+           op.getBlockShape().size() == tileShape.size() &&
            "blockShape and tileShape must be non-empty and of the same size");
 
-    unsigned vectorSize = 1, numChunks = 1;
-    for (unsigned d = 0; d < blockShape.size(); ++d) {
+    unsigned vectorSize = 1;
+    for (unsigned d = 0; d < tileShape.size(); ++d) {
       vectorSize *= tileShape[d];
-      numChunks *= blockShape[d] / tileShape[d];
     }
 
-    LDBG("Lowering genericOp with vectorSize = "
-         << vectorSize << ", numChunks = " << numChunks);
+    // TODO: put this into extraClassDefinitions?
+    std::string s;
+    llvm::raw_string_ostream os(s);
+    op->print(os, OpPrintingFlags().skipRegions());
+    LDBG("Lowering generic op: " << s
+                                 << "\n  with vectorSize = " << vectorSize);
 
     // Tensor results are materialized as thread-local global arrays rather than
     // LLVM vectors. This avoids loop-carried <blockSize x elemTy> phi nodes
@@ -503,12 +498,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     for (Type resultTy :
          llvm::drop_begin(op.getResultTypes(), op.getNumIterArgs())) {
       auto tensorTy = cast<RankedTensorType>(resultTy);
-      int64_t blockSize = std::accumulate(blockShape.begin(), blockShape.end(),
-                                          int64_t{1}, std::multiplies<>());
+      int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
+                                            tensorTy.getShape().end(),
+                                            int64_t{1}, std::multiplies<>());
       Type elemTy = getTypeConverter()->convertType(tensorTy.getElementType());
       tensorElemTys.push_back(elemTy);
 
-      auto globalArrayTy = LLVM::LLVMArrayType::get(elemTy, blockSize);
+      auto globalArrayTy = LLVM::LLVMArrayType::get(elemTy, tensorElems);
       std::string globalName;
       unsigned nameIdx = tensorAccPtrs.size();
       do {
@@ -527,7 +523,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(&func.getBody().front());
       LDBG("Creating thread local global allocation `"
-           << globalName << "` for tensor of size " << blockSize);
+           << globalName << "` for tensor of size " << tensorElems);
       Value globalPtr = LLVM::AddressOfOp::create(
           rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
           globalName);
@@ -557,7 +553,34 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     SmallVector<Value> iterArgVals(adaptor.getInitVals().begin(),
                                    adaptor.getInitVals().end());
 
+    int numChunks = -1;
+    SmallVector<int32_t> blockShape;
+    for (auto [i, dim] : llvm::enumerate(op.getBlockShape())) {
+      APInt val;
+      if (!matchPattern(dim, m_ConstantInt(&val))) {
+        numChunks = -1;
+        break;
+      }
+      int64_t dimSize = val.getSExtValue();
+      blockShape.push_back(static_cast<int32_t>(dimSize));
+      if (numChunks == -1) {
+        numChunks = dimSize / tileShape[i];
+      } else {
+        numChunks *= (dimSize / tileShape[i]);
+      }
+    }
+    if (requiresTensorArgMaterialization && numChunks < 0) {
+      op.emitError()
+          << "non-constant block shape is not supported when generic op has "
+             "tensor args that require materialization";
+      return failure();
+    }
     if (requiresTensorArgMaterialization || numChunks == 1) {
+      assert(numChunks > 0 && "expected numChunks to be positive when required "
+                              "or statically computable");
+      assert(blockShape.size() == tileShape.size() &&
+             "expected blockShape and tileShape to have "
+             "the same rank");
       emitUnrolled(op, adaptor, rewriter, numChunks, vectorSize, blockShape,
                    tileShape, iterArgVals, tensorAccPtrs, tensorElemTys);
     } else {
@@ -575,8 +598,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                    "generic ops on dynamic path");
       SmallVector<Value> accOffsets;
       auto b = TritonLLVMOpBuilder(loc, rewriter);
+      SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
+                                        op.getBlockShape().end());
       emitNestedLoops(op, adaptor, rewriter, /*dim=*/0, accOffsets,
-                      b.i32_val(0), blockShape, tileShape, vectorSize,
+                      b.i32_val(0), blockShapeVals, tileShape, vectorSize,
                       iterArgVals, tensorAccPtrs, tensorElemTys);
     }
 
