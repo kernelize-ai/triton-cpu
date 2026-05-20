@@ -80,71 +80,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     return castOp.getInputs()[0];
   }
 
-  SmallVector<Value> buildStaticChunkedArgs(cpu::GenericOp op,
-                                            OpAdaptor adaptor,
-                                            ConversionPatternRewriter &rewriter,
-                                            unsigned i,
-                                            unsigned vectorSize) const {
-    Location loc = op.getLoc();
-    Block *body = &op.getBody().front();
-    SmallVector<Value> chunkedArgs;
-
-    for (auto [opIdx, origArg, llvmArg] :
-         llvm::enumerate(body->getArguments().drop_front(op.getInsArgOffset()),
-                         adaptor.getIns())) {
-      LDBG("Chunk operand " << opIdx << " = " << origArg << " --> " << llvmArg);
-      if (!isa<RankedTensorType>(origArg.getType())) {
-        // forward constants and scalars without chunking
-        assert(isa<PointerType>(origArg.getType()) ||
-               origArg.getType() == llvmArg.getType() &&
-                   "expected non-tensor arguments to be unchanged by type "
-                   "conversion");
-        chunkedArgs.push_back(op.getIns()[opIdx]);
-      } else if (Value ptrArg =
-                     getGenericOutputTensorAsPtr(op, opIdx, llvmArg)) {
-        // Load this tile's elements from the alloca produced by the prior
-        // generic, then pack them into the tile struct expected by the body.
-        Type tileStructTy = getTypeConverter()->convertType(origArg.getType());
-        auto structTy = cast<LLVM::LLVMStructType>(tileStructTy);
-        Type elemTy = structTy.getBody()[0];
-        auto b = TritonLLVMOpBuilder(loc, rewriter);
-        Value tileStruct = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
-        for (unsigned j = 0; j < vectorSize; ++j) {
-          Value idx = b.i32_val(i * vectorSize + j);
-          Value gep = LLVM::GEPOp::create(
-              rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-              elemTy, ptrArg, ValueRange{idx});
-          Value elem = LLVM::LoadOp::create(rewriter, loc, elemTy, gep);
-          tileStruct =
-              LLVM::InsertValueOp::create(rewriter, loc, tileStruct, elem, {j});
-        }
-        chunkedArgs.push_back(UnrealizedConversionCastOp::create(
-                                  rewriter, loc, origArg.getType(), tileStruct)
-                                  .getResult(0));
-      } else {
-        Type convertedBodyType =
-            getTypeConverter()->convertType(origArg.getType());
-
-        Value chunk = LLVM::UndefOp::create(rewriter, loc, convertedBodyType);
-
-        for (unsigned j = 0; j < vectorSize; ++j) {
-          int64_t srcIndex = i * vectorSize + j;
-          LDBG("Read " << srcIndex);
-          Value extractedElement =
-              LLVM::ExtractValueOp::create(rewriter, loc, llvmArg, {srcIndex});
-          chunk = LLVM::InsertValueOp::create(rewriter, loc, chunk,
-                                              extractedElement, {j});
-        }
-
-        Value castedChunk = UnrealizedConversionCastOp::create(
-                                rewriter, loc, origArg.getType(), chunk)
-                                .getResult(0);
-        chunkedArgs.push_back(castedChunk);
-      }
-    }
-    return chunkedArgs;
-  }
-
   struct ArgInfo {
     enum class Kind { IV, IterArg, Ins };
 
@@ -350,12 +285,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       return ret;
     }
 
-    // TODO: delete me
-    ArrayRef<Value> getTensorAccPtrs() const { return materializedResults; }
-    ArrayRef<Type> getTensorElemTys() const {
-      return materializedResultElementTypes;
-    }
-
   private:
     SmallVector<ArgInfo> args;
     SmallVector<Value> loopIterArgs;
@@ -434,29 +363,16 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     Block *body = &op.getBody().front();
 
     IRMapping mapping;
-#if 1
     for (auto [bodyArg, newArg] :
          llvm::zip(body->getArguments(), chunkedArgs)) {
       mapping.map(bodyArg, newArg);
     }
-#else
-    // TODO: we should be able to handle all this in build args and just map
-    // body arguments -> args (making sure hte sizes match) IVs
-    for (auto [blockArg, offset] : llvm::zip(
-             body->getArguments().take_front(tileOffsets.size()), tileOffsets))
-      mapping.map(blockArg, offset);
-    // iter args: positions numIVs..numIVs+numIterArgs-1
-    for (auto [i, iterArgVal] : llvm::enumerate(iterArgVals))
-      mapping.map(body->getArgument(op.getNumInductionVars() + i), iterArgVal);
-    // ins args: positions insArgOffset..
-    for (auto [bodyArg, chunkedArg] :
-         llvm::zip(body->getArguments().drop_front(op.getInsArgOffset()),
-                   chunkedArgs))
-      mapping.map(bodyArg, chunkedArg);
-#endif
+
     unsigned numIterArgs = op.getNumIterArgs();
     SmallVector<Value> newIterArgVals, tensorTiles;
 
+    // clone the body remapping operands. When handling the. yield, track tiles
+    // requiring materialization separately
     for (Operation &bOp : *body) {
       if (auto yieldOp = dyn_cast<cpu::YieldOp>(bOp)) {
         if (yieldOp.getValues().empty())
@@ -474,40 +390,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     return {newIterArgVals, tensorTiles};
   }
 
-  void scatterTiles(ConversionPatternRewriter &rewriter, Location loc,
-                    ArrayRef<Value> tiles, Value tileOffset,
-                    unsigned vectorSize, ArrayRef<Value> tensorAccPtrs,
-                    ArrayRef<Type> tensorElemTys) const {
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
-    for (auto [tile, accPtr, elemTy] :
-         llvm::zip(tiles, tensorAccPtrs, tensorElemTys)) {
-      Type tileStructTy = getTypeConverter()->convertType(tile.getType());
-      Value llvmTile =
-          UnrealizedConversionCastOp::create(rewriter, loc, tileStructTy, tile)
-              .getResult(0);
-      for (unsigned j = 0; j < vectorSize; ++j) {
-        Value elem = LLVM::ExtractValueOp::create(rewriter, loc, llvmTile, {j});
-        Value idx =
-            LLVM::AddOp::create(rewriter, loc, tileOffset, b.i32_val(j));
-        Value gep = LLVM::GEPOp::create(
-            rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-            elemTy, accPtr, ValueRange{idx});
-        LLVM::StoreOp::create(rewriter, loc, elem, gep);
-      }
-    }
-  }
-
   // statically unroll all tiles. Required when any tensor input uses
   // llvm.extractvalue (which requires compile-time indices), or when there is
   // only one tile and loop overhead is unnecessary.
-  // iterArgVals is updated in-place to the final accumulated values.
   void emitUnrolled(cpu::GenericOp op, LoopHelper &helper,
                     ConversionPatternRewriter &rewriter, unsigned numChunks,
                     unsigned vectorSize, ArrayRef<int32_t> blockShape,
-                    ArrayRef<int32_t> tileShape,
-                    SmallVectorImpl<Value> &iterArgVals,
-                    ArrayRef<Value> tensorAccPtrs,
-                    ArrayRef<Type> tensorElemTys) const {
+                    ArrayRef<int32_t> tileShape) const {
     Location loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
@@ -521,13 +410,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     }
 
     for (unsigned i = 0; i < numChunks; ++i) {
-#if 1
-
-#else
-      SmallVector<Value> chunkedArgs =
-          buildStaticChunkedArgs(op, adaptor, rewriter, i, vectorSize);
-#endif
-
       SmallVector<Value> perDimOffsets(rank);
       unsigned remaining = i;
       LDBG("i = " << i);
@@ -549,10 +431,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       Value flatOffset = b.i32_val(i * vectorSize);
       LDBG("flatOffset = " << (i * vectorSize));
-      auto [newIterArgVals, tiles] = cloneTileBody(op, rewriter, chunkedArgs);
-      iterArgVals.assign(newIterArgVals.begin(), newIterArgVals.end());
-      scatterTiles(rewriter, loc, tiles, flatOffset, vectorSize, tensorAccPtrs,
-                   tensorElemTys);
+      auto [newIterArgVals, loopTiles] =
+          cloneTileBody(op, rewriter, chunkedArgs);
+      helper.updateIterArgs(newIterArgVals);
+      SmallVector<Type> resultTypes =
+          llvm::map_to_vector(loopTiles, [&](Value tile) {
+            return getTypeConverter()->convertType(tile.getType());
+          });
+      helper.scatterResults(rewriter, loopTiles, resultTypes, vectorSize);
     }
   }
 
@@ -801,8 +687,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       LoopHelper helper(argInfos, iterArgVals, /*flatOffset=*/b.i32_val(0), op,
                         getTypeConverter(), rewriter);
       emitUnrolled(op, helper, rewriter, numChunks, vectorSize, blockShape,
-                   tileShape, iterArgVals, helper.getTensorAccPtrs(),
-                   helper.getTensorElemTys());
+                   tileShape);
       results = helper.getResults();
     } else {
       const bool genericHasTensorOutputs =
