@@ -563,7 +563,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
   // Emits nested loops over tiles, threading iter arg values as loop-carried
   // state.
-  void emitNestedLoops(cpu::GenericOp op, OpAdaptor adaptor, LoopHelper &helper,
+  void emitNestedLoops(cpu::GenericOp op, LoopHelper &helper,
                        ConversionPatternRewriter &rewriter, unsigned dim,
                        ArrayRef<Value> blockShape, ArrayRef<int32_t> tileShape,
                        unsigned vectorSize,
@@ -639,14 +639,16 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         [&](Value loopI, Value dimTileOffset, ArrayRef<Value> currentCarried,
             Block *afterBlock) -> SmallVector<Value> {
           helper.addTileOffset(dimTileOffset);
-          // TODO: use builder?
-          helper.updateFlatOffset(
-              rewriter, LLVM::MulOp::create(rewriter, loc, loopI, innerStride));
+
+          auto bb = TritonLLVMOpBuilder(loc, rewriter);
+          helper.updateFlatOffset(rewriter, bb.mul(loopI, innerStride));
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
+
           helper.updateIterArgs(innerIterArgVals);
-          emitNestedLoops(op, adaptor, helper, rewriter, dim + 1, blockShape,
-                          tileShape, vectorSize, afterBlock);
+          emitNestedLoops(op, helper, rewriter, dim + 1, blockShape, tileShape,
+                          vectorSize, afterBlock);
+
           helper.popTileOffset();
           return helper.getIterArgVals();
         });
@@ -756,7 +758,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                         getTypeConverter(), rewriter);
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
-      emitNestedLoops(op, adaptor, helper, rewriter, /*dim=*/0, blockShapeVals,
+      emitNestedLoops(op, helper, rewriter, /*dim=*/0, blockShapeVals,
                       tileShape, vectorSize);
       results = helper.getResults();
     }
