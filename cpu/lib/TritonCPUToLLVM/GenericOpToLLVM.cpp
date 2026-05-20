@@ -362,7 +362,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         argInfo.numElems = numElems;
         argInfo.llvmType = getTypeConverter()->convertType(origArg.getType());
       } else {
-        argInfo.llvmType = llvmArg.getType();
+        argInfo.llvmType = getTypeConverter()->convertType(origArg.getType());
         if (isa<RankedTensorType>(argInfo.tritonType)) {
           // tensor arguments that aren't backed by an alloca need to store the
           // adaptor value so they can be sliced when inputs to the cloned loop
