@@ -153,11 +153,14 @@ public:
                             llvmStruct.getBody()[j], ptr, ValueRange{idx});
           b.store(elem, gep);
         }
+
+        loopIterArgs[idx] = newIterArgVal;
+      } else {
+        // this will probably be overwritten when we next compute block
+        // arguments, but that's ok -- or is it? do we need to get the next tile
+        // for the iter arg here?
+        loopIterArgs[idx] = newIterArgVals[idx];
       }
-      // this will probably be overwritten when we next compute block arguments,
-      // but that's ok -- or is it? do we need to get the next tile for the iter
-      // arg here?
-      loopIterArgs[idx] = newIterArgVals[idx];
     }
   }
 
@@ -458,8 +461,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       Type tritonType = op.getIterArg(i).getType();
       Type llvmType = getTypeConverter()->convertType(tritonType);
 
-      // TODO: create alloca backed buffers corresponding to init arg and copy
-      // init arg in if we have a tensor type.
       args.emplace_back(ArgInfo(ArgInfo::Kind::IterArg, tritonType, llvmType,
                                 op.getInitVals()[i]));
     }
