@@ -83,8 +83,8 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const ArgInfo &a) {
 
 class LoopHelper {
 public:
-  LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset, cpu::GenericOp generic,
-             const TypeConverter *typeConverter,
+  LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset, Value iterArgOffset,
+             cpu::GenericOp generic, const TypeConverter *typeConverter,
              ConversionPatternRewriter &rewriter);
 
   SmallVector<Value> getEntryArgs() {
@@ -99,6 +99,11 @@ public:
   void incrementFlatOffset(ConversionPatternRewriter &rewriter, Value inc) {
     auto b = TritonLLVMOpBuilder(flatOffset.getLoc(), rewriter);
     flatOffset = b.add(flatOffset, inc);
+  }
+
+  void incrementIterArgOffset(ConversionPatternRewriter &rewriter, Value inc) {
+    auto b = TritonLLVMOpBuilder(flatOffset.getLoc(), rewriter);
+    iterArgOffset = b.add(iterArgOffset, inc);
   }
 
   // build loop body block arguments for the current loop level. Adds
@@ -167,7 +172,7 @@ public:
             for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
               Value elem =
                   b.extract_val(llvmStruct.getBody()[j], castedYieldVal, j);
-              Value idx = b.add(flatOffset, b.i32_val(j));
+              Value idx = b.add(iterArgOffset, b.i32_val(j));
               Value gep =
                   b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
                         arg.bufferPtr, ValueRange{idx});
@@ -262,27 +267,29 @@ public:
     return ret;
   }
 
+  bool isReductionDim(unsigned d) const {
+    return llvm::is_contained(reductionDims, d);
+  }
+
 private:
   SmallVector<ArgInfo> args;
   SmallVector<Value> loopIterArgs;
-
-  SmallVector<Value>
-      tensorIterArgs; // remove? this is being stored in the args list
-
-  // DenseMap<unsigned, unsigned> loopIterArgsToArgInfo;
 
   SmallVector<Value> materializedResults;
   SmallVector<Type> materializedResultElementTypes;
 
   SmallVector<Value> tileOffsets;
   Value flatOffset;
+  Value iterArgOffset;
+  SmallVector<int32_t> reductionDims;
 };
 
 LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset,
-                       cpu::GenericOp generic,
+                       Value iterArgOffset, cpu::GenericOp generic,
                        const TypeConverter *typeConverter,
                        ConversionPatternRewriter &rewriter)
-    : args(args.begin(), args.end()), flatOffset(flatOffset) {
+    : args(args.begin(), args.end()), flatOffset(flatOffset),
+      iterArgOffset(flatOffset), reductionDims(generic.getReductionDims()) {
 
   for (auto [idx, arg] : llvm::enumerate(this->args)) {
     if (arg.kind == ArgInfo::Kind::IterArg) {
@@ -389,7 +396,7 @@ LoopHelper::getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
         auto b = TritonLLVMOpBuilder(arg.operand.getLoc(), rewriter);
 
         for (unsigned j = 0; j < tileStructTy.getBody().size(); ++j) {
-          Value globalIdx = b.add(flatOffset, b.i32_val(j));
+          Value globalIdx = b.add(iterArgOffset, b.i32_val(j));
           Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
                             elemTy, arg.bufferPtr, ValueRange{globalIdx});
           Value elem = b.load(elemTy, gep);
@@ -833,10 +840,27 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // emit single loop, recurse to next dimension
     Value numChunks = b.sdiv(blockShape[dim], b.i32_val(tileShape[dim]));
 
+    // TODO: can we encapsulate this in the loop helper?
     Value innerStride = b.i32_val(vectorSize);
     for (unsigned d = dim + 1; d < rank; ++d)
       innerStride =
           b.mul(innerStride, b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
+    Value innerIterArgStride = b.i32_val(0);
+    if (!helper.isReductionDim(dim)) {
+      unsigned innerArgVectorSize = 1;
+      // TODO: don't recompute this over and over
+      for (unsigned d = 0; d < tileShape.size(); ++d) {
+        if (!helper.isReductionDim(d)) {
+          innerArgVectorSize *= tileShape[d];
+        }
+      }
+      innerIterArgStride = b.i32_val(innerArgVectorSize);
+      for (unsigned d = dim + 1; d < rank; ++d)
+        if (!helper.isReductionDim(d))
+          innerIterArgStride =
+              b.mul(innerIterArgStride,
+                    b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
+    }
 
     auto finalCarried = emitSingleLoop(
         rewriter, loc, numChunks, tileShape[dim], helper.getIterArgVals(),
@@ -846,6 +870,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
           auto bb = TritonLLVMOpBuilder(loc, rewriter);
           helper.incrementFlatOffset(rewriter, bb.mul(loopI, innerStride));
+          helper.incrementIterArgOffset(rewriter,
+                                        bb.mul(loopI, innerIterArgStride));
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
 
@@ -935,8 +961,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
              "expected blockShape and tileShape to have "
              "the same rank");
       auto b = TritonLLVMOpBuilder(loc, rewriter);
-      LoopHelper helper(argInfos, /*flatOffset=*/b.i32_val(0), op,
-                        getTypeConverter(), rewriter);
+      LoopHelper helper(argInfos, /*flatOffset=*/b.i32_val(0),
+                        /*iterArgOffset=*/b.i32_val(0), op, getTypeConverter(),
+                        rewriter);
       emitUnrolled(op, helper, rewriter, numChunks, vectorSize, blockShape,
                    tileShape);
       results = helper.getResults();
@@ -955,8 +982,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                    "generic ops on dynamic path");
 
       auto b = TritonLLVMOpBuilder(loc, rewriter);
-      LoopHelper helper(argInfos, /*flatOffset=*/b.i32_val(0), op,
-                        getTypeConverter(), rewriter);
+      LoopHelper helper(argInfos, /*flatOffset=*/b.i32_val(0),
+                        /*iterArgOffset=*/b.i32_val(0), op, getTypeConverter(),
+                        rewriter);
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
       emitNestedLoops(op, helper, rewriter, /*dim=*/0, blockShapeVals,
