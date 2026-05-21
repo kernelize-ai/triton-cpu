@@ -117,9 +117,52 @@ public:
 
   void updateIterArgs(ConversionPatternRewriter &rewriter,
                       ArrayRef<Value> newIterArgVals) {
-    assert(newIterArgVals.size() == loopIterArgs.size());
-    // TODO: scatter updated iter arg values into global buffers
+#if 1
+    unsigned totalIterArgs = llvm::count_if(args, [](const ArgInfo &a) {
+      return a.kind == ArgInfo::Kind::IterArg;
+    });
+    assert(newIterArgVals.size() == totalIterArgs &&
+           "expected iter arg update size to match total number of iter args");
 
+    unsigned scalarIdx = 0, yieldIdx = 0;
+    for (const auto &arg : args) {
+      if (arg.kind == ArgInfo::Kind::IterArg) {
+        Value yieldVal = newIterArgVals[yieldIdx++];
+        if (arg.bufferPtr) {
+          Location loc = yieldVal.getLoc();
+
+          auto b = TritonLLVMOpBuilder(loc, rewriter);
+          if (isa<RankedTensorType>(yieldVal.getType())) {
+            assert(
+                yieldVal.getDefiningOp() &&
+                "expected triton tensor result iter arg operand to be defined "
+                "by an op");
+            if (auto castedNewIterArgVal = dyn_cast<UnrealizedConversionCastOp>(
+                    yieldVal.getDefiningOp())) {
+              // if the new iter arg val is coming from ttc.yield we need to
+              // extract the llvm type through the unrealized conversion cast
+              // due to the way this pass is layered into the existing llvm
+              // lowering
+              yieldVal = castedNewIterArgVal.getOperand(0);
+            }
+
+            auto llvmStruct = cast<LLVM::LLVMStructType>(yieldVal.getType());
+            for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
+              Value elem = b.extract_val(llvmStruct.getBody()[j], yieldVal, j);
+              Value idx = b.add(flatOffset, b.i32_val(j));
+              Value gep =
+                  b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
+                        arg.bufferPtr, ValueRange{idx});
+              b.store(elem, gep);
+            }
+          }
+        } else {
+          loopIterArgs[scalarIdx++] = yieldVal;
+        }
+      }
+    }
+
+#else
     assert(loopIterArgs.size() == loopIterArgsToArgInfo.size());
     for (auto [idx, argInfoIdx] : loopIterArgsToArgInfo) {
       auto &argInfo = args[argInfoIdx];
@@ -153,15 +196,14 @@ public:
                             llvmStruct.getBody()[j], ptr, ValueRange{idx});
           b.store(elem, gep);
         }
-
-        loopIterArgs[idx] = newIterArgVal;
       } else {
         // this will probably be overwritten when we next compute block
         // arguments, but that's ok -- or is it? do we need to get the next tile
         // for the iter arg here?
-        loopIterArgs[idx] = newIterArgVals[idx];
+        loopIterArgs.push_back(newIterArgVals[idx]);
       }
     }
+#endif
   }
 
   SmallVector<Value> getIterArgVals() const { return loopIterArgs; }
@@ -169,6 +211,21 @@ public:
   SmallVector<Value> getResults() const {
     SmallVector<Value> ret;
 
+#if 1
+    // TODO: push back either iter args or buffer ptrs? or should we reload the
+    // entire buffer ptr into a struct and return that? are downstream users
+    // guarnateed to be generic ops? (in this case they are)
+    unsigned scalarIdx = 0;
+    for (const auto &arg : args) {
+      if (arg.kind == ArgInfo::Kind::IterArg) {
+        if (arg.bufferPtr) {
+          ret.push_back(arg.bufferPtr);
+        } else {
+          ret.push_back(loopIterArgs[scalarIdx++]);
+        }
+      }
+    }
+#else
     for (auto [idx, argInfoIdx] : loopIterArgsToArgInfo) {
       auto &argInfo = args[argInfoIdx];
       if (argInfo.bufferPtr) {
@@ -177,7 +234,7 @@ public:
         ret.push_back(loopIterArgs[idx]);
       }
     }
-
+#endif
     ret.append(materializedResults.begin(), materializedResults.end());
     return ret;
   }
@@ -185,7 +242,11 @@ public:
 private:
   SmallVector<ArgInfo> args;
   SmallVector<Value> loopIterArgs;
-  DenseMap<unsigned, unsigned> loopIterArgsToArgInfo;
+
+  SmallVector<Value>
+      tensorIterArgs; // remove? this is being stored in the args list
+
+  // DenseMap<unsigned, unsigned> loopIterArgsToArgInfo;
 
   SmallVector<Value> materializedResults;
   SmallVector<Type> materializedResultElementTypes;
@@ -231,6 +292,8 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset,
           b.store(elem, gep);
         }
 
+        tensorIterArgs.push_back(globalPtr);
+#if 0
         // now re-load the first tile from the global buffer so the iter arg can
         // be used in the loop body. subsequent tiles are loaded by
         // updateIterArgs
@@ -244,11 +307,12 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset,
           tileStruct = b.insert_val(tileStructTy, tileStruct, elem, j);
         }
         // replace the loop iter arg with the current tile loaded from memory
-        loopIterArgs.push_back(tileStruct);
+        tensorIterArgs.push_back(tileStruct);
+#endif
       } else {
         loopIterArgs.push_back(arg.operand);
       }
-      loopIterArgsToArgInfo[loopIterArgs.size() - 1] = idx;
+      // loopIterArgsToArgInfo[loopIterArgs.size() - 1] = idx;
     }
   }
 
@@ -289,7 +353,30 @@ LoopHelper::getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
 
   // iter args
 #if 1
-  blockArgs.append(loopIterArgs.begin(), loopIterArgs.end());
+  unsigned scalarIdx = 0;
+  for (const auto &arg : args) {
+    if (arg.kind == ArgInfo::Kind::IterArg) {
+      if (arg.bufferPtr) {
+        // load this tiles elements from the global buffer
+        auto tileStructTy = cast<LLVM::LLVMStructType>(arg.llvmType);
+        Type elemTy = tileStructTy.getBody()[0];
+        Value tileStruct =
+            LLVM::UndefOp::create(rewriter, arg.operand.getLoc(), tileStructTy);
+        auto b = TritonLLVMOpBuilder(arg.operand.getLoc(), rewriter);
+
+        for (unsigned j = 0; j < tileStructTy.getBody().size(); ++j) {
+          Value globalIdx = b.add(flatOffset, b.i32_val(j));
+          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
+                            elemTy, arg.bufferPtr, ValueRange{globalIdx});
+          Value elem = b.load(elemTy, gep);
+          tileStruct = b.insert_val(tileStructTy, tileStruct, elem, j);
+        }
+        blockArgs.push_back(tileStruct);
+      } else {
+        blockArgs.push_back(loopIterArgs[scalarIdx++]);
+      }
+    }
+  }
 #else
   assert(loopIterArgs.size() == loopIterArgsToArgInfo.size());
   for (auto [idx, argInfoIdx] : loopIterArgsToArgInfo) {
