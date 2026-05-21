@@ -124,14 +124,23 @@ public:
     assert(newIterArgVals.size() == totalIterArgs &&
            "expected iter arg update size to match total number of iter args");
 
+    loopIterArgs.clear();
+
     unsigned scalarIdx = 0, yieldIdx = 0;
     for (const auto &arg : args) {
       if (arg.kind == ArgInfo::Kind::IterArg) {
         Value yieldVal = newIterArgVals[yieldIdx++];
         if (arg.bufferPtr) {
-          Location loc = yieldVal.getLoc();
+          // buffer ptr inter args may be forwarded from the previous loop
+          // level. only update the tile data for iter args that are the result
+          // of a ttc.yield, which will have triton types
+          if (isa<RankedTensorType>(yieldVal.getType())) {
+            Location loc = yieldVal.getLoc();
 
-          auto b = TritonLLVMOpBuilder(loc, rewriter);
+            auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+#if 0
+          // yield vla is a ptr now, we can drop this entire thing
           if (isa<RankedTensorType>(yieldVal.getType())) {
             assert(
                 yieldVal.getDefiningOp() &&
@@ -144,11 +153,20 @@ public:
               // due to the way this pass is layered into the existing llvm
               // lowering
               yieldVal = castedNewIterArgVal.getOperand(0);
+            } else {
+              llvm_unreachable("expected iter arg with triton type to be "
+                               "result of unrealized converison cast");
             }
+          }
+#endif
 
-            auto llvmStruct = cast<LLVM::LLVMStructType>(yieldVal.getType());
+            auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
+            auto castedYieldVal = UnrealizedConversionCastOp::create(
+                                      rewriter, loc, arg.llvmType, yieldVal)
+                                      .getResult(0);
             for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
-              Value elem = b.extract_val(llvmStruct.getBody()[j], yieldVal, j);
+              Value elem =
+                  b.extract_val(llvmStruct.getBody()[j], castedYieldVal, j);
               Value idx = b.add(flatOffset, b.i32_val(j));
               Value gep =
                   b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
@@ -156,8 +174,9 @@ public:
               b.store(elem, gep);
             }
           }
+          loopIterArgs.push_back(arg.bufferPtr);
         } else {
-          loopIterArgs[scalarIdx++] = yieldVal;
+          loopIterArgs.push_back(yieldVal);
         }
       }
     }
@@ -212,6 +231,9 @@ public:
     SmallVector<Value> ret;
 
 #if 1
+#if 1
+    ret.append(loopIterArgs.begin(), loopIterArgs.end());
+#else
     // TODO: push back either iter args or buffer ptrs? or should we reload the
     // entire buffer ptr into a struct and return that? are downstream users
     // guarnateed to be generic ops? (in this case they are)
@@ -225,6 +247,7 @@ public:
         }
       }
     }
+#endif
 #else
     for (auto [idx, argInfoIdx] : loopIterArgsToArgInfo) {
       auto &argInfo = args[argInfoIdx];
@@ -292,7 +315,7 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset,
           b.store(elem, gep);
         }
 
-        tensorIterArgs.push_back(globalPtr);
+        loopIterArgs.push_back(globalPtr);
 #if 0
         // now re-load the first tile from the global buffer so the iter arg can
         // be used in the loop body. subsequent tiles are loaded by
@@ -356,6 +379,7 @@ LoopHelper::getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
   unsigned scalarIdx = 0;
   for (const auto &arg : args) {
     if (arg.kind == ArgInfo::Kind::IterArg) {
+      unsigned crtIndex = scalarIdx++;
       if (arg.bufferPtr) {
         // load this tiles elements from the global buffer
         auto tileStructTy = cast<LLVM::LLVMStructType>(arg.llvmType);
@@ -373,7 +397,7 @@ LoopHelper::getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
         }
         blockArgs.push_back(tileStruct);
       } else {
-        blockArgs.push_back(loopIterArgs[scalarIdx++]);
+        blockArgs.push_back(loopIterArgs[crtIndex]);
       }
     }
   }
