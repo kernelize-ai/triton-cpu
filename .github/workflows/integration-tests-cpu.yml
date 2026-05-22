@@ -111,7 +111,7 @@ jobs:
         env:
           TRITON_DEFAULT_BACKEND: "cpu"
         run: |
-            TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python ../python/tutorials/02-fused-softmax.py
+            TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python ../python/tutorials/02-fused-softmax.py
             TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python ../python/tutorials/03-matrix-multiplication.py
 
       # Triton tests.
