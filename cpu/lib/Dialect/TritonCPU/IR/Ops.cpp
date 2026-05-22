@@ -55,10 +55,6 @@ LogicalResult GenericOp::verify() {
         return emitOpError("expects blockShape[")
                << i << "] % tileShape[" << i << "] == 0, got " << bv << " vs "
                << tileShape[i];
-    } else {
-      return emitOpError("only constant block shapes are currently supported "
-                         "for verification, got ")
-             << blockShape[i];
     }
   }
 
@@ -108,15 +104,6 @@ LogicalResult GenericOp::verify() {
            << bodyBlock.getNumArguments() << " argument(s) but expects "
            << expectedArgs << " (numIVs=" << numInductionVars
            << " + numIns=" << numIns << " + numIterArgs=" << numIterArgs << ")";
-
-  // Each iter arg block arg type must match the corresponding init_vals type.
-  for (auto [i, initVal] : llvm::enumerate(initVals)) {
-    BlockArgument iterArg = bodyBlock.getArgument(numInductionVars + i);
-    if (iterArg.getType() != initVal.getType())
-      return emitOpError("body iter arg ")
-             << i << " has type " << iterArg.getType() << " but init_vals[" << i
-             << "] has type " << initVal.getType();
-  }
 
   // ttc.yield leading values must match iter arg types.
   // The body may have multiple blocks after SCF-to-CF lowering (e.g. a K-loop

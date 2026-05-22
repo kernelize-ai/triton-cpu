@@ -158,7 +158,7 @@ struct TiledInput {
 // of the block. Init values for iter args come first, then ins args. Returns
 // the new block.
 static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
-                              ArrayRef<TiledInput> ins,
+                              ArrayRef<TiledInput> ins, ArrayRef<Type> iterArgs,
                               ArrayRef<int32_t> tileShape, IRMapping &mapping) {
   Block *body = rewriter.createBlock(&generic.getBody());
   for (unsigned i = 0; i < tileShape.size(); i++)
@@ -166,8 +166,9 @@ static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
                       generic.getLoc()); // tile offset per vector shape dim
 
   // Iter args before ins args — one block arg per reduction dim init val.
-  for (Value initVal : generic.getInitVals())
-    body->addArgument(initVal.getType(), initVal.getLoc());
+  assert(iterArgs.size() == generic.getInitVals().size());
+  for (auto [i, iterArgType] : llvm::enumerate(iterArgs))
+    body->addArgument(iterArgType, generic.getInitVals()[i].getLoc());
 
   for (auto pair : ins) {
     auto [v, inputTileShape] = pair;
@@ -215,7 +216,7 @@ struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
                                insValues, blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
 
     rewriter.clone(*storeOp, bodyMapping);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
@@ -302,7 +303,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
                                /*reductionDims=*/{0});
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {initVals[0].getType()}, tileShape,
+                    bodyMapping);
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
@@ -389,7 +391,7 @@ struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
                                           blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
 
     // clone the dot op
     auto *newDot = rewriter.clone(*dotOp, bodyMapping);
@@ -466,7 +468,7 @@ struct WrapConvertLayoutOp
                                insValues, blockShapeValues, tileShape);
 
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, tileShape, bodyMapping);
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
 
     auto newCvt = rewriter.clone(*cvtOp, bodyMapping);
     newCvt->getResult(0).setType(updateTensorType(dstTy, tileShape));
@@ -944,7 +946,7 @@ struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
-  std::optional<cpu::GenericOp> findTargetGenericOp(scf::ForOp forOp) const {
+  static std::optional<cpu::GenericOp> findTargetGenericOp(scf::ForOp forOp) {
     // (1) For loop must have iter args — excludes persistent block-dispatch
     // loops which have no iter args.
     if (forOp.getNumRegionIterArgs() == 0)
@@ -1213,6 +1215,212 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
   }
 };
 
+struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  static std::optional<std::pair<cpu::GenericOp, triton::DotOp>>
+  findTargetGenericOp(scf::ForOp forOp) {
+
+    // step must be 1
+    if (!matchPattern(forOp.getStep(), m_One()))
+      return std::nullopt;
+    // loop must be from 0 to numKTiles
+    if (!matchPattern(forOp.getLowerBound(), m_Zero()))
+      return std::nullopt;
+
+    auto numIterArgs = forOp.getNumRegionIterArgs();
+    if (numIterArgs != 1)
+      return std::nullopt;
+
+    // body must contain exactly 1 generic op and a scf.yield
+    cpu::GenericOp genericOp;
+    for (auto &op : forOp.getBody()->without_terminator()) {
+      if (auto bodyGenericOp = dyn_cast<cpu::GenericOp>(op)) {
+        if (genericOp) {
+          return std::nullopt; // >1 generic
+        }
+        genericOp = bodyGenericOp;
+      } else {
+        return std::nullopt; // unexpected op in for body
+      }
+    }
+    if (!genericOp)
+      return std::nullopt;
+
+    // for safety, we can relax these later
+    if (!genericOp.getBody().hasOneBlock())
+      return std::nullopt;
+    if (genericOp.getNumResults() != 1)
+      return std::nullopt; // generic must have exactly 1 result (the dot op
+                           // result - should we verify that?)
+    // the generic cannot have existing iter args (this will break the pattern
+    // matching below but we should adjust the pattern matcher to handle this
+    // generically)
+    if (genericOp.getNumIterArgs() != 0)
+      return std::nullopt;
+
+    // ensure the sole loop carried iter arg is the dot op accumulator
+    triton::DotOp dotOp;
+    BlockArgument accArg = forOp.getRegionIterArg(0);
+    for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+      if (operand == accArg) {
+        BlockArgument genericBodyArg = genericOp.getIterArg(i);
+        for (auto user : genericBodyArg.getUsers()) {
+          if (auto crtDotOp = dyn_cast<triton::DotOp>(user)) {
+            dotOp = crtDotOp;
+            if (genericBodyArg != dotOp.getC())
+              return std::nullopt; // loop carried iter arg is not the
+                                   // accumulator
+          }
+        }
+      }
+    }
+    if (!dotOp)
+      return std::nullopt;
+
+    return std::make_pair(genericOp, dotOp);
+  }
+
+  LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+
+    auto targetGenericOp = findTargetGenericOp(forOp);
+    if (!targetGenericOp)
+      return failure();
+
+    auto [genericOp, dotOp] = *targetGenericOp;
+
+    // 1. partition inputs, drop existing for loop inputs
+    Value kIV = forOp.getInductionVar();
+    Value acc = forOp.getRegionIterArg(0);
+    Block &oldBody = genericOp.getBody().front();
+    // insArgOffset is the index of the first ins body arg: skips the tile IV
+    // args (one per tileShape dim) and any initVal args.
+    unsigned insArgOffset = genericOp.getInsArgOffset();
+
+    SmallVector<unsigned> kIVBodyArgPositions;
+    unsigned accBodyArgPos = 0;
+    bool foundAcc = false;
+
+    struct KeptInsEntry {
+      unsigned oldBodyArgPos;
+      Value value;
+      SmallVector<int32_t>
+          tileShape; // tiled shape of the body arg; {} for scalars
+    };
+    SmallVector<KeptInsEntry> keptIns;
+
+    for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+      unsigned bodyArgPos = insArgOffset + i;
+      if (operand == kIV) {
+        kIVBodyArgPositions.push_back(bodyArgPos);
+      } else if (operand == acc) {
+        accBodyArgPos = bodyArgPos;
+        foundAcc = true;
+      } else {
+        SmallVector<int32_t> shape;
+        if (auto tensorTy = dyn_cast<RankedTensorType>(
+                oldBody.getArgument(bodyArgPos).getType()))
+          shape = SmallVector<int32_t>(tensorTy.getShape().begin(),
+                                       tensorTy.getShape().end());
+        keptIns.push_back({bodyArgPos, operand, shape});
+      }
+    }
+
+    // sanity: we must have found both the acc and at least one kIV entry
+    if (!foundAcc || kIVBodyArgPositions.empty())
+      return failure();
+
+    // 2. Build new blockShape and tileShape using the A operand to get the K
+    // block size
+    auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
+    gpu::BlockedEncodingAttr aOperandEncoding =
+        dyn_cast<gpu::BlockedEncodingAttr>(aOperandType.getEncoding());
+    if (!aOperandEncoding) {
+      auto aDotOperandEncoding =
+          cast<gpu::DotOperandEncodingAttr>(aOperandType.getEncoding());
+      aOperandEncoding =
+          cast<gpu::BlockedEncodingAttr>(aDotOperandEncoding.getParent());
+    }
+
+    auto [blockShape, tileShape] =
+        getBlockAndTileShapes(aOperandType, aOperandEncoding);
+    int32_t kTileShape =
+        blockShape[1]; // use the block shape as the kTile shape. The k block
+                       // shape is the runtime value of K (the for loop upper
+                       // bound)
+
+    rewriter.setInsertionPoint(forOp);
+    auto kSizeLoc = forOp.getUpperBound().getLoc();
+    Value kTileConst = arith::ConstantOp::create(
+        rewriter, kSizeLoc, rewriter.getI32IntegerAttr(kTileShape));
+    Value kSize = arith::MulIOp::create(rewriter, kSizeLoc,
+                                        forOp.getUpperBound(), kTileConst);
+
+    SmallVector<Value> newBlockShapes = {kSize, genericOp.getBlockShape()[0],
+                                         genericOp.getBlockShape()[1]};
+    SmallVector<int32_t> newTileShapes = {
+        kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
+    Type accIterArgType =
+        updateTensorType(dotOp.getC().getType(), {genericOp.getTileShape()[0],
+                                                  genericOp.getTileShape()[1]});
+
+    // 3. Build new TiledInput list
+    SmallVector<TiledInput> newTiledIns;
+    for (auto &entry : keptIns)
+      newTiledIns.push_back({entry.value, entry.tileShape});
+    auto newInsValues = llvm::map_to_vector(
+        newTiledIns, [](const TiledInput &ti) { return ti.value; });
+
+    // 4. create the new generic op and generic body
+    auto newGeneric = cpu::GenericOp::create(
+        rewriter, genericOp.getLoc(), forOp.getResultTypes(),
+        /*initVals=*/ValueRange{forOp.getInitArgs()[0]}, newInsValues,
+        newBlockShapes, newTileShapes,
+        /*reductionDims=*/{0});
+
+    IRMapping mapping;
+    Block *newBody = initGenericBody(rewriter, newGeneric, newTiledIns,
+                                     {accIterArgType}, newTileShapes, mapping);
+
+    // 5. wire up body arg mappings
+    // Generic tile loop IVs
+    for (unsigned i = 0; i < genericOp.getNumInductionVars(); i++)
+      mapping.map(oldBody.getArgument(i), newBody->getArgument(i + 1));
+
+    // old acc body arg -> new acc tile iter arg
+    mapping.map(oldBody.getArgument(accBodyArgPos), newGeneric.getIterArg(0));
+
+    // other kept body args -> new body args
+    for (auto [newPos, entry] : llvm::enumerate(keptIns))
+      mapping.map(oldBody.getArgument(entry.oldBodyArgPos),
+                  newBody->getArgument(newGeneric.getInsArgOffset() + newPos));
+
+    // 6. clone body ops
+    rewriter.setInsertionPointToStart(newBody);
+
+    // convert loop kIV from global idx to tile idx
+    Value kElemOffset = newBody->getArgument(0);
+    Value kTileIdxConst = arith::ConstantOp::create(
+        rewriter, forOp.getLoc(), rewriter.getI32IntegerAttr(kTileShape));
+    Value kTileIdx = arith::DivSIOp::create(rewriter, forOp.getLoc(),
+                                            kElemOffset, kTileIdxConst);
+    for (auto pos : kIVBodyArgPositions)
+      mapping.map(oldBody.getArgument(pos), kTileIdx);
+
+    for (Operation &op : oldBody.without_terminator())
+      rewriter.clone(op, mapping);
+    auto oldYield = cast<cpu::YieldOp>(oldBody.getTerminator());
+    cpu::YieldOp::create(rewriter, oldYield.getLoc(),
+                         mapping.lookup(oldYield.getValues()[0]));
+
+    // 7. replace old op
+    rewriter.replaceOp(forOp, newGeneric.getResults());
+    return success();
+  }
+};
+
 } // namespace
 
 struct TritonCPUTileAndFusePass
@@ -1247,6 +1455,7 @@ struct TritonCPUTileAndFusePass
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
 
+    fusePatterns.add<TileKLoop>(context, benefitDefault + 10);
     fusePatterns.add<FuseParentForOpIntoGeneric>(context, benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {

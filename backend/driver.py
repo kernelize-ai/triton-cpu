@@ -287,7 +287,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
         void *cpu_barrier = &barrier;
 
         for (int lane_id = 0; lane_id < warp_size; lane_id++) {{
-            fibers.emplace_back([&, block_start, run_end, lane_id]() {{
+            fibers.emplace_back(std::allocator_arg, boost::fibers::fixedsize_stack(8 * 1024 * 1024), [&, block_start, run_end, lane_id]() {{
                 int32_t launch_id[] = {{
                     (int32_t)block_start, (int32_t)run_end, lane_id, 0, 0
                 }};

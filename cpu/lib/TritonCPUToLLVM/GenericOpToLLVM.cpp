@@ -50,8 +50,8 @@ struct ArgInfo {
   enum class Kind { IV, IterArg, Ins };
 
   ArgInfo(Kind k) : kind(k) {}
-  ArgInfo(Kind k, Type tritonType, Type llvmType)
-      : kind(k), tritonType(tritonType), llvmType(llvmType) {}
+  ArgInfo(Kind k, Type tritonType, Type llvmType, Value operand)
+      : kind(k), tritonType(tritonType), llvmType(llvmType), operand(operand) {}
 
   Kind kind;
   Type tritonType;
@@ -83,8 +83,7 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const ArgInfo &a) {
 
 class LoopHelper {
 public:
-  LoopHelper(ArrayRef<ArgInfo> args, ArrayRef<Value> loopIterArgs,
-             Value flatOffset, cpu::GenericOp generic,
+  LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
              const TypeConverter *typeConverter,
              ConversionPatternRewriter &rewriter);
 
@@ -102,6 +101,11 @@ public:
     flatOffset = b.add(flatOffset, inc);
   }
 
+  void incrementIterArgOffset(ConversionPatternRewriter &rewriter, Value inc) {
+    auto b = TritonLLVMOpBuilder(flatOffset.getLoc(), rewriter);
+    iterArgOffset = b.add(iterArgOffset, inc);
+  }
+
   // build loop body block arguments for the current loop level. Adds
   // arguments for loop induction vars, generic iter args, and generic
   // operands. Handles extracting the appropriate tile for non-alloca tensor
@@ -116,18 +120,22 @@ public:
                       ArrayRef<Value> results, ArrayRef<Type> resultTypes,
                       unsigned vectorSize);
 
-  void updateIterArgs(ArrayRef<Value> newIterArgVals) {
-    assert(newIterArgVals.size() == loopIterArgs.size());
-    for (auto [i, newVal] : llvm::enumerate(newIterArgVals))
-      loopIterArgs[i] = newVal;
-  }
+  // update loop carried iter arg state, scattering to global buffers as
+  // necessary.
+  void updateIterArgs(ConversionPatternRewriter &rewriter,
+                      ArrayRef<Value> newIterArgVals);
 
   SmallVector<Value> getIterArgVals() const { return loopIterArgs; }
 
   SmallVector<Value> getResults() const {
-    SmallVector<Value> ret(loopIterArgs.begin(), loopIterArgs.end());
+    SmallVector<Value> ret;
+    ret.append(loopIterArgs.begin(), loopIterArgs.end());
     ret.append(materializedResults.begin(), materializedResults.end());
     return ret;
+  }
+
+  bool isReductionDim(unsigned d) const {
+    return llvm::is_contained(reductionDims, d);
   }
 
 private:
@@ -139,15 +147,57 @@ private:
 
   SmallVector<Value> tileOffsets;
   Value flatOffset;
+  Value iterArgOffset;
+  SmallVector<int32_t> reductionDims;
 };
 
-LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, ArrayRef<Value> loopIterArgs,
-                       Value flatOffset, cpu::GenericOp generic,
+LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
                        const TypeConverter *typeConverter,
                        ConversionPatternRewriter &rewriter)
     : args(args.begin(), args.end()),
-      loopIterArgs(loopIterArgs.begin(), loopIterArgs.end()),
-      flatOffset(flatOffset) {
+      reductionDims(generic.getReductionDims()) {
+
+  auto gb = TritonLLVMOpBuilder(generic.getLoc(), rewriter);
+  flatOffset = gb.i32_val(0);
+  iterArgOffset = gb.i32_val(0);
+
+  for (auto [idx, arg] : llvm::enumerate(this->args)) {
+    if (arg.kind == ArgInfo::Kind::IterArg) {
+      if (auto tileTensorTy = dyn_cast<RankedTensorType>(arg.tritonType)) {
+        Type elemTy = typeConverter->convertType(tileTensorTy.getElementType());
+
+        Location loc = arg.operand.getLoc();
+        // allocate a global buffer for this iter arg
+        auto tensorTy = cast<RankedTensorType>(arg.operand.getType());
+        int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
+                                              tensorTy.getShape().end(),
+                                              int64_t{1}, std::multiplies<>());
+
+        Value globalPtr = allocateGlobalBuffer(
+            rewriter, loc, elemTy, tensorElems, loopIterArgs.size(), generic);
+        this->args[idx].bufferPtr = globalPtr;
+
+        // copy the init value
+        auto b = TritonLLVMOpBuilder(loc, rewriter);
+        assert(arg.operand.getDefiningOp() &&
+               "expected iter arg operand to be defined by an op");
+        auto castedInitOp =
+            cast<UnrealizedConversionCastOp>(arg.operand.getDefiningOp());
+        auto initVal = castedInitOp.getOperand(0);
+        auto initStructTy = cast<LLVM::LLVMStructType>(initVal.getType());
+        for (unsigned i = 0; i < initStructTy.getBody().size(); ++i) {
+          Value elem = b.extract_val(initStructTy.getBody()[i], initVal, i);
+          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
+                            elemTy, globalPtr, b.i32_val(i));
+          b.store(elem, gep);
+        }
+
+        loopIterArgs.push_back(globalPtr);
+      } else {
+        loopIterArgs.push_back(arg.operand);
+      }
+    }
+  }
 
   // Create temporary buffers in thread local global memory for materialized
   // results. This avoids loop-carried <blockSize x elemTy> phi nodes
@@ -171,7 +221,8 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, ArrayRef<Value> loopIterArgs,
 
     Value globalPtr = allocateGlobalBuffer(
         rewriter, generic.getResult(i + generic.getNumIterArgs()).getLoc(),
-        elemTy, tensorElems, materializedResults.size(), generic);
+        elemTy, tensorElems, materializedResults.size() + loopIterArgs.size(),
+        generic);
     materializedResults.push_back(globalPtr);
   }
 }
@@ -184,7 +235,31 @@ LoopHelper::getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
   SmallVector<Value> blockArgs = {tileOffsets.begin(), tileOffsets.end()};
 
   // iter args
-  blockArgs.append(loopIterArgs.begin(), loopIterArgs.end());
+  unsigned scalarIdx = 0;
+  for (const auto &arg : args) {
+    if (arg.kind == ArgInfo::Kind::IterArg) {
+      unsigned crtIndex = scalarIdx++;
+      if (arg.bufferPtr) {
+        // load this tiles elements from the global buffer
+        auto tileStructTy = cast<LLVM::LLVMStructType>(arg.llvmType);
+        Type elemTy = tileStructTy.getBody()[0];
+        Value tileStruct =
+            LLVM::UndefOp::create(rewriter, arg.operand.getLoc(), tileStructTy);
+        auto b = TritonLLVMOpBuilder(arg.operand.getLoc(), rewriter);
+
+        for (unsigned j = 0; j < tileStructTy.getBody().size(); ++j) {
+          Value globalIdx = b.add(iterArgOffset, b.i32_val(j));
+          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
+                            elemTy, arg.bufferPtr, ValueRange{globalIdx});
+          Value elem = b.load(elemTy, gep);
+          tileStruct = b.insert_val(tileStructTy, tileStruct, elem, j);
+        }
+        blockArgs.push_back(tileStruct);
+      } else {
+        blockArgs.push_back(loopIterArgs[crtIndex]);
+      }
+    }
+  }
 
   // Add ins args
   for (const auto &argInfo : args) {
@@ -285,6 +360,49 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
   }
 }
 
+void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
+                                ArrayRef<Value> newIterArgVals) {
+  unsigned totalIterArgs = llvm::count_if(
+      args, [](const ArgInfo &a) { return a.kind == ArgInfo::Kind::IterArg; });
+  assert(newIterArgVals.size() == totalIterArgs &&
+         "expected iter arg update size to match total number of iter args");
+
+  loopIterArgs.clear();
+
+  unsigned scalarIdx = 0, yieldIdx = 0;
+  for (const auto &arg : args) {
+    if (arg.kind == ArgInfo::Kind::IterArg) {
+      Value yieldVal = newIterArgVals[yieldIdx++];
+      if (arg.bufferPtr) {
+        // buffer ptr inter args may be forwarded from the previous loop
+        // level. only update the tile data for iter args that are the result
+        // of a ttc.yield, which will have triton types
+        if (isa<RankedTensorType>(yieldVal.getType())) {
+          Location loc = yieldVal.getLoc();
+
+          auto b = TritonLLVMOpBuilder(loc, rewriter);
+          auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
+          auto castedYieldVal = UnrealizedConversionCastOp::create(
+                                    rewriter, loc, arg.llvmType, yieldVal)
+                                    .getResult(0);
+          for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
+            Value elem =
+                b.extract_val(llvmStruct.getBody()[j], castedYieldVal, j);
+            Value idx = b.add(iterArgOffset, b.i32_val(j));
+            Value gep =
+                b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
+                      arg.bufferPtr, ValueRange{idx});
+            b.store(elem, gep);
+          }
+        }
+        loopIterArgs.push_back(arg.bufferPtr);
+      } else {
+        loopIterArgs.push_back(yieldVal);
+      }
+    }
+  }
+}
+
 struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   using ConvertOpToLLVMPattern<cpu::GenericOp>::ConvertOpToLLVMPattern;
 
@@ -300,11 +418,10 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     auto result = dyn_cast<OpResult>(op.getIns()[opIdx]);
     if (!result)
       return {};
+    if (!isa<RankedTensorType>(result.getType()))
+      return {};
     auto defGeneric = dyn_cast<cpu::GenericOp>(result.getOwner());
     if (!defGeneric)
-      return {};
-    // TODO: overly defensive?
-    if (result.getResultNumber() < defGeneric.getNumIterArgs())
       return {};
 
     assert(isa<LLVM::LLVMStructType>(llvmArg.getType()) &&
@@ -327,18 +444,15 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     // handle loop induction vars first
     for (unsigned i = 0; i < tileShape.size(); i++) {
-      args.emplace_back(ArgInfo(ArgInfo::Kind::IV, nullptr, i32_ty));
+      args.emplace_back(ArgInfo(ArgInfo::Kind::IV, nullptr, i32_ty, nullptr));
     }
 
     for (unsigned i = 0; i < op.getNumIterArgs(); i++) {
       Type tritonType = op.getIterArg(i).getType();
-      assert(!isa<RankedTensorType>(tritonType) &&
-             "tensor type iter args not yet supported");
       Type llvmType = getTypeConverter()->convertType(tritonType);
 
-      // TODO: create alloca backed buffers corresponding to init arg and copy
-      // init arg in if we have a tensor type.
-      args.emplace_back(ArgInfo(ArgInfo::Kind::IterArg, tritonType, llvmType));
+      args.emplace_back(ArgInfo(ArgInfo::Kind::IterArg, tritonType, llvmType,
+                                op.getInitVals()[i]));
     }
 
     Block *body = &op.getBody().front();
@@ -451,7 +565,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       auto [newIterArgVals, loopTiles] =
           cloneTileBody(op, rewriter, chunkedArgs);
-      helper.updateIterArgs(newIterArgVals);
+      helper.updateIterArgs(rewriter, newIterArgVals);
       SmallVector<Type> resultTypes =
           llvm::map_to_vector(loopTiles, [&](Value tile) {
             return getTypeConverter()->convertType(tile.getType());
@@ -576,7 +690,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         SmallVector<Value> newIterArgVals(yieldOp.getValues().begin(),
                                           yieldOp.getValues().begin() +
                                               numIterArgs);
-        helper.updateIterArgs(newIterArgVals);
+        helper.updateIterArgs(rewriter, newIterArgVals);
 
         // scatter non-iter-arg tensor tiles
         SmallVector<Value> loopTiles(yieldOp.getValues().begin() + numIterArgs,
@@ -598,10 +712,27 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // emit single loop, recurse to next dimension
     Value numChunks = b.sdiv(blockShape[dim], b.i32_val(tileShape[dim]));
 
+    // TODO: can we encapsulate this in the loop helper?
     Value innerStride = b.i32_val(vectorSize);
     for (unsigned d = dim + 1; d < rank; ++d)
       innerStride =
           b.mul(innerStride, b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
+    Value innerIterArgStride = b.i32_val(0);
+    if (!helper.isReductionDim(dim)) {
+      unsigned innerArgVectorSize = 1;
+      // TODO: don't recompute this over and over
+      for (unsigned d = 0; d < tileShape.size(); ++d) {
+        if (!helper.isReductionDim(d)) {
+          innerArgVectorSize *= tileShape[d];
+        }
+      }
+      innerIterArgStride = b.i32_val(innerArgVectorSize);
+      for (unsigned d = dim + 1; d < rank; ++d)
+        if (!helper.isReductionDim(d))
+          innerIterArgStride =
+              b.mul(innerIterArgStride,
+                    b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
+    }
 
     auto finalCarried = emitSingleLoop(
         rewriter, loc, numChunks, tileShape[dim], helper.getIterArgVals(),
@@ -611,10 +742,12 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
           auto bb = TritonLLVMOpBuilder(loc, rewriter);
           helper.incrementFlatOffset(rewriter, bb.mul(loopI, innerStride));
+          helper.incrementIterArgOffset(rewriter,
+                                        bb.mul(loopI, innerIterArgStride));
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
 
-          helper.updateIterArgs(innerIterArgVals);
+          helper.updateIterArgs(rewriter, innerIterArgVals);
           emitNestedLoops(op, helper, rewriter, dim + 1, blockShape, tileShape,
                           vectorSize, afterBlock);
 
@@ -622,7 +755,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           return helper.getIterArgVals();
         });
 
-    helper.updateIterArgs(finalCarried);
+    helper.updateIterArgs(rewriter, finalCarried);
   }
 
   LogicalResult
@@ -669,10 +802,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           return argInfo.requiresMaterialization();
         });
 
-    // Iter arg values start from init_vals and are updated tile-by-tile.
-    SmallVector<Value> iterArgVals(adaptor.getInitVals().begin(),
-                                   adaptor.getInitVals().end());
-
     int numChunks = -1;
     SmallVector<int32_t> blockShape;
     for (auto [i, dim] : llvm::enumerate(op.getBlockShape())) {
@@ -703,9 +832,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       assert(blockShape.size() == tileShape.size() &&
              "expected blockShape and tileShape to have "
              "the same rank");
-      auto b = TritonLLVMOpBuilder(loc, rewriter);
-      LoopHelper helper(argInfos, iterArgVals, /*flatOffset=*/b.i32_val(0), op,
-                        getTypeConverter(), rewriter);
+      LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       emitUnrolled(op, helper, rewriter, numChunks, vectorSize, blockShape,
                    tileShape);
       results = helper.getResults();
@@ -723,9 +850,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       assert(allUsersAreGeneric && "expected all generic op users to also be "
                                    "generic ops on dynamic path");
 
-      auto b = TritonLLVMOpBuilder(loc, rewriter);
-      LoopHelper helper(argInfos, iterArgVals, /*flatOffset=*/b.i32_val(0), op,
-                        getTypeConverter(), rewriter);
+      LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
       emitNestedLoops(op, helper, rewriter, /*dim=*/0, blockShapeVals,
