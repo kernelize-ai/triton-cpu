@@ -17,13 +17,13 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
   tt.func public @scale_1d(%scale: f32) {
     %c16_i32 = arith.constant 16 : i32
 
-    %0 = ttc.generic (%scale) blocks [%c16_i32 : i32] attributes {tileShape = array<i32: 4>, reductionDims = array<i32>} body {
+    %0 = ttc.generic ins (%scale : f32) blocks [%c16_i32 : i32] attributes {tileShape = array<i32: 4>, reductionDims = array<i32>} body {
       ^bb0(%offset: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<4xf32, #blocked>
         %result = arith.mulf %cst, %splat : tensor<4xf32, #blocked>
         ttc.yield %result : tensor<4xf32, #blocked>
-    } : (f32) -> tensor<16xf32, #blocked>
+    } -> tensor<16xf32, #blocked>
     tt.return
   }
 }
@@ -40,13 +40,13 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
   tt.func public @scale_2d(%scale: f32) {
     %c4_i32 = arith.constant 4 : i32
     %c8_i32 = arith.constant 8 : i32
-    %0 = ttc.generic (%scale) blocks [%c4_i32, %c8_i32 : i32, i32] attributes {tileShape = array<i32: 1, 4>, reductionDims = array<i32>} body {
+    %0 = ttc.generic ins (%scale : f32) blocks [%c4_i32, %c8_i32 : i32, i32] attributes {tileShape = array<i32: 1, 4>, reductionDims = array<i32>} body {
       ^bb0(%dim0: i32, %dim1: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<1x4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<1x4xf32, #blocked>
         %result = arith.mulf %cst, %splat : tensor<1x4xf32, #blocked>
         ttc.yield %result : tensor<1x4xf32, #blocked>
-    } : (f32) -> tensor<4x8xf32, #blocked>
+    } -> tensor<4x8xf32, #blocked>
     tt.return
   }
 }
@@ -63,13 +63,13 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
   tt.func public @scale_3d(%scale: f32) {
     %c4_i32 = arith.constant 4 : i32
     %c8_i32 = arith.constant 8 : i32
-    %0 = ttc.generic (%scale) blocks [%c4_i32, %c4_i32, %c8_i32 : i32, i32, i32] attributes {tileShape = array<i32: 1, 1, 4>, reductionDims = array<i32>} body {
+    %0 = ttc.generic ins (%scale : f32) blocks [%c4_i32, %c4_i32, %c8_i32 : i32, i32, i32] attributes {tileShape = array<i32: 1, 1, 4>, reductionDims = array<i32>} body {
       ^bb0(%dim0: i32, %dim1: i32, %dim2: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<1x1x4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<1x1x4xf32, #blocked>
         %result = arith.mulf %cst, %splat : tensor<1x1x4xf32, #blocked>
         ttc.yield %result : tensor<1x1x4xf32, #blocked>
-    } : (f32) -> tensor<4x4x8xf32, #blocked>
+    } -> tensor<4x4x8xf32, #blocked>
     tt.return
   }
 }
@@ -87,13 +87,13 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
     %c2_i32 = arith.constant 2 : i32
     %c4_i32 = arith.constant 4 : i32
     %c8_i32 = arith.constant 8 : i32
-    %0 = ttc.generic (%scale) blocks [%c2_i32, %c2_i32, %c4_i32, %c8_i32 : i32, i32, i32, i32] attributes {tileShape = array<i32: 1, 1, 1, 4>, reductionDims = array<i32>} body {
+    %0 = ttc.generic ins (%scale : f32) blocks [%c2_i32, %c2_i32, %c4_i32, %c8_i32 : i32, i32, i32, i32] attributes {tileShape = array<i32: 1, 1, 1, 4>, reductionDims = array<i32>} body {
       ^bb0(%dim0: i32, %dim1: i32, %dim2: i32, %dim3: i32, %s: f32):
         %cst = arith.constant dense<1.0> : tensor<1x1x1x4xf32, #blocked>
         %splat = tt.splat %s : f32 -> tensor<1x1x1x4xf32, #blocked>
         %result = arith.mulf %cst, %splat : tensor<1x1x1x4xf32, #blocked>
         ttc.yield %result : tensor<1x1x1x4xf32, #blocked>
-    } : (f32) -> tensor<2x2x4x8xf32, #blocked>
+    } -> tensor<2x2x4x8xf32, #blocked>
     tt.return
   }
 }
