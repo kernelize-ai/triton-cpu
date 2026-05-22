@@ -70,6 +70,7 @@ public:
       return failure();
     }
 
+    // TODO: both A and B? or just B? don't want to blow up the register use
     SmallVector<unsigned> newSizePerThread = {*vectorSizeA, *vectorSizeB};
 
     // Apply the new layout to the result type.
