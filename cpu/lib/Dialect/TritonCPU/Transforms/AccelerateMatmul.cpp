@@ -38,18 +38,39 @@ public:
     if (!blockedEncoding)
       return failure();
 
-    // Figure out a new per-thread shape that is more optimal for matmul on CPU.
-    // We do not yet know what shape is optimal (TODO), but we need to
-    // experiment with something. This currently limits the shape to the
-    // smallest result dimension to avoid issues emitting too much code.
-    // Apparently the coalesce pass has some utilities in
-    // `getNumElementsPerThread` which may be useful.
-    auto shape = tensorTy.getShape();
-    unsigned min = *std::min_element(shape.begin(), shape.end());
-    SmallVector<unsigned> newSizePerThread{min, min};
-    auto oldSizePerThread = blockedEncoding.getSizePerThread();
-    if (llvm::equal(oldSizePerThread, newSizePerThread))
+    // Trace the dot op operands to the parent loads and record the maximum
+    // vector size that we can use for the blocked layout.
+    auto getVectorSizeForOperand =
+        [](Value operand) -> std::optional<unsigned> {
+      if (!operand.getDefiningOp())
+        return std::nullopt;
+      if (auto cvt = dyn_cast<gpu::ConvertLayoutOp>(operand.getDefiningOp()))
+        operand = cvt.getOperand();
+
+      Operation *definingOp = operand.getDefiningOp();
+      if (!definingOp)
+        return std::nullopt;
+      if (auto load = dyn_cast<triton::LoadOp>(definingOp)) {
+        auto loadTensorTy = cast<RankedTensorType>(load.getType());
+        auto loadBlockedEncoding =
+            dyn_cast<gpu::BlockedEncodingAttr>(loadTensorTy.getEncoding());
+        if (!loadBlockedEncoding)
+          return std::nullopt;
+        auto sizePerThread = loadBlockedEncoding.getSizePerThread();
+        // We only consider the last dimension for vectorization.
+        return sizePerThread.back();
+      }
+      return std::nullopt;
+    };
+
+    std::optional<unsigned> vectorSizeA = getVectorSizeForOperand(dotOp.getA());
+    std::optional<unsigned> vectorSizeB = getVectorSizeForOperand(dotOp.getB());
+
+    if (!vectorSizeA || !vectorSizeB) {
       return failure();
+    }
+
+    SmallVector<unsigned> newSizePerThread = {*vectorSizeA, *vectorSizeB};
 
     // Apply the new layout to the result type.
     auto newBlockedEncoding = gpu::BlockedEncodingAttr::get(
@@ -278,7 +299,7 @@ public:
       patterns.add<OptimizeBlockedLayout>(context, benefitDefault);
     }
     if (canonicalizeKLoop) {
-      patterns.add<CanonicalizeKLoop>(context, benefitDefault);
+      patterns.add<CanonicalizeKLoop>(context, benefitDefault + 1);
     }
     if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();

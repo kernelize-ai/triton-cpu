@@ -135,14 +135,9 @@ class CPUBackend(BaseBackend):
         num_ctas = 1
 
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
-        if options.tile_and_fuse is True:
-            # Use upstream coalesce for tile and fuse
-            # TODO we may need to modify the default vectorization size
-            passes.ttgpuir.add_coalesce(pm)
-        else:
-            cpu.passes.ttgpuir.add_coalesce(pm)
+        cpu.passes.ttgpuir.add_coalesce(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        cpu.passes.ttgpuir.add_accelerate_matmul(pm, optimize_block_layout=not options.tile_and_fuse,
+        cpu.passes.ttgpuir.add_accelerate_matmul(pm, optimize_block_layout=True,
                                                  canonicalize_k_loop=options.tile_and_fuse)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 

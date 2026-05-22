@@ -50,7 +50,9 @@ void init_triton_cpu_passes_ttgpuir(py::module &&m) {
       py::arg("pm"), py::arg("optimize_block_layout") = false,
       py::arg("canonicalize_k_loop") = false);
   m.def("add_coalesce", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce());
+    mlir::triton::cpu::TritonCPUCoalesceOptions opts;
+    opts.MaxVectorWidth = 256;
+    pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce(opts));
   });
   m.def("add_make_persistent_kernel", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createMakePersistentKernelPass());
