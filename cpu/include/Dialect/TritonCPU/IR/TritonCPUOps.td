@@ -293,6 +293,8 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
     unsigned getInsArgOffset() {
       return getNumInductionVars() + getNumIterArgs();
     }
+
+    std::string getHeader();
   }];
 }
 

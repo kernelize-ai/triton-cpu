@@ -135,6 +135,13 @@ LogicalResult GenericOp::verify() {
   return success();
 }
 
+std::string GenericOp::getHeader() {
+  std::string s;
+  llvm::raw_string_ostream os(s);
+  print(os, OpPrintingFlags().skipRegions());
+  return s;
+}
+
 LogicalResult MakeDynamicRangeOp::verify() {
   auto resultTensorTy = cast<RankedTensorType>(getResult().getType());
   if (resultTensorTy.getShape().size() != 1)
