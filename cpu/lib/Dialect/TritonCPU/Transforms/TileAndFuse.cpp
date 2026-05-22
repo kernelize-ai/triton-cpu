@@ -1253,6 +1253,11 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     if (genericOp.getNumResults() != 1)
       return std::nullopt; // generic must have exactly 1 result (the dot op
                            // result - should we verify that?)
+    // the generic cannot have existing iter args (this will break the pattern
+    // matching below but we should adjust the pattern matcher to handle this
+    // generically)
+    if (genericOp.getNumIterArgs() != 0)
+      return std::nullopt;
 
     // ensure the sole loop carried iter arg is the dot op accumulator
     triton::DotOp dotOp;
