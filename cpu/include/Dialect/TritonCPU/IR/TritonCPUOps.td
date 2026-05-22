@@ -213,7 +213,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
     Example — elementwise chain (no reductions):
     ```
-    ttc.generic (%src_ptrs, %dst_ptrs) blocks [%c128 : i32]
+    ttc.generic ins (%src_ptrs, %dst_ptrs) blocks [%c128 : i32]
         {tileShape = array<i32: 16>, reductionDims = array<i32>}
         body {
     ^bb0(%iv: i32, %src: tensor<16x!tt.ptr<f32>>, %dst: tensor<16x!tt.ptr<f32>>):
@@ -226,7 +226,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
     Example — scalar reduction (softmax max pass):
     ```
-    %max = ttc.generic (%ptrs, %n_cols) init (%neg_inf : f32)
+    %max = ttc.generic ins (%ptrs, %n_cols) init (%neg_inf : f32)
         blocks [%c128 : i32]
         {tileShape = array<i32: 16>, reductionDims = array<i32: 0>}
         body {
@@ -240,7 +240,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
     Example — mixed scalar + tensor result (softmax sum + exp):
     ```
-    %sum, %exp_out = ttc.generic (%ptrs, %n_cols) init (%zero : f32)
+    %sum, %exp_out = ttc.generic ins (%ptrs, %n_cols) init (%zero : f32)
         blocks [%c128 : i32]
         {tileShape = array<i32: 16>, reductionDims = array<i32: 0>}
         body {
@@ -276,7 +276,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
   ];
 
   let assemblyFormat = [{
-    `(` $ins `)` (`init` `(` $init_vals^ `:` type($init_vals) `)`)? `blocks` `[` $blockShape `:` type($blockShape) `]` attr-dict-with-keyword `body` $body `:` functional-type($ins, $results)
+    (`init` `(` $init_vals^ `:` type($init_vals) `)`)? (`ins` `(` $ins^ `:` type($ins) `)`)? `blocks` `[` $blockShape `:` type($blockShape) `]` attr-dict-with-keyword `body` $body (`->` type($results)^)?
   }];
 
   let extraClassDeclaration = [{
