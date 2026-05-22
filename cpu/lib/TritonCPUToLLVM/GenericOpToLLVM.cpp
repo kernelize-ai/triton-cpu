@@ -83,8 +83,8 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const ArgInfo &a) {
 
 class LoopHelper {
 public:
-  LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset, Value iterArgOffset,
-             cpu::GenericOp generic, const TypeConverter *typeConverter,
+  LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
+             const TypeConverter *typeConverter,
              ConversionPatternRewriter &rewriter);
 
   SmallVector<Value> getEntryArgs() {
@@ -151,12 +151,15 @@ private:
   SmallVector<int32_t> reductionDims;
 };
 
-LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, Value flatOffset,
-                       Value iterArgOffset, cpu::GenericOp generic,
+LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
                        const TypeConverter *typeConverter,
                        ConversionPatternRewriter &rewriter)
-    : args(args.begin(), args.end()), flatOffset(flatOffset),
-      iterArgOffset(flatOffset), reductionDims(generic.getReductionDims()) {
+    : args(args.begin(), args.end()),
+      reductionDims(generic.getReductionDims()) {
+
+  auto gb = TritonLLVMOpBuilder(generic.getLoc(), rewriter);
+  flatOffset = gb.i32_val(0);
+  iterArgOffset = gb.i32_val(0);
 
   for (auto [idx, arg] : llvm::enumerate(this->args)) {
     if (arg.kind == ArgInfo::Kind::IterArg) {
@@ -414,6 +417,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // find the generic op producing this tensor
     auto result = dyn_cast<OpResult>(op.getIns()[opIdx]);
     if (!result)
+      return {};
+    if (!isa<RankedTensorType>(result.getType()))
       return {};
     auto defGeneric = dyn_cast<cpu::GenericOp>(result.getOwner());
     if (!defGeneric)
@@ -827,10 +832,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       assert(blockShape.size() == tileShape.size() &&
              "expected blockShape and tileShape to have "
              "the same rank");
-      auto b = TritonLLVMOpBuilder(loc, rewriter);
-      LoopHelper helper(argInfos, /*flatOffset=*/b.i32_val(0),
-                        /*iterArgOffset=*/b.i32_val(0), op, getTypeConverter(),
-                        rewriter);
+      LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       emitUnrolled(op, helper, rewriter, numChunks, vectorSize, blockShape,
                    tileShape);
       results = helper.getResults();
@@ -848,10 +850,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       assert(allUsersAreGeneric && "expected all generic op users to also be "
                                    "generic ops on dynamic path");
 
-      auto b = TritonLLVMOpBuilder(loc, rewriter);
-      LoopHelper helper(argInfos, /*flatOffset=*/b.i32_val(0),
-                        /*iterArgOffset=*/b.i32_val(0), op, getTypeConverter(),
-                        rewriter);
+      LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
       emitNestedLoops(op, helper, rewriter, /*dim=*/0, blockShapeVals,
