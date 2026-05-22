@@ -776,11 +776,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       vectorSize *= tileShape[d];
     }
 
-    // TODO: put this into extraClassDefinitions?
-    std::string s;
-    llvm::raw_string_ostream os(s);
-    op->print(os, OpPrintingFlags().skipRegions());
-    LDBG("Lowering generic op: " << s
+    LDBG("Lowering generic op: " << op.getHeader()
                                  << "\n  with vectorSize = " << vectorSize);
 
     SmallVector<ArgInfo> argInfos =
