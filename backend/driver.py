@@ -490,7 +490,7 @@ class NexusCPULauncher:
 
         block_x = max(1, int(warp_size) * int(num_warps))
         st = self.cmd.finalize([int(gridX), int(gridY), int(gridZ)], [block_x, 1, 1], int(shared_mem))
-        self.sched.run(blocking=True)
+        self.sched.run()
         if exit_hook is not None:
             exit_hook(launch_metadata)
 
