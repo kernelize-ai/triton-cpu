@@ -72,6 +72,9 @@ public:
 
     // TODO: both A and B? or just B? don't want to blow up the register use
     SmallVector<unsigned> newSizePerThread = {*vectorSizeA, *vectorSizeB};
+    auto oldSizePerThread = blockedEncoding.getSizePerThread();
+    if (llvm::equal(oldSizePerThread, newSizePerThread))
+      return failure();
 
     // Apply the new layout to the result type.
     auto newBlockedEncoding = gpu::BlockedEncodingAttr::get(
