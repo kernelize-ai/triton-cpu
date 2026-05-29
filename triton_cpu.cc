@@ -32,11 +32,9 @@ static unsigned getMaxVectorWidthBits(llvm::StringRef featureStr) {
     return 512; // AVX-512 foundation
   if (has("+avx"))
     return 256; // AVX/AVX2 (both set +avx)
-  if (has("+sse2"))
-    return 128;
-  if (has("+sse"))
-    return 128;
-  return 64;
+
+  // safe minimum for any modern target
+  return 128;
 }
 
 void init_triton_cpu_passes(py::module &&m) {
