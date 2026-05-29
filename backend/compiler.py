@@ -135,7 +135,8 @@ class CPUBackend(BaseBackend):
         num_ctas = 1
 
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
-        cpu.passes.ttgpuir.add_coalesce(pm)
+        print("max vector width:", cpu.get_max_vector_width_bits(options.features))
+        cpu.passes.ttgpuir.add_coalesce(pm, max_vector_width=cpu.get_max_vector_width_bits(options.features))
         passes.ttgpuir.add_remove_layout_conversions(pm)
         cpu.passes.ttgpuir.add_accelerate_matmul(pm, optimize_block_layout=True,
                                                  canonicalize_k_loop=options.tile_and_fuse)

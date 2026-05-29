@@ -88,10 +88,9 @@ getNumElementsPerThread(Operation *op, unsigned maxVectorWidth,
   unsigned elemNumBytes = std::max(elemNumBits / 8, 1u);
   unsigned maxMultipleBytes = valInfo.getDivisibility(order[0]);
   unsigned maxMultiple = std::max(maxMultipleBytes / elemNumBytes, 1u);
-  unsigned maxContig =
-      valInfo.getContiguity(order[0]); // drops the shape per cta consideration from upstream
-  unsigned alignment =
-      std::min(maxMultiple, maxContig);
+  unsigned maxContig = valInfo.getContiguity(
+      order[0]); // drops the shape per cta consideration from upstream
+  unsigned alignment = std::min(maxMultiple, maxContig);
   unsigned currPerThread = std::min(alignment, maxVectorWidth / elemNumBits);
   LDBG("elemNumBytes: " << elemNumBytes
                         << ", divisibility: " << maxMultipleBytes
