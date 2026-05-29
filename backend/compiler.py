@@ -61,6 +61,7 @@ class CPUOptions:
 
 class CPUBackend(BaseBackend):
     instrumentation = None  # TODO: intra-kernel instrumentation not yet supported
+    supports_native_tensor_specialization = False
 
     @staticmethod
     def supports_target(target: GPUTarget):
@@ -107,6 +108,32 @@ class CPUBackend(BaseBackend):
 
     def load_dialects(self, ctx):
         cpu.load_dialects(ctx)
+
+    @staticmethod
+    def get_tensor_specialization(arg, **kwargs):
+        if not kwargs.get("align", False):
+            return ""
+        ptr = arg.data_ptr()
+        # assign specialization using letters that don't conflict with existing triton backend
+        if ptr % 64 == 0:
+            return "I"  # 64-byte (cache line, typical PyTorch alloc)
+        if ptr % 32 == 0:
+            return "H"  # 32-byte (AVX2 natural alignment)
+        if ptr % 16 == 0:
+            return "D"  # 16-byte (SSE, base behavior)
+        return ""
+
+    @staticmethod
+    def parse_attr(desc):
+        # Don't call BaseBackend.parse_attr — we own the full divisibility value
+        ret = []
+        if "I" in desc:
+            ret += [["tt.divisibility", 64]]
+        elif "H" in desc:
+            ret += [["tt.divisibility", 32]]
+        elif "D" in desc:
+            ret += [["tt.divisibility", 16]]
+        return ret
 
     @staticmethod
     def make_ttir(mod, metadata, options):
