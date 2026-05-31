@@ -54,6 +54,10 @@ getBlockAndTileShapes(RankedTensorType tensorTy,
   SmallVector<int32_t> blockShape(shape.begin(), shape.end());
   auto sizePerThread = encoding.getSizePerThread();
   SmallVector<int32_t> tileShape(sizePerThread.begin(), sizePerThread.end());
+  for (auto [i, t] : llvm::enumerate(tileShape)) {
+    if (t > blockShape[i])
+      tileShape[i] = blockShape[i];
+  }
   return {blockShape, tileShape};
 }
 
