@@ -61,6 +61,7 @@ class CPUOptions:
 
 class CPUBackend(BaseBackend):
     instrumentation = None  # TODO: intra-kernel instrumentation not yet supported
+    supports_native_tensor_specialization = False
 
     @staticmethod
     def supports_target(target: GPUTarget):
@@ -109,6 +110,32 @@ class CPUBackend(BaseBackend):
         cpu.load_dialects(ctx)
 
     @staticmethod
+    def get_tensor_specialization(arg, **kwargs):
+        if not kwargs.get("align", False):
+            return ""
+        ptr = arg.data_ptr()
+        # assign specialization using letters that don't conflict with existing triton backend
+        if ptr % 64 == 0:
+            return "I"  # 64-byte (cache line, typical PyTorch alloc)
+        if ptr % 32 == 0:
+            return "H"  # 32-byte (AVX2 natural alignment)
+        if ptr % 16 == 0:
+            return "D"  # 16-byte (SSE, base behavior)
+        return ""
+
+    @staticmethod
+    def parse_attr(desc):
+        # Don't call BaseBackend.parse_attr — we own the full divisibility value
+        ret = []
+        if "I" in desc:
+            ret += [["tt.divisibility", 64]]
+        elif "H" in desc:
+            ret += [["tt.divisibility", 32]]
+        elif "D" in desc:
+            ret += [["tt.divisibility", 16]]
+        return ret
+
+    @staticmethod
     def make_ttir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
@@ -135,14 +162,9 @@ class CPUBackend(BaseBackend):
         num_ctas = 1
 
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
-        if options.tile_and_fuse is True:
-            # Use upstream coalesce for tile and fuse
-            # TODO we may need to modify the default vectorization size
-            passes.ttgpuir.add_coalesce(pm)
-        else:
-            cpu.passes.ttgpuir.add_coalesce(pm)
+        cpu.passes.ttgpuir.add_coalesce(pm, max_vector_width=cpu.get_max_vector_width_bits(options.features))
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        cpu.passes.ttgpuir.add_accelerate_matmul(pm, optimize_block_layout=not options.tile_and_fuse,
+        cpu.passes.ttgpuir.add_accelerate_matmul(pm, optimize_block_layout=True,
                                                  canonicalize_k_loop=options.tile_and_fuse)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 

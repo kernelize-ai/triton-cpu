@@ -20,7 +20,7 @@ def TritonCPUAccelerateMatmul : Pass<"tritoncpu-accelerate-matmul", "mlir::Modul
            /*default=*/"false",
            "Rewrite tensor block layouts for improved memory access patterns">,
     Option<"canonicalizeKLoop", "canonicalize-k-loop", "bool",
-           /*default=*/"false",
+           /*default=*/"true",
            "Canonicalize K-loop pointer iter args to direct per-iteration "
            "addptr(init, iv * step) computations, enabling K-loop fusion">,
   ];
@@ -41,6 +41,12 @@ def TritonCPUCoalesce: Pass<"tritoncpu-coalesce", "mlir::ModuleOp"> {
     Layout conversions are inserted before and after the load/store op
     to maintain consistency with the rest of the program.
   }];
+
+  let options = [
+    Option<"MaxVectorWidth", "max-vector-width", "int",
+           /*default=*/"128",
+           "Maximum vector width for coalesced memory accesses (in bits)." >,
+  ];
 
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
 }

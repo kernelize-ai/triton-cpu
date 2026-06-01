@@ -5,6 +5,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/SubtargetFeature.h"
 
 #include <pybind11/pybind11.h>
 
@@ -20,6 +21,20 @@ std::string getDefaultTargerOrProcessTriple() {
     triple = llvm::sys::getProcessTriple();
   }
   return triple;
+}
+
+static unsigned getMaxVectorWidthBits(llvm::StringRef featureStr) {
+  llvm::SubtargetFeatures features(featureStr);
+  const auto &fv = features.getFeatures();
+  auto has = [&](llvm::StringRef f) { return llvm::is_contained(fv, f); };
+
+  if (has("+avx512f"))
+    return 512; // AVX-512 foundation
+  if (has("+avx"))
+    return 256; // AVX/AVX2 (both set +avx)
+
+  // safe minimum for any modern target
+  return 128;
 }
 
 void init_triton_cpu_passes(py::module &&m) {
@@ -49,9 +64,14 @@ void init_triton_cpu_passes_ttgpuir(py::module &&m) {
       },
       py::arg("pm"), py::arg("optimize_block_layout") = false,
       py::arg("canonicalize_k_loop") = false);
-  m.def("add_coalesce", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce());
-  });
+  m.def(
+      "add_coalesce",
+      [](mlir::PassManager &pm, int maxVectorWidth) {
+        mlir::triton::cpu::TritonCPUCoalesceOptions opts;
+        opts.MaxVectorWidth = maxVectorWidth;
+        pm.addPass(mlir::triton::cpu::createTritonCPUCoalesce(opts));
+      },
+      py::arg("pm"), py::arg("max_vector_width"));
   m.def("add_make_persistent_kernel", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createMakePersistentKernelPass());
   });
@@ -95,4 +115,8 @@ void init_triton_cpu(py::module &&m) {
         [](llvm::Module *module, const std::string &triple) {
           module->setTargetTriple(llvm::Triple(triple));
         });
+
+  m.def("get_max_vector_width_bits", [](const std::string &featureStr) {
+    return getMaxVectorWidthBits(featureStr);
+  });
 }
