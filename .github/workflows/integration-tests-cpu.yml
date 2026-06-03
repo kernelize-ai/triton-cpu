@@ -98,7 +98,7 @@ jobs:
           nproc
           echo "PATH is '$PATH'"
           ccache --zero-stats
-          MAX_JOBS=8 TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
+          MAX_JOBS=8 TRITON_BUILD_PROTON=OFF TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
       - name: CCache Stats
         run: ccache --print-stats
 
