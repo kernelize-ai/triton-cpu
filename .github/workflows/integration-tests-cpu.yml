@@ -126,9 +126,7 @@ jobs:
         run: |
           pip install -r python/test-requirements.txt
 
-          skip_expr = $(python3 -c "
-          tests = [l.strip() for l in open('../test/filtered_test_list.txt') if l.strip()]; print(' or '.join(tests))
-          ")
+          skip_expr=$(python3 -c "tests = [l.strip() for l in open('../test/filtered_test_list.txt') if l.strip()]; print(' or '.join(tests))")
 
           TRITON_ENABLE_TILE_AND_FUSE=1 python -m pytest -n 4 --device "cpu" python/test/unit/language/test_core.py -k "not (${skip_expr})"
 
