@@ -11,7 +11,7 @@ test_atomic_min_max_neg_zero
 test_sum_dtype
 test_no_rematerialization_op
 test_precise_math
-test_index1d 
+test_index1d
 test_fdiv_ieee_rounding
 test_cast
 test_abs_fp8
@@ -44,7 +44,7 @@ test_umulhi
 test_join_with_mma
 test_dot_multidim
 test_scaled_dot
-test_dot3d 
+test_dot3d
 test_dot_max_num_imprecise_acc
 test_reduce
 test_permute

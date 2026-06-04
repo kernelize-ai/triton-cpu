@@ -146,7 +146,7 @@ jobs:
           ")
 
           TRITON_ENABLE_TILE_AND_FUSE=1 python -m pytest -n 4 --device "cpu" python/test/unit/language/test_core.py -k "not (${skip_expr})"
-          
+
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
