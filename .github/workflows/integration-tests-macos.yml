@@ -138,7 +138,13 @@ jobs:
         working-directory: ./triton
         run: |
           source ~/.venv/bin/activate
-          TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr) and not test_reduce1d[1-sum-float16-512]"
+
+          pip install -r python/test-requirements.txt
+
+          skip_expr=$(python3 -c "tests = [l.strip() for l in open('../test/filtered_test_list.txt') if l.strip()]; print(' or '.join(tests))")
+
+          TRITON_ENABLE_TILE_AND_FUSE=1 python -m pytest -n 4 --device "cpu" python/test/unit/language/test_core.py -k "not (${skip_expr})"
+
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
