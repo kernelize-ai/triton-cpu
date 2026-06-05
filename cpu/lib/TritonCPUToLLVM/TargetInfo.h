@@ -26,7 +26,8 @@ public:
                triton::gpu::AddrSpace targets) const override;
 
   // Emit a cluster-level barrier (not supported on CPU)
-  void clusterBarrier(Location loc, RewriterBase &rewriter) const override;
+  void clusterBarrier(Location loc, RewriterBase &rewriter,
+                      Operation *sourceOp) const override;
 
   // Emit a block level barrier with lowest level memory operation visibility
   void warpSync(Location loc, RewriterBase &rewriter) const override;
