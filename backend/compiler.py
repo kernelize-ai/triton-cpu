@@ -252,7 +252,7 @@ class CPUBackend(BaseBackend):
 
         flags = []
         return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, options.features, flags,
-                                     options.enable_fp_fusion, False)
+                                     options.enable_fp_fusion, False, False)
 
     @staticmethod
     def make_library(src, metadata, options):
