@@ -19,7 +19,7 @@ _triton_C_dir = str(importlib.resources.files(triton).joinpath("_C"))
 
 def _driver_use_nexus() -> bool:
     """Match compiler.py Nexus gating."""
-    return cpu_knobs.use_nexus
+    return cpu_knobs.cpu.use_nexus
 
 
 @functools.lru_cache()
