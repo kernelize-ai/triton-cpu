@@ -75,7 +75,6 @@ class CPUBackend(BaseBackend):
         self.binary_ext = "so"
 
     def parse_options(self, options):
-        # TODO: can we use knobs here?
         feature_override = cpu_knobs.cpu.feature_override
         target_features = feature_override if feature_override else get_cpu_features()
 
