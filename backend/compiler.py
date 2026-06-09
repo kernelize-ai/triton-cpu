@@ -283,9 +283,10 @@ class CPUBackend(BaseBackend):
             suffix = sysconfig.get_config_var('EXT_SUFFIX')
             so = os.path.join(tmpdir, f'kernel{suffix}')
 
-            link_cmd = [cc, obj_path, "-shared", "-o", so]
-            link_cmd += [f"-l{lib}" for lib in libs]
+            shared_flag = "-bundle" if cpu_driver.is_macos() else "-shared"
+            link_cmd = [cc, obj_path, shared_flag, "-o", so]
             link_cmd += [f"-L{lib_dir}" for lib_dir in lib_dirs]
+            link_cmd += [f"-l{lib}" for lib in libs]
             link_cmd += ccflags
 
             subprocess.check_call(link_cmd, stdout=subprocess.DEVNULL)
