@@ -143,7 +143,7 @@ void init_triton_cpu(py::module &&m) {
 
     llvm::MCContext ctx(triple, *mai, *mri, *sti, &srcMgr);
     std::unique_ptr<llvm::MCObjectFileInfo> mofi(
-        target->createMCObjectFileInfo(ctx, /*PIC=*/false,
+        target->createMCObjectFileInfo(ctx, /*PIC=*/true,
                                        /*LargeCodeModel=*/false));
     ctx.setObjectFileInfo(mofi.get());
 
@@ -173,7 +173,8 @@ void init_triton_cpu(py::module &&m) {
       throw std::runtime_error("assembler initialization error");
 
     parser->setTargetParser(*tap);
-    parser->Run(/*NoInitialTextSection=*/false);
+    if (parser->Run(/*NoInitialTextSection=*/false))
+      throw std::runtime_error("assembly failed");
 
     return py::bytes(std::string(result.begin(), result.end()));
   });
