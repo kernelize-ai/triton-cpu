@@ -124,6 +124,12 @@ void init_triton_cpu(py::module &&m) {
     llvm::SourceMgr srcMgr;
     srcMgr.AddNewSourceBuffer(llvm::MemoryBuffer::getMemBuffer(assembly),
                               llvm::SMLoc());
+    srcMgr.setDiagHandler(
+        [](const llvm::SMDiagnostic &diag, void *) {
+          if (diag.getKind() != llvm::SourceMgr::DK_Warning)
+            diag.print("triton-cpu", llvm::errs());
+        },
+        nullptr);
 
     const llvm::MCTargetOptions mcOptions;
     std::unique_ptr<llvm::MCRegisterInfo> mri(target->createMCRegInfo(triple));
