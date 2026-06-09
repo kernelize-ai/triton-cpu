@@ -109,67 +109,74 @@ void init_triton_cpu(py::module &&m) {
     context.loadAllAvailableDialects();
   });
 
-  m.def(
-      "assemble_cpu",
-      [](const std::string &assembly, const std::string &tripleStr,
-         const std::string &arch, const std::string &features) {
-        std::string error;
+  m.def("assemble_cpu", [](const std::string &assembly,
+                           const std::string &tripleStr,
+                           const std::string &arch,
+                           const std::string &features) {
+    std::string error;
 
-        llvm::Triple triple(tripleStr);
-        const llvm::Target *target =
-            llvm::TargetRegistry::lookupTarget(triple, error);
-        if (!target)
-          throw std::runtime_error("target lookup error: " + error);
+    llvm::Triple triple(tripleStr);
+    const llvm::Target *target =
+        llvm::TargetRegistry::lookupTarget(triple, error);
+    if (!target)
+      throw std::runtime_error("target lookup error: " + error);
 
-        llvm::SourceMgr srcMgr;
-        srcMgr.AddNewSourceBuffer(llvm::MemoryBuffer::getMemBuffer(assembly),
-                                  llvm::SMLoc());
+    llvm::SourceMgr srcMgr;
+    srcMgr.AddNewSourceBuffer(llvm::MemoryBuffer::getMemBuffer(assembly),
+                              llvm::SMLoc());
 
-        const llvm::MCTargetOptions mcOptions;
-        std::unique_ptr<llvm::MCRegisterInfo> mri(
-            target->createMCRegInfo(triple));
-        std::unique_ptr<llvm::MCAsmInfo> mai(
-            target->createMCAsmInfo(*mri, triple, mcOptions));
-        std::unique_ptr<llvm::MCSubtargetInfo> sti(
-            target->createMCSubtargetInfo(triple, arch, features));
+    const llvm::MCTargetOptions mcOptions;
+    std::unique_ptr<llvm::MCRegisterInfo> mri(target->createMCRegInfo(triple));
+    if (!mri)
+      throw std::runtime_error(
+          "assembler initialization error: failed to create MCRegisterInfo");
+    std::unique_ptr<llvm::MCAsmInfo> mai(
+        target->createMCAsmInfo(*mri, triple, mcOptions));
+    if (!mai)
+      throw std::runtime_error(
+          "assembler initialization error: failed to create MCAsmInfo");
+    std::unique_ptr<llvm::MCSubtargetInfo> sti(
+        target->createMCSubtargetInfo(triple, arch, features));
+    if (!sti)
+      throw std::runtime_error(
+          "assembler initialization error: failed to create MCSubtargetInfo");
 
-        llvm::MCContext ctx(triple, *mai, *mri, *sti, &srcMgr);
-        std::unique_ptr<llvm::MCObjectFileInfo> mofi(
-            target->createMCObjectFileInfo(ctx, /*PIC=*/false,
-                                           /*LargeCodeModel=*/false));
-        ctx.setObjectFileInfo(mofi.get());
+    llvm::MCContext ctx(triple, *mai, *mri, *sti, &srcMgr);
+    std::unique_ptr<llvm::MCObjectFileInfo> mofi(
+        target->createMCObjectFileInfo(ctx, /*PIC=*/false,
+                                       /*LargeCodeModel=*/false));
+    ctx.setObjectFileInfo(mofi.get());
 
-        llvm::SmallString<128> cwd;
-        if (!llvm::sys::fs::current_path(cwd))
-          ctx.setCompilationDir(cwd);
+    llvm::SmallString<128> cwd;
+    if (!llvm::sys::fs::current_path(cwd))
+      ctx.setCompilationDir(cwd);
 
-        llvm::SmallVector<char, 0> result;
-        llvm::raw_svector_ostream svos(result);
+    llvm::SmallVector<char, 0> result;
+    llvm::raw_svector_ostream svos(result);
 
-        std::unique_ptr<llvm::MCStreamer> mcStreamer;
-        std::unique_ptr<llvm::MCInstrInfo> mcii(target->createMCInstrInfo());
+    std::unique_ptr<llvm::MCStreamer> mcStreamer;
+    std::unique_ptr<llvm::MCInstrInfo> mcii(target->createMCInstrInfo());
 
-        std::unique_ptr<llvm::MCCodeEmitter> ce(
-            target->createMCCodeEmitter(*mcii, ctx));
-        std::unique_ptr<llvm::MCAsmBackend> mab(
-            target->createMCAsmBackend(*sti, *mri, mcOptions));
-        std::unique_ptr<llvm::MCObjectWriter> ow(mab->createObjectWriter(svos));
-        mcStreamer.reset(target->createMCObjectStreamer(
-            triple, ctx, std::move(mab), std::move(ow), std::move(ce), *sti));
+    std::unique_ptr<llvm::MCCodeEmitter> ce(
+        target->createMCCodeEmitter(*mcii, ctx));
+    std::unique_ptr<llvm::MCAsmBackend> mab(
+        target->createMCAsmBackend(*sti, *mri, mcOptions));
+    std::unique_ptr<llvm::MCObjectWriter> ow(mab->createObjectWriter(svos));
+    mcStreamer.reset(target->createMCObjectStreamer(
+        triple, ctx, std::move(mab), std::move(ow), std::move(ce), *sti));
 
-        std::unique_ptr<llvm::MCAsmParser> parser(
-            createMCAsmParser(srcMgr, ctx, *mcStreamer, *mai));
-        std::unique_ptr<llvm::MCTargetAsmParser> tap(
-            target->createMCAsmParser(*sti, *parser, *mcii));
-        if (!tap)
-          throw std::runtime_error("assembler initialization error");
+    std::unique_ptr<llvm::MCAsmParser> parser(
+        createMCAsmParser(srcMgr, ctx, *mcStreamer, *mai));
+    std::unique_ptr<llvm::MCTargetAsmParser> tap(
+        target->createMCAsmParser(*sti, *parser, *mcii));
+    if (!tap)
+      throw std::runtime_error("assembler initialization error");
 
-        parser->setTargetParser(*tap);
-        parser->Run(/*NoInitialTextSection=*/false);
+    parser->setTargetParser(*tap);
+    parser->Run(/*NoInitialTextSection=*/false);
 
-        return py::bytes(std::string(result.begin(), result.end()));
-      },
-      py::return_value_policy::take_ownership);
+    return py::bytes(std::string(result.begin(), result.end()));
+  });
 
   m.def("get_default_target_triple",
         []() { return getDefaultTargerOrProcessTriple(); });
