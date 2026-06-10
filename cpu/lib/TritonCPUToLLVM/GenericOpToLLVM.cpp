@@ -112,14 +112,13 @@ public:
   // operands in the static (unrolled) path. Slices memory backed tensors into
   // tiles (LLVM struct type).
   SmallVector<Value>
-  getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter, unsigned vectorSize,
+  getLoopBodyBlockArgs(ConversionPatternRewriter &rewriter,
                        ArrayRef<unsigned> elemOffset,
                        std::optional<unsigned> loopIndex = std::nullopt);
 
   // stores generic body tensor results into global memory buffers.
   void scatterResults(ConversionPatternRewriter &rewriter,
-                      ArrayRef<Value> results, ArrayRef<Type> resultTypes,
-                      unsigned vectorSize);
+                      ArrayRef<Value> results, ArrayRef<Type> resultTypes);
 
   // update loop carried iter arg state, scattering to global buffers as
   // necessary.
@@ -275,7 +274,7 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
 }
 
 SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
-    ConversionPatternRewriter &rewriter, unsigned vectorSize,
+    ConversionPatternRewriter &rewriter,
     ArrayRef<unsigned> elemOffset, // only used if loopIndex is present
     std::optional<unsigned> loopIndex) {
   // start with IVs
@@ -386,8 +385,7 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
         Value tileStruct = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
         auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-        // TODO: should this be vectorSize?
-        for (unsigned j = 0; j < vectorSize; ++j) {
+        for (unsigned j = 0; j < tileStructTy.getBody().size(); ++j) {
           Value globalIdx = b.add(flatOffset, b.i32_val(j));
           Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
                             elemTy, argInfo.bufferPtr, ValueRange{globalIdx});
@@ -422,8 +420,7 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
 
 void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
                                 ArrayRef<Value> results,
-                                ArrayRef<Type> resultTypes,
-                                unsigned vectorSize) {
+                                ArrayRef<Type> resultTypes) {
   for (auto [tile, tileType, ptr, elemTy] :
        llvm::zip(results, resultTypes, materializedResults,
                  materializedResultElementTypes)) {
@@ -431,11 +428,11 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto llvmStruct = cast<LLVM::LLVMStructType>(tileType);
     Value llvmTile =
-        UnrealizedConversionCastOp::create(rewriter, loc, tileType, tile)
+        UnrealizedConversionCastOp::create(rewriter, loc, llvmStruct, tile)
             .getResult(0);
     // TODO: should this be vector size or should we read the number of
     // elements from the tile struct?
-    for (unsigned j = 0; j < vectorSize; ++j) {
+    for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
       Value elem = b.extract_val(llvmStruct.getBody()[j], llvmTile, j);
       Value idx = b.add(flatOffset, b.i32_val(j));
       Value gep =
@@ -653,7 +650,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       // uses the tile offset state above
       SmallVector<Value> chunkedArgs =
-          helper.getLoopBodyBlockArgs(rewriter, vectorSize, elemOffset, i);
+          helper.getLoopBodyBlockArgs(rewriter, elemOffset, i);
 
       auto [newIterArgVals, loopTiles] =
           cloneTileBody(op, rewriter, chunkedArgs);
@@ -662,7 +659,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           llvm::map_to_vector(loopTiles, [&](Value tile) {
             return getTypeConverter()->convertType(tile.getType());
           });
-      helper.scatterResults(rewriter, loopTiles, resultTypes, vectorSize);
+      helper.scatterResults(rewriter, loopTiles, resultTypes);
       helper.incrementFlatOffset(rewriter, b.i32_val(vectorSize));
     }
   }
@@ -757,7 +754,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       Block *bodyEntry = &bodyRegion.front();
 
       // build tile args before inlining (references block arguments)
-      auto entryArgs = helper.getLoopBodyBlockArgs(rewriter, vectorSize, {});
+      auto entryArgs = helper.getLoopBodyBlockArgs(rewriter, {});
 
       rewriter.inlineRegionBefore(bodyRegion, *innerAfterBlock->getParent(),
                                   innerAfterBlock->getIterator());
@@ -791,7 +788,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             llvm::map_to_vector(loopTiles, [&](Value tile) {
               return getTypeConverter()->convertType(tile.getType());
             });
-        helper.scatterResults(rewriter, loopTiles, resultTypes, vectorSize);
+        helper.scatterResults(rewriter, loopTiles, resultTypes);
 
         rewriter.eraseOp(yieldOp);
         rewriter.setInsertionPointToEnd(&block);
