@@ -8,13 +8,15 @@ from importlib.metadata import metadata
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, Tuple
+import subprocess
+import sysconfig
 import warnings
 
 import triton.backends.cpu.driver as cpu_driver
 from triton import knobs
 from triton._C.libtriton import cpu, ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
-from triton.runtime.build import _build
+from triton.runtime.build import _find_compiler
 
 
 @functools.lru_cache()
@@ -256,20 +258,38 @@ class CPUBackend(BaseBackend):
 
     @staticmethod
     def make_library(src, metadata, options):
+        # uses the LLVM assembler
+        obj_bytes = cpu.assemble_cpu(src, cpu.get_default_target_triple(), options.arch, options.features)
+
+        # uses the system linker
         with tempfile.TemporaryDirectory() as tmpdir:
-            asm_path = os.path.join(tmpdir, "kernel.s")
-            Path(asm_path).write_text(src)
+            obj_path = os.path.join(tmpdir, "kernel.o")
+            with open(obj_path, 'wb') as f:
+                f.write(obj_bytes)
+
             lib_dirs = cpu_driver.library_dirs()
             libs = ["cpu_utils"]
             if int(os.environ.get("USE_SLEEF", 0)) == 1:
                 libs.append("sleef")
-            include_dirs = []
             ccflags = []
             for lib_dir in lib_dirs:
                 ccflags.extend(["-Xlinker", "-rpath", "-Xlinker", lib_dir])
             if cpu_driver.is_macos():
                 ccflags.extend(["-undefined", "dynamic_lookup"])
-            so = _build("kernel", asm_path, tmpdir, lib_dirs, include_dirs, libs, ccflags)
+
+            language = "c"
+            cc = _find_compiler(language)
+
+            suffix = sysconfig.get_config_var('EXT_SUFFIX')
+            so = os.path.join(tmpdir, f'kernel{suffix}')
+
+            shared_flag = "-bundle" if cpu_driver.is_macos() else "-shared"
+            link_cmd = [cc, obj_path, shared_flag, "-o", so]
+            link_cmd += [f"-L{lib_dir}" for lib_dir in lib_dirs]
+            link_cmd += [f"-l{lib}" for lib in libs]
+            link_cmd += ccflags
+
+            subprocess.check_call(link_cmd, stdout=subprocess.DEVNULL)
             with open(so, "rb") as f:
                 return f.read()
 
