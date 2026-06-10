@@ -64,9 +64,8 @@ void TargetInfo::warpSync(Location loc, RewriterBase &rewriter) const {
 }
 
 void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                              std::optional<Value> ctaId, Value val,
-                              Value pred) const {
-  if (ctaId.has_value())
+                              Value ctaId, Value val, Value pred) const {
+  if (ctaId)
     llvm::report_fatal_error(
         "CPU does not support cross-CTA shared memory transfers");
 
@@ -86,9 +85,9 @@ void TargetInfo::storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
 }
 
 Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                              std::optional<Value> ctaId, Type elemTy,
-                              Value pred, Operation *localLoadOp) const {
-  if (ctaId.has_value())
+                              Value ctaId, Type elemTy, Value pred,
+                              Operation *localLoadOp) const {
+  if (ctaId)
     llvm::report_fatal_error(
         "CPU does not support cross-CTA shared memory transfers");
   Value falseVal = LLVM::ConstantOp::create(rewriter, loc, elemTy,
@@ -140,7 +139,7 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
 
   // store our value to smem
   Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
-  storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
+  storeDShared(rewriter, loc, slot, Value(), val, b.true_val());
 
   b.barrier(triton::gpu::AddrSpace::None);
 
@@ -215,7 +214,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   // 1. All threads store their initial values to shared memory slots
   // corresponding to their thread ID.
   Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
-  storeDShared(rewriter, loc, slot, std::nullopt, val, b.true_val());
+  storeDShared(rewriter, loc, slot, Value(), val, b.true_val());
 
   // Wait for all threads to finish writing.
   b.barrier(triton::gpu::AddrSpace::None);
@@ -232,7 +231,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     Value otherThreadId = b.i32_val(otherIdx);
     Value otherSlot =
         b.gep(ptrTy, int_ty(elemSizeBits), smemBase, otherThreadId);
-    Value otherVal = loadDShared(rewriter, loc, otherSlot, std::nullopt,
+    Value otherVal = loadDShared(rewriter, loc, otherSlot, Value(),
                                  val.getType(), b.true_val());
 
     IRMapping mapping;
@@ -242,7 +241,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   }
   // Store the final reduced value back into Thread 0's slot so others can read
   // it.
-  storeDShared(rewriter, loc, slot, std::nullopt, accumulatedVal, b.true_val());
+  storeDShared(rewriter, loc, slot, Value(), accumulatedVal, b.true_val());
 
   rewriter.setInsertionPointToStart(continuationBlock);
 
@@ -251,7 +250,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
 
   // 3. All threads load the reduced value from Thread 0's slot
   Value leaderSlot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, b.i32_val(0));
-  acc[0] = loadDShared(rewriter, loc, leaderSlot, std::nullopt, val.getType(),
+  acc[0] = loadDShared(rewriter, loc, leaderSlot, Value(), val.getType(),
                        b.true_val());
 
   return true;
