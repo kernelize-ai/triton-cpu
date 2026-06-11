@@ -13,6 +13,7 @@ import sysconfig
 import warnings
 
 import triton.backends.cpu.driver as cpu_driver
+import triton.backends.cpu.knobs as cpu_knobs
 from triton import knobs
 from triton._C.libtriton import cpu, ir, llvm, passes
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
@@ -45,9 +46,8 @@ class CPUOptions:
     allowed_dot_input_precisions: Tuple[str] = ("ieee", )
     supported_fp8_dtypes: Tuple[str] = ()
     matrix_instr_nonkdim: int = 16
-    tile_and_fuse: bool = os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1"
-    # TODO: de-duplicate with driver
-    warp_size: int = int(os.environ.get("TRITON_CPU_WARP_SIZE", 1))
+    tile_and_fuse: bool = cpu_knobs.cpu.tile_and_fuse
+    warp_size: int = cpu_knobs.cpu.warp_size
     min_dot_size: int = 1
 
     def __post_init__(self):
@@ -77,8 +77,7 @@ class CPUBackend(BaseBackend):
         self.binary_ext = "so"
 
     def parse_options(self, options):
-        # TODO: can we use knobs here?
-        feature_override = os.environ.get("TRITON_CPU_TARGET_FEATURES")
+        feature_override = cpu_knobs.cpu.feature_override
         target_features = feature_override if feature_override else get_cpu_features()
 
         args = {"arch": get_cpu_name(), "features": target_features}
@@ -269,7 +268,7 @@ class CPUBackend(BaseBackend):
 
             lib_dirs = cpu_driver.library_dirs()
             libs = ["cpu_utils"]
-            if int(os.environ.get("USE_SLEEF", 0)) == 1:
+            if cpu_knobs.cpu.use_sleef:
                 libs.append("sleef")
             ccflags = []
             for lib_dir in lib_dirs:

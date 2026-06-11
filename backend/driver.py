@@ -8,6 +8,7 @@ import platform
 import importlib.resources
 from pathlib import Path
 
+import triton.backends.cpu.knobs as cpu_knobs
 from triton.runtime.build import compile_module_from_src
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
@@ -18,7 +19,7 @@ _triton_C_dir = str(importlib.resources.files(triton).joinpath("_C"))
 
 def _driver_use_nexus() -> bool:
     """Match compiler.py Nexus gating."""
-    return os.environ.get("TRITON_CPU_USE_NEXUS", "0") == "1"
+    return cpu_knobs.cpu.use_nexus
 
 
 @functools.lru_cache()
@@ -28,12 +29,12 @@ def is_macos():
 
 @functools.lru_cache()
 def external_openmp_path():
-    return os.environ.get("TRITON_LOCAL_LIBOMP_PATH", "/opt/homebrew/opt/libomp/")
+    return cpu_knobs.cpu.libomp_path
 
 
 @functools.lru_cache()
 def external_boost_path():
-    return os.environ.get("TRITON_LOCAL_BOOST_PATH", "/opt/homebrew")
+    return cpu_knobs.cpu.boost_path
 
 
 @functools.lru_cache()
@@ -113,7 +114,7 @@ class NexusCpuUtils:
 
     def load_binary(self, name, kernel, shared_mem, device):
         import nexus
-        device_idx = int(os.environ.get("TRITON_CPU_NEXUS_DEVICE", "0"))
+        device_idx = cpu_knobs.cpu.nexus_device_id
         rt = nexus.get_runtime("cpu")
         dev = rt.get_device(device_idx)
         # Keep temp file persistent: library may be JIT-compiled lazily on first run.
@@ -133,7 +134,7 @@ class NexusCpuUtils:
             "max_num_regs": os.cpu_count() * 4,
             "max_shared_mem": 1024 * 1024 * 1024,
             "multiprocessor_count": os.cpu_count(),
-            "warpSize": int(os.environ.get("TRITON_CPU_WARP_SIZE", 1)),
+            "warpSize": cpu_knobs.cpu.warp_size,
         }
 
 
@@ -467,10 +468,10 @@ class NexusCPULauncher:
         kernel_args = args[4:]
 
         num_warps = getattr(self.metadata, "num_warps", 1)
-        warp_size = getattr(self.metadata, "warp_size", int(os.environ.get("TRITON_CPU_WARP_SIZE", 1)))
+        warp_size = getattr(self.metadata, "warp_size", cpu_knobs.cpu.warp_size)
         shared_mem = packed_metadata[2] if packed_metadata is not None else self.metadata.shared
 
-        device_idx = int(os.environ.get("TRITON_CPU_NEXUS_DEVICE", "0"))
+        device_idx = cpu_knobs.cpu.nexus_device_id
 
         if enter_hook is not None:
             enter_hook(launch_metadata)
@@ -583,7 +584,7 @@ class CPUDriver(DriverBase):
 
     def get_current_target(self):
         capability = "cpu"
-        warp_size = int(os.environ.get('TRITON_CPU_WARP_SIZE', 1))
+        warp_size = cpu_knobs.cpu.warp_size
         return GPUTarget("cpu", capability, warp_size)
 
     def get_active_torch_device(self):
