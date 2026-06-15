@@ -220,11 +220,18 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
         auto kBlock = StringAttr::get(rewriter.getContext(), "block");
 
         auto layout = triton::gpu::toLinearLayout(tensorTy).flattenOuts();
-        // llvm::errs() << "layout: " << layout << "\n";
+        int64_t tensorElems = layout.getTotalOutDimSize();
 
-        int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
-                                              tensorTy.getShape().end(),
-                                              int64_t{1}, std::multiplies<>());
+        auto inverted = layout.pseudoinvert();
+        auto dimNames = inverted.getInDimNames();
+        assert(dimNames.begin() != dimNames.end() &&
+               "expected flattened inverted layout to have at least one input "
+               "dimension");
+        auto inDim = *dimNames.begin();
+
+        // TODO: necessary?
+        assert(inverted.getInDimSize(inDim) == tensorElems &&
+               "expected layout inpute space to match tensor shape");
 
         Value globalPtr = allocateGlobalBuffer(
             rewriter, loc, elemTy, tensorElems, loopIterArgs.size(), generic);
@@ -238,15 +245,16 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
             cast<UnrealizedConversionCastOp>(arg.operand.getDefiningOp());
         auto initVal = castedInitOp.getOperand(0);
         auto initStructTy = cast<LLVM::LLVMStructType>(initVal.getType());
-        for (unsigned i = 0; i < initStructTy.getBody().size(); ++i) {
-          Value elem = b.extract_val(initStructTy.getBody()[i], initVal, i);
-          auto globalIndices = layout.apply(
-              {{kRegister, i}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
-          assert(globalIndices.size() == 1 &&
-                 "expected falttened layout to have exactly 1 out dim");
-          Value gep =
-              b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()), elemTy,
-                    globalPtr, b.i32_val(globalIndices.front().second));
+
+        for (unsigned j = 0; j < tensorElems; ++j) {
+          auto indices = inverted.apply({{inDim, j}});
+          assert(!indices.empty() && indices.front().first == kRegister);
+          auto regIndex = indices.front().second;
+
+          Value elem = b.extract_val(initStructTy.getBody()[regIndex], initVal,
+                                     regIndex);
+          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
+                            elemTy, globalPtr, b.i32_val(j));
           b.store(elem, gep);
         }
 
@@ -501,19 +509,25 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
 
     auto layout = triton::gpu::toLinearLayout(tensorTy).flattenOuts();
 
-    for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
-      Value elem = b.extract_val(llvmStruct.getBody()[j], llvmTile, j);
-      Value globalRegisterIndex = b.add(flatOffset, b.i32_val(j));
-      auto layoutVals = applyLinearLayout(loc, rewriter, layout,
-                                          {{kRegister, globalRegisterIndex},
-                                           {kLane, b.i32_val(0)},
-                                           {kWarp, b.i32_val(0)},
-                                           {kBlock, b.i32_val(0)}});
-      assert(layoutVals.size() == 1 &&
-             "expected linear layout to have flattened outputs");
+    auto inverted = layout.pseudoinvert();
+    auto dimNames = inverted.getInDimNames();
+    assert(dimNames.begin() != dimNames.end() &&
+           "expected flattened inverted layout to have at least one input "
+           "dimension");
+    auto inDim = *dimNames.begin();
 
-      Value gep = b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr,
-                        layoutVals.front().second);
+    int64_t tensorElems = inverted.getTotalInDimSize();
+
+    for (unsigned j = 0; j < tensorElems; ++j) {
+      auto indices = inverted.apply({{inDim, j}});
+      assert(!indices.empty() && indices.front().first == kRegister);
+      auto regIndex = indices.front().second;
+
+      Value elem =
+          b.extract_val(llvmStruct.getBody()[regIndex], llvmTile, regIndex);
+      Value globalTensorIndex = b.add(flatOffset, b.i32_val(j));
+      Value gep =
+          b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, globalTensorIndex);
       b.store(elem, gep);
     }
   }
@@ -536,7 +550,7 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
         // buffer ptr inter args may be forwarded from the previous loop
         // level. only update the tile data for iter args that are the result
         // of a ttc.yield, which will have triton types
-        if (isa<RankedTensorType>(yieldVal.getType())) {
+        if (auto tensorTy = dyn_cast<RankedTensorType>(yieldVal.getType())) {
           Location loc = yieldVal.getLoc();
 
           auto kRegister = StringAttr::get(rewriter.getContext(), "register");
@@ -548,14 +562,24 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
                             cast<RankedTensorType>(arg.operand.getType()))
                             .flattenOuts();
 
+          auto inverted = layout.pseudoinvert();
+          auto dimNames = inverted.getInDimNames();
+          assert(dimNames.begin() != dimNames.end() &&
+                 "expected flattened inverted layout to have at least one "
+                 "input dimension");
+          auto inDim = *dimNames.begin();
+
           auto b = TritonLLVMOpBuilder(loc, rewriter);
           auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
+          Type elemTy = tensorTy.getElementType();
           auto castedYieldVal = UnrealizedConversionCastOp::create(
                                     rewriter, loc, arg.llvmType, yieldVal)
                                     .getResult(0);
+
+          int64_t tensorElems = inverted.getTotalInDimSize();
+
           for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
-            Value elem =
-                b.extract_val(llvmStruct.getBody()[j], castedYieldVal, j);
+            Value elem = b.extract_val(elemTy, castedYieldVal, j);
             Value globalRegisterIndex = b.add(iterArgOffset, b.i32_val(j));
             auto layoutVals =
                 applyLinearLayout(arg.operand.getLoc(), rewriter, layout,
@@ -564,10 +588,10 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
                                    {kWarp, b.i32_val(0)},
                                    {kBlock, b.i32_val(0)}});
             assert(layoutVals.size() == 1 &&
-                   "expected linear layout to have flattened outputs");
-            Value gep =
-                b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
-                      arg.bufferPtr, layoutVals.front().second);
+                   "expected flattened layout to have one output dimension");
+            auto globalBufferOffset = layoutVals.front().second;
+            Value gep = b.gep(ptr_ty(rewriter.getContext()), elemTy,
+                              arg.bufferPtr, globalBufferOffset);
             b.store(elem, gep);
           }
         }
