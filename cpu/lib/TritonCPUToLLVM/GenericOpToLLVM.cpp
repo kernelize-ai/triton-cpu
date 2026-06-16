@@ -186,8 +186,9 @@ private:
   SmallVector<Value> loopIterArgs;
 
   SmallVector<Value> materializedResults;
-  SmallVector<Type> materializedResultElementTypes;
-  SmallVector<RankedTensorType> materializedResultTensorTypes;
+  SmallVector<Type> materializedResultElementTypes; // TODO: drop, probably
+  SmallVector<RankedTensorType>
+      materializedResultTensorTypes; // TODO: drop, probably
 
   SmallVector<Value> tileOffsets;
   Value flatOffset;
@@ -500,14 +501,16 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
         UnrealizedConversionCastOp::create(rewriter, loc, llvmStruct, tile)
             .getResult(0);
 
-    // llvm::errs() << "result tensor ty: " << tensorTy << "\n";
-
     auto kRegister = StringAttr::get(rewriter.getContext(), "register");
     auto kLane = StringAttr::get(rewriter.getContext(), "lane");
     auto kWarp = StringAttr::get(rewriter.getContext(), "warp");
     auto kBlock = StringAttr::get(rewriter.getContext(), "block");
 
-    auto layout = triton::gpu::toLinearLayout(tensorTy).flattenOuts();
+    auto layout =
+        triton::gpu::toLinearLayout(cast<RankedTensorType>(tile.getType()))
+            .flattenOuts();
+
+    llvm::errs() << "layout = " << layout << "\n";
 
     auto inverted = layout.pseudoinvert();
     auto dimNames = inverted.getInDimNames();
