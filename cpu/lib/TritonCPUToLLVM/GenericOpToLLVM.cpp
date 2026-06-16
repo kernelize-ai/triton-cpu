@@ -139,8 +139,6 @@ public:
             return isa<RankedTensorType>(v.getType());
           }));
 
-      auto kRegister = StringAttr::get(rewriter.getContext(), "register");
-
       for (auto [materializedResultPtr, opResult] :
            llvm::zip(materializedResults, tensorResults)) {
         assert(isa<LLVM::LLVMPointerType>(materializedResultPtr.getType()) &&
@@ -152,22 +150,11 @@ public:
                                              outputStructType);
 
         auto b = TritonLLVMOpBuilder(result.getLoc(), rewriter);
-        auto layout = triton::gpu::toLinearLayout(
-                          cast<RankedTensorType>(opResult.getType()))
-                          .flattenOuts()
-                          .pseudoinvert();
-
-        auto outDims = llvm::to_vector(layout.getInDimNames());
-        assert(outDims.size() == 1 &&
-               "expected flattened layout to have exactly 1 out dim");
-        for (unsigned j = 0; j < layout.getInDimSize(outDims.front()); ++j) {
+        for (unsigned j = 0; j < outputStructType.getBody().size(); ++j) {
           Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
                             elemTy, materializedResultPtr, b.i32_val(j));
           Value loaded = b.load(elemTy, gep);
-          auto layoutIndices = layout.apply({{outDims.front(), j}});
-          assert(layoutIndices.front().first == kRegister);
-          auto regIndex = layoutIndices.front().second;
-          result = b.insert_val(outputStructType, result, loaded, regIndex);
+          result = b.insert_val(outputStructType, result, loaded, j);
         }
         ret.push_back(result);
       }
@@ -262,9 +249,6 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
     Type elemTy = typeConverter->convertType(tensorTy.getElementType());
     materializedResultElementTypes.push_back(elemTy);
 
-    // TODO: should these buffers respect tensor shape or encoding (layout)
-    // shape? if we do the latter we need to read/write from them using the
-    // linear layout
     Value globalPtr = allocateGlobalBuffer(
         rewriter, generic.getResult(i + generic.getNumIterArgs()).getLoc(),
         elemTy, tensorElems, materializedResults.size() + loopIterArgs.size(),
