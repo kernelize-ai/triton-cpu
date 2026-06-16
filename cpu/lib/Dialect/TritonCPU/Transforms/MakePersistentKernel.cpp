@@ -25,8 +25,7 @@ static LogicalResult addPidSentinel(triton::FuncOp funcOp,
   Value blockIdx = entry.getArgument(blockIdxArgPos);
 
   OpBuilder b(&entry, entry.begin());
-  triton::cpu::CurrentBlockOp::create(b, funcOp.getLoc(), blockIdx.getType(),
-                                      blockIdx);
+  cpu::CurrentBlockOp::create(b, funcOp.getLoc(), blockIdx.getType(), blockIdx);
 
   SmallVector<triton::GetProgramIdOp> pidOps;
   for (auto pidOp : entry.getOps<triton::GetProgramIdOp>()) {
@@ -116,6 +115,18 @@ static triton::FuncOp cloneTTFuncWithExtraI32Arg(ModuleOp mod,
   newFunc.addEntryBlock(); // no-op if already present
   Block &oldEntry = src.getBody().front();
   Block &newEntry = newFunc.getBody().front();
+
+  // Replace the locations of the new block arguments with those of the old
+  // block arguments (clobbered by `FIXME` in addEntryBlock()).
+  for (auto [oldArg, newArg] : llvm::zip(
+           oldEntry.getArguments(),
+           newEntry.getArguments().take_front(oldEntry.getNumArguments())))
+    newArg.setLoc(oldArg.getLoc());
+
+  // Give the extra block-index argument a NameLoc: %block_idx.
+  newEntry.getArguments().back().setLoc(
+      NameLoc::get(StringAttr::get(ctx, "block_idx"),
+                   FileLineColLoc::get(ctx, __FILE__, __LINE__, 0)));
 
   IRMapping map;
   // Map old BB args -> new BB args (1:1 for the original args).
