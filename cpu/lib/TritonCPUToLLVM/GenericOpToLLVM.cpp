@@ -173,7 +173,7 @@ private:
   SmallVector<Value> loopIterArgs;
 
   SmallVector<Value> materializedResults;
-  SmallVector<Type> materializedResultElementTypes;
+  SmallVector<RankedTensorType> materializedResultTensorTypes;
 
   SmallVector<Value> tileOffsets;
   Value flatOffset;
@@ -247,7 +247,7 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
         std::accumulate(tensorTy.getShape().begin(), tensorTy.getShape().end(),
                         int64_t{1}, std::multiplies<>());
     Type elemTy = typeConverter->convertType(tensorTy.getElementType());
-    materializedResultElementTypes.push_back(elemTy);
+    materializedResultTensorTypes.push_back(tensorTy);
 
     Value globalPtr = allocateGlobalBuffer(
         rewriter, generic.getResult(i + generic.getNumIterArgs()).getLoc(),
@@ -405,22 +405,57 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
 void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
                                 ArrayRef<Value> results,
                                 ArrayRef<Type> resultTypes) {
-  for (auto [tile, tileType, ptr, elemTy] :
+  for (auto [tile, tileType, ptr, tensorTy] :
        llvm::zip(results, resultTypes, materializedResults,
-                 materializedResultElementTypes)) {
+                 materializedResultTensorTypes)) {
     Location loc = tile.getLoc(); // or ptr?
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto llvmStruct = cast<LLVM::LLVMStructType>(tileType);
     Value llvmTile =
         UnrealizedConversionCastOp::create(rewriter, loc, llvmStruct, tile)
             .getResult(0);
-    // TODO: should this be vector size or should we read the number of
-    // elements from the tile struct?
+    Type elemTy = llvmStruct.getBody()[0];
+
+    auto tileTensorTy = cast<RankedTensorType>(tile.getType());
+    LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
+    LinearLayout fullTensorInverseLayout =
+        triton::gpu::toLinearLayout(tensorTy).pseudoinvert();
+
+    auto tileRegisterToTensorRegister =
+        tileLayout.compose(fullTensorInverseLayout);
+    auto kRegister = StringAttr::get(rewriter.getContext(), "register");
+    // can we use flattenOffsets or sublayout to avoid needing these?
+    auto kLane = StringAttr::get(rewriter.getContext(), "lane");
+    auto kWarp = StringAttr::get(rewriter.getContext(), "warp");
+    auto kBlock = StringAttr::get(rewriter.getContext(), "block");
+
+    SmallVector<std::pair<StringAttr, Value>> originInputDims;
+    for (auto [dim, offset] :
+         llvm::zip(fullTensorInverseLayout.getInDimNames(), tileOffsets)) {
+      originInputDims.push_back({dim, offset});
+    }
+
+    // maps the origin input dims to an origin register which we use to convert
+    // the relative tile registers to absolute positions in the output tensor
+    auto tileOriginMappedDims = applyLinearLayout(
+        loc, rewriter, fullTensorInverseLayout, originInputDims);
+    assert(!tileOriginMappedDims.empty() &&
+           tileOriginMappedDims.front().first == kRegister);
+    Value originRegister = tileOriginMappedDims.front().second;
+
     for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
+      // compute the tile register to full tensor register mapping
       Value elem = b.extract_val(llvmStruct.getBody()[j], llvmTile, j);
-      Value idx = b.add(flatOffset, b.i32_val(j));
+
+      auto relativeRegister = tileRegisterToTensorRegister.apply(
+          {{kRegister, j}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
+      assert(!relativeRegister.empty() &&
+             relativeRegister.front().first == kRegister);
+
+      Value bufferIndex =
+          b.xor_(originRegister, b.i32_val(relativeRegister.front().second));
       Value gep =
-          b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, ValueRange{idx});
+          b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, bufferIndex);
       b.store(elem, gep);
     }
   }
