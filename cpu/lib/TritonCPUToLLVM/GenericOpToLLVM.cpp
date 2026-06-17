@@ -336,22 +336,25 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
                  "expected origin offset to be in the register space");
           int32_t origin = originOffset.second;
 
-          tileLayout = tileLayout.flattenOuts().pseudoinvert();
+          // Compose tileLayout with srcLayout to map tile_register to registers
+          // in the global tensor
+          LinearLayout tileToFullSrc =
+              tileLayout.compose(srcLayout).flattenIns();
+          auto flatDimName = llvm::to_vector(tileToFullSrc.getInDimNames())[0];
 
           LDBG("tile for loop index " << loopIndex.value()
                                       << " has origin register " << origin);
 
-          auto inDimName = llvm::to_vector(tileLayout.getInDimNames())[0];
-          for (unsigned j = 0; j < tileLayout.getInDimSize(inDimName); ++j) {
-            auto regOffset = tileLayout.apply({{inDimName, j}}).front();
-            assert(regOffset.first == kRegister &&
+          for (unsigned j = 0; j < tileToFullSrc.getInDimSize(flatDimName);
+               ++j) {
+            auto relRegOffset = tileToFullSrc.apply({{flatDimName, j}}).front();
+            assert(relRegOffset.first == kRegister &&
                    "expected offset to be in the register space");
-            int32_t dstReg = regOffset.second;
-            int32_t srcReg = dstReg ^ origin;
+            int32_t srcReg = origin ^ relRegOffset.second;
 
             Value extractedElement = b.extract_val(
                 tileStructTy.getBody()[j], argInfo.convertedArg, srcReg);
-            tile = b.insert_val(tileStructTy, tile, extractedElement, dstReg);
+            tile = b.insert_val(tileStructTy, tile, extractedElement, j);
           }
 
           Value castedTile = UnrealizedConversionCastOp::create(
