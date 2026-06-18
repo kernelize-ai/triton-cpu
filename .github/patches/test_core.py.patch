@@ -1,5 +1,5 @@
 diff --git a/python/test/unit/language/test_core.py b/python/test/unit/language/test_core.py
-index 440cff4cb1..88828d5a6a 100644
+index db5386bfe..4e3c7ecc7 100644
 --- a/python/test/unit/language/test_core.py
 +++ b/python/test/unit/language/test_core.py
 @@ -36,6 +36,7 @@ from triton._internal_testing import (
@@ -20,7 +20,7 @@ index 440cff4cb1..88828d5a6a 100644
      if is_interpreter():
          if dtype in [tl.bfloat16, "bfloat16", torch.bfloat16]:
              pytest.skip("bfloat16 is not supported in the interpreter")
-@@ -2081,6 +2085,8 @@ def test_load_store_same_ptr(device):
+@@ -2142,6 +2146,8 @@ def test_load_store_same_ptr(device):
          x = torch.ones((65536, ), device=device, dtype=torch.float32)
          if is_hip():
              kernel[(65536, )](x, num_warps=16)  # threads per Warp for ROCM is 64
@@ -29,16 +29,72 @@ index 440cff4cb1..88828d5a6a 100644
          else:
              kernel[(65536, )](x, num_warps=32)
          assert torch.all(x == 2)
-@@ -3324,7 +3330,7 @@ def get_test_dot_small_k_wmma_cases():
+@@ -3314,8 +3320,8 @@ def convert_fp8_to_fp32(x, device, dtype_str):
+ def get_test_dot_base_cases():
+     return [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1, None)
+             for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 16)]
+-            for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
+-            for input_precision in ['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6']
++            for epilogue in (['none'] if is_cpu() else ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot'])
++            for input_precision in (['ieee'] if is_cpu() else ['tf32', 'tf32x3', 'ieee', 'bf16x3', 'bf16x6'])
+             for in_dtype, out_dtype in [('float16', 'float16'), ('float16',
+                                                                  'float32'), ('float32',
+                                                                               'float32'), ('float64', 'float64')]
+@@ -3330,11 +3336,15 @@ def get_test_dot_small_fp64_cases():
+ 
+ # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
+ def get_test_dot_softmax():
++    if is_cpu():
++        return []
+     return [(128, 128, 64, 8, False, False, 'softmax', 'ieee', 'float16', 'float32', 1, None)]
+ 
+ 
+ # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
+ def get_test_dot_mixed_sizes_cases():
++    if is_cpu():
++        return []
+     available_kpack = [1, 2 if (is_hip() and not is_hip_cdna4()) else 1]
+     available_precision = ["tf32" if is_cuda() else "ieee"]
+     return [
+@@ -3353,6 +3363,8 @@ def get_test_dot_mixed_sizes_cases():
+ # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
+ # introduced in #2370
+ def get_test_dot_transposed_op_base_cases():
++    if is_cpu():
++        return []
+     return [(64, 64, 64, 4, col_a, col_b, 'none', 'ieee', 'float32', 'float32', 1, None)
+             for col_a in [True, False]
+             for col_b in [True, False]]
+@@ -3361,6 +3373,8 @@ def get_test_dot_transposed_op_base_cases():
+ # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
+ # Introduced in #2750
+ def get_test_dot_h100_shortcut_cases():
++    if is_cpu():
++        return []
+     return [(64, 64, 64, 4, False, False, 'chain-dot', 'ieee', 'bfloat16', 'float32', 1, None)]
+ 
+ 
+@@ -3376,6 +3390,8 @@ def get_test_dot_mfma_edge_cases():
+ # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
+ # introduced in #3370
+ def get_test_dot_fp8_output_cases():
++    if is_cpu():
++        return []
+     return [(128, 128, 64, 4, False, False, 'chain-dot', 'ieee', float8_type, 'float32', 1, None)
+             for float8_type in ["float8e5", "float8e4nv"]]
+ 
+@@ -3449,6 +3465,10 @@ def get_test_dot_small_k_wmma_cases():
  
  
  def get_test_small_dots_cases():
--    if not is_cuda():
-+    if not (is_cuda() or is_cpu()):
++    if is_cpu():
++        return [(2, 4, 32, 1, False, False, 'None', 'ieee', 'float16', 'float32', 1, None),
++            (64, 8, 8, 4, False, False, 'None', 'ieee', 'float32', 'float32', 1, None),
++            (64, 8, 16, 4, False, False, 'None', 'ieee', 'float16', 'float32', 1, None)]
+     if not is_cuda():
          return []
      return [(2, 4, 32, 1, False, False, 'None', 'ieee', 'float16', 'float32', 1, None),
-             (1, 2, 32, 1, False, False, 'None', 'ieee', 'float8e5', 'float32', 1, None),
-@@ -3360,6 +3366,13 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
+@@ -3486,6 +3506,11 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
          if input_precision == "bf16x3" or input_precision == "bf16x6":
              pytest.skip(f"input_precision {input_precision} is not supported in the interpreter")
      else:
@@ -47,8 +103,6 @@ index 440cff4cb1..88828d5a6a 100644
 +                pytest.skip("Only IEEE precision is supported on CPU")
 +            if in_dtype not in ['float16', 'float32', 'float64']:
 +                pytest.skip("Only float16, float32 and float64 are supported on CPU")
-+            if num_warps != 1:
-+                pytest.skip("Only 1 warp is supported on CPU")
          if not is_hip() and K < 16:
              tf32_n8 = (in_dtype == 'float32' and N == 8 and K == 8 and input_precision == 'tf32')
              if in_dtype != 'float64' and not tf32_n8:
