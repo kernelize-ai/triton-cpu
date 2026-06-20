@@ -668,12 +668,21 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
                               "should be inside a 1D generic");
           dim = 0;
         } else {
-          // Body induction vars are ordered outermost-first, matching
-          // blockShape. A SliceEncodingAttr with dim=d encodes a 1D tensor in
-          // the direction of tensor-dim (1-d),
-          // which sits at blockShape index (rank-2) + (1-d) = rank-1-d.
-          dim =
-              genericOp.getBlockShape().size() - 1 - sliceEncodingAttr.getDim();
+          SmallVector<unsigned> sliceDims;
+          Attribute enc = sliceEncodingAttr;
+          while (auto sliceEnc = dyn_cast<gpu::SliceEncodingAttr>(enc)) {
+            sliceDims.push_back(sliceEnc.getDim());
+            enc = sliceEnc.getParent();
+          }
+          // sliceDims is outermost-first; process innermost-first (reversed)
+          SmallVector<unsigned> survivingDims;
+          for (unsigned i = 0; i < genericOp.getBlockShape().size(); ++i)
+            survivingDims.push_back(i);
+          for (auto d : llvm::reverse(sliceDims))
+            survivingDims.erase(survivingDims.begin() + d);
+          assert(survivingDims.size() == 1 &&
+                 "expected single surviving dim for make_dynamic_range");
+          dim = survivingDims.front();
         }
         newOp = triton::cpu::MakeDynamicRangeOp::create(
             rewriter, makeRangeOp.getLoc(), newResultType,
