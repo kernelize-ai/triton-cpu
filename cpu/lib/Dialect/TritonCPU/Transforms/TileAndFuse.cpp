@@ -243,7 +243,7 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
       return failure();
 
     // Wrap scalar reductions in ttc.generic. Take the elementwise chain as
-    // input.
+    // input. // TODO: relax this
     auto reduceResult = reduceOp.getResult();
     if (reduceResult.size() != 1)
       return failure();
@@ -301,10 +301,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
                                               neutralVal.value());
     SmallVector<Value> initVals = {newAccum.getResult()};
 
-    auto generic =
-        cpu::GenericOp::create(rewriter, loc, resultTypes, initVals, insValues,
-                               blockShapeValues, tileShape,
-                               /*reductionDims=*/{0});
+    auto generic = cpu::GenericOp::create(
+        rewriter, loc, resultTypes, initVals, insValues, blockShapeValues,
+        tileShape,
+        /*reductionDims=*/{static_cast<int32_t>(reduceOp.getAxis())});
 
     IRMapping bodyMapping;
     initGenericBody(rewriter, generic, ins, {initVals[0].getType()}, tileShape,
