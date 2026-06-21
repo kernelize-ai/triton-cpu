@@ -303,13 +303,10 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
         continue;
       slicedTileShape.push_back(t);
     }
-    llvm::errs() << "sliced tile shape: " << triton::join(slicedTileShape)
-                 << "\n";
 
     arith::ConstantOp newAccum;
     if (auto accumTensorType =
             dyn_cast<RankedTensorType>(resultTypes.front())) {
-      llvm::errs() << "accum tensor type = " << accumTensorType << "\n";
       auto denseAttr =
           DenseElementsAttr::get(accumTensorType, neutralVal.value());
       newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
@@ -325,7 +322,7 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
         rewriter, loc, resultTypes, initVals, insValues, blockShapeValues,
         tileShape,
         /*reductionDims=*/{static_cast<int32_t>(reduceOp.getAxis())});
-    llvm::errs() << generic.getHeader() << "\n";
+
     IRMapping bodyMapping;
     initGenericBody(
         rewriter, generic, ins,
