@@ -1,10 +1,12 @@
+#include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
 
-#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
-#include "mlir/Transforms/DialectConversion.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
-#include "PatternTritonGPUOpToLLVM.h"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
+
+#include "mlir/Transforms/DialectConversion.h"
+
 #include <functional>
 #include <numeric>
 
@@ -312,14 +314,56 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
           LinearLayout tileLayout = triton::gpu::toLinearLayout(tensorTy);
 
           // get the starting register index for this tile in the source tensor
+          auto globalTensorTy =
+              cast<RankedTensorType>(argInfo.operand.getType());
           LinearLayout srcLayout =
-              triton::gpu::toLinearLayout(
-                  cast<RankedTensorType>(argInfo.operand.getType()))
-                  .pseudoinvert();
-          SmallVector<std::pair<StringAttr, int32_t>> srcLayoutOffsets;
+              triton::gpu::toLinearLayout(globalTensorTy).pseudoinvert();
+          llvm::errs() << "orig src layout: " << srcLayout << "\n";
+          // TODO: should this be recursive?
+          if (srcLayout.getNumInDims() < elemOffset.size()) {
+            auto sliceEncoding = dyn_cast<triton::gpu::SliceEncodingAttr>(
+                globalTensorTy.getEncoding());
+            assert(sliceEncoding == tensorTy.getEncoding());
+            srcLayout = triton::gpu::toLinearLayout(
+                sliceEncoding.paddedShape(globalTensorTy.getShape()),
+                sliceEncoding.getParent());
+
+            llvm::errs() << "src layout pre inversion: " << srcLayout << "\n";
+            srcLayout = srcLayout.removeZeroBasesAlongDim(kRegister);
+            llvm::errs() << "src layout after removing zero bases: "
+                         << srcLayout << "\n";
+
+            srcLayout = srcLayout.pseudoinvert();
+
+            tileLayout = triton::gpu::toLinearLayout(
+                sliceEncoding.paddedShape(tensorTy.getShape()),
+                sliceEncoding.getParent());
+
+            auto bases = tileLayout.getBases();
+            std::vector<std::vector<int>> newRegBases;
+            for (const auto &basis : bases[kRegister]) {
+              if (llvm::any_of(basis, [](int b) { return b != 0; })) {
+                newRegBases.push_back(basis);
+              }
+            }
+            bases[kRegister] = newRegBases;
+            tileLayout = LinearLayout(
+                std::move(bases), llvm::to_vector(tileLayout.getOutDimNames()));
+
+            LLVM_DEBUG({
+              DBGS() << "Reset srcLayout using slice parent "
+                     << sliceEncoding.getParent() << "\n  for type "
+                     << globalTensorTy << "\n";
+              DBGS() << "New global layout: " << srcLayout << "\n";
+              DBGS() << "New tile layout: " << tileLayout << "\n";
+            });
+          }
+
           assert(srcLayout.getNumInDims() == elemOffset.size() &&
                  "expected number of tile element offsets to match source "
                  "layout in dims");
+
+          SmallVector<std::pair<StringAttr, int32_t>> srcLayoutOffsets;
           for (auto [dim, layoutOffset] :
                llvm::zip(srcLayout.getInDimNames(), elemOffset)) {
             // the srcLayout is inverted, so map to the tile layouts out dims to
@@ -338,9 +382,15 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
 
           // Compose tileLayout with srcLayout to map tile_register to registers
           // in the global tensor
-          LinearLayout tileToFullSrc =
-              tileLayout.compose(srcLayout).flattenIns();
+          // TODO: reset layouts here to describe the actual encoding??
+          LinearLayout tileToFullSrc = tileLayout.compose(srcLayout);
+          LDBG("tile to full src layout: " << tileToFullSrc);
+          tileToFullSrc = tileToFullSrc.flattenIns().flattenOuts();
+          LDBG("flat tile to full src layout: " << tileToFullSrc);
           auto flatDimName = llvm::to_vector(tileToFullSrc.getInDimNames())[0];
+          // This is no good, becuase the register space still jumps by 8s...
+          // tileToFullSrc = tileToFullSrc.removeZeroBasesAlongDim(flatDimName);
+          // LDBG("flat tile without broadcast: " << tileToFullSrc);
 
           LDBG("tile for loop index " << loopIndex.value()
                                       << " has origin register " << origin);
