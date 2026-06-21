@@ -242,12 +242,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     if (reduceOp->getParentOfType<cpu::GenericOp>())
       return failure();
 
-    // Wrap scalar reductions in ttc.generic. Take the elementwise chain as
-    // input. // TODO: relax this
     auto reduceResult = reduceOp.getResult();
     if (reduceResult.size() != 1)
-      return failure();
-    if (isa<RankedTensorType>(reduceResult[0].getType()))
       return failure();
 
     auto srcs = reduceOp.getSrcs();
@@ -278,9 +274,12 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     Operation *combiner = reduceOp.getSingleCombiner();
     if (!combiner)
       return failure();
+    LDBG("Wrap reduction with combiner " << *combiner);
+
     auto neutralVal = getNeutralElement(combiner);
     if (!neutralVal)
       return failure();
+    LDBG("Created neutral element for reduce: " << neutralVal);
 
     auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
 
@@ -290,28 +289,53 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     if (srcUsedElsewhere)
       resultTypes.push_back(tensorTy);
 
-    LDBG("Creating reduction generic op, result types: " << resultTypes.size());
+    LDBG("Creating reduction generic op, number of results: "
+         << resultTypes.size());
 
     SmallVector<Value> insValues =
         llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
     SmallVector<Value> blockShapeValues =
         buildBlockShapeValues(loc, blockShape, rewriter);
 
-    auto newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
-                                              neutralVal.value());
+    SmallVector<int32_t> slicedTileShape;
+    for (auto [i, t] : llvm::enumerate(tileShape)) {
+      if (i == reduceOp.getAxis())
+        continue;
+      slicedTileShape.push_back(t);
+    }
+    llvm::errs() << "sliced tile shape: " << triton::join(slicedTileShape)
+                 << "\n";
+
+    arith::ConstantOp newAccum;
+    if (auto accumTensorType =
+            dyn_cast<RankedTensorType>(resultTypes.front())) {
+      llvm::errs() << "accum tensor type = " << accumTensorType << "\n";
+      auto denseAttr =
+          DenseElementsAttr::get(accumTensorType, neutralVal.value());
+      newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
+                                           accumTensorType, denseAttr);
+    } else {
+      newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
+                                           neutralVal.value());
+    }
+
     SmallVector<Value> initVals = {newAccum.getResult()};
 
     auto generic = cpu::GenericOp::create(
         rewriter, loc, resultTypes, initVals, insValues, blockShapeValues,
         tileShape,
         /*reductionDims=*/{static_cast<int32_t>(reduceOp.getAxis())});
-
+    llvm::errs() << generic.getHeader() << "\n";
     IRMapping bodyMapping;
-    initGenericBody(rewriter, generic, ins, {initVals[0].getType()}, tileShape,
-                    bodyMapping);
+    initGenericBody(
+        rewriter, generic, ins,
+        {updateTensorType(newAccum.getResult().getType(), slicedTileShape)},
+        tileShape, bodyMapping);
 
     // Clone the reduce — it now operates on the tile-sized tensor.
     auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
+    newReduce->getResult(0).setType(
+        updateTensorType(reduceOp->getResult(0).getType(), slicedTileShape));
     Value partial = newReduce->getResult(0);
 
     // manually combine with the iter args source
@@ -326,6 +350,19 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     combMapping.map(srcBlock.getArgument(0), acc);
     combMapping.map(srcBlock.getArgument(1), partial);
     auto newCombiner = rewriter.clone(*combiner, combMapping);
+#if 1
+    newCombiner->getResult(0).setType(acc.getType());
+#else
+    // TODO: need to updateTensorType here
+    SmallVector<int32_t> slicedTileShape;
+    for (auto [i, t] : llvm::enumerate(tileShape)) {
+      if (i == reduceOp.getAxis())
+        continue;
+      slicedTileShape.push_back(t);
+    }
+    newCombiner->getResult(0).setType(
+        updateTensorType(newAccum.getResult().getType(), slicedTileShape));
+#endif
 
     SmallVector<Value> partials(newCombiner->getResults().begin(),
                                 newCombiner->getResults().end());
