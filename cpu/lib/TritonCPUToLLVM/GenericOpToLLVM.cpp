@@ -388,10 +388,8 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
           LDBG("Tile to source tensor register mapping layout: "
                << tileToFullSrc);
 
-          auto flatDimName = llvm::to_vector(tileToFullSrc.getInDimNames())[0];
-          for (unsigned j = 0; j < tileToFullSrc.getInDimSize(flatDimName);
-               ++j) {
-            auto relRegOffset = tileToFullSrc.apply({{flatDimName, j}}).front();
+          for (unsigned j = 0; j < tileToFullSrc.getTotalInDimSize(); ++j) {
+            auto relRegOffset = tileToFullSrc.apply({{kRegister, j}}).front();
             assert(relRegOffset.first == kRegister &&
                    "expected offset to be in the register space");
             int32_t srcReg = origin ^ relRegOffset.second;
