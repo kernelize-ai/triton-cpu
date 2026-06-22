@@ -186,6 +186,10 @@ public:
                               Value elem)>
           scatter);
 
+  static std::pair<LinearLayout, LinearLayout> computeTileAndFullTensorLayouts(
+      MLIRContext *context, RankedTensorType tileTensorTy,
+      RankedTensorType fullTensorTy, unsigned numOffsets);
+
 private:
   SmallVector<ArgInfo> args;
   SmallVector<Value> loopIterArgs;
@@ -399,7 +403,6 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
 void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
                                 ArrayRef<Value> results,
                                 ArrayRef<Type> resultTypes) {
-  // TODO: resultTypes needed?
   for (auto [tile, tileType, ptr, tensorTy] :
        llvm::zip(results, resultTypes, materializedResults,
                  materializedResultTensorTypes)) {
@@ -504,51 +507,8 @@ Value LoopHelper::extractTileFromFullTensor(
   Value tile = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
   TritonLLVMOpBuilder b(loc, rewriter);
 
-  auto kRegister = StringAttr::get(rewriter.getContext(), "register");
-  // compute linear layouts for the tile tensor and full tensor. We will compose
-  // these layouts to obtain register -> register mappings for the extraction.
-  LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
-  LinearLayout fullLayout =
-      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert();
-  if (fullLayout.getNumInDims() < elemOffsets.size()) {
-    // for tensors with sliced encoding we restore the sliced dimension
-    // with size 1 which allows us to pass the elem offsets directly.
-    // The sliced dimension has no effect on the position of the sliced
-    // tile within the original sliced tensor.
-    auto sliceEncoding =
-        cast<triton::gpu::SliceEncodingAttr>(fullTensorTy.getEncoding());
-    assert(sliceEncoding == tileTensorTy.getEncoding());
-
-    // compute a linear layout representing the parent encoding but
-    // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
-    fullLayout = triton::gpu::toLinearLayout(
-        sliceEncoding.paddedShape(fullTensorTy.getShape()),
-        sliceEncoding.getParent());
-    // remove any register padded added by toLinearLayout for the parent
-    // encoding (e.g. if sizePerThread > 1 in the sliced dimension) and
-    // invert the layout
-    fullLayout = fullLayout.removeZeroBasesAlongDim(kRegister);
-    // and invert
-    fullLayout = fullLayout.pseudoinvert();
-
-    // repeat for the tile layout
-    tileLayout = triton::gpu::toLinearLayout(
-        sliceEncoding.paddedShape(tileTensorTy.getShape()),
-        sliceEncoding.getParent());
-    tileLayout = tileLayout.removeZeroBasesAlongDim(kRegister);
-
-    LLVM_DEBUG({
-      DBGS() << "Reset full layout using slice parent "
-             << sliceEncoding.getParent() << "\n  for type " << fullTensorTy
-             << "\n";
-      DBGS() << "New global layout: " << fullLayout << "\n";
-      DBGS() << "New tile layout: " << tileLayout << "\n";
-    });
-  }
-
-  assert(fullLayout.getNumInDims() == elemOffsets.size() &&
-         "expected number of tile element offsets to match source "
-         "layout in dims");
+  auto [fullLayout, tileLayout] = computeTileAndFullTensorLayouts(
+      rewriter.getContext(), tileTensorTy, fullTensorTy, elemOffsets.size());
 
   SmallVector<std::pair<StringAttr, int32_t>> fullLayoutOffsets;
   for (auto [dim, offset] :
@@ -563,6 +523,7 @@ Value LoopHelper::extractTileFromFullTensor(
     fullLayoutOffsets.emplace_back(dim, tiledOffset);
   }
   auto originOffset = fullLayout.apply(fullLayoutOffsets).front();
+  auto kRegister = StringAttr::get(rewriter.getContext(), "register");
   assert(originOffset.first == kRegister &&
          "expected origin offset to be in the register space");
   int32_t origin = originOffset.second;
@@ -603,53 +564,8 @@ void LoopHelper::scatterTileToFullTensor(
         scatter) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
-  LinearLayout fullTensorInverseLayout =
-      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert();
-
-  auto kRegister = StringAttr::get(rewriter.getContext(), "register");
-
-  // TODO: can we unify with the extract path?
-  if (fullTensorInverseLayout.getNumInDims() < tileOffsets.size()) {
-    // for tensors with sliced encoding we restore the sliced dimension
-    // with size 1 which allows us to pass the elem offsets directly.
-    // The sliced dimension has no effect on the position of the sliced
-    // tile within the original sliced tensor.
-    auto sliceEncoding =
-        cast<triton::gpu::SliceEncodingAttr>(fullTensorTy.getEncoding());
-    assert(sliceEncoding == tileTensorTy.getEncoding());
-
-    // compute a linear layout representing the parent encoding but
-    // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
-    fullTensorInverseLayout = triton::gpu::toLinearLayout(
-        sliceEncoding.paddedShape(fullTensorTy.getShape()),
-        sliceEncoding.getParent());
-    // remove any register padded added by toLinearLayout for the parent
-    // encoding (e.g. if sizePerThread > 1 in the sliced dimension) and
-    // invert the layout
-    fullTensorInverseLayout =
-        fullTensorInverseLayout.removeZeroBasesAlongDim(kRegister);
-    // and invert
-    fullTensorInverseLayout = fullTensorInverseLayout.pseudoinvert();
-
-    // repeat for the tile layout
-    tileLayout = triton::gpu::toLinearLayout(
-        sliceEncoding.paddedShape(tileTensorTy.getShape()),
-        sliceEncoding.getParent());
-    tileLayout = tileLayout.removeZeroBasesAlongDim(kRegister);
-
-    LLVM_DEBUG({
-      DBGS() << "Reset full layout using slice parent "
-             << sliceEncoding.getParent() << "\n  for type " << fullTensorTy
-             << "\n";
-      DBGS() << "New global layout: " << fullTensorInverseLayout << "\n";
-      DBGS() << "New tile layout: " << tileLayout << "\n";
-    });
-  }
-
-  assert(fullTensorInverseLayout.getNumInDims() == tileOffsets.size() &&
-         "expected number of tile element offsets to match source "
-         "layout in dims");
+  auto [fullTensorInverseLayout, tileLayout] = computeTileAndFullTensorLayouts(
+      rewriter.getContext(), tileTensorTy, fullTensorTy, tileOffsets.size());
 
   // Compose tileLayout with fullLayout to map tile_register to registers
   // in the global tensor
@@ -669,6 +585,7 @@ void LoopHelper::scatterTileToFullTensor(
   // the relative tile registers to absolute positions in the output tensor
   auto tileOriginMappedDims = applyLinearLayout(
       loc, rewriter, fullTensorInverseLayout, originInputDims);
+  auto kRegister = StringAttr::get(rewriter.getContext(), "register");
   assert(!tileOriginMappedDims.empty() &&
          tileOriginMappedDims.front().first == kRegister);
   Value originRegister = tileOriginMappedDims.front().second;
@@ -686,6 +603,63 @@ void LoopHelper::scatterTileToFullTensor(
         b.xor_(originRegister, b.i32_val(relativeRegister.front().second));
     scatter(b, bufferIndex, elem);
   }
+}
+
+std::pair<LinearLayout, LinearLayout>
+LoopHelper::computeTileAndFullTensorLayouts(MLIRContext *context,
+                                            RankedTensorType tileTensorTy,
+                                            RankedTensorType fullTensorTy,
+                                            unsigned numOffsets) {
+  auto kRegister = StringAttr::get(context, "register");
+
+  // compute linear layouts for the tile tensor and full tensor. We will
+  // compose these layouts to obtain register -> register mappings for the
+  // extraction.
+  LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
+  LinearLayout fullLayout =
+      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert();
+
+  if (fullLayout.getNumInDims() < numOffsets) {
+    // for tensors with sliced encoding we restore the sliced dimension
+    // with size 1 which allows us to pass the elem offsets directly.
+    // The sliced dimension has no effect on the position of the sliced
+    // tile within the original sliced tensor.
+    auto sliceEncoding =
+        cast<triton::gpu::SliceEncodingAttr>(fullTensorTy.getEncoding());
+    assert(sliceEncoding == tileTensorTy.getEncoding());
+
+    // compute a linear layout representing the parent encoding but
+    // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
+    fullLayout = triton::gpu::toLinearLayout(
+        sliceEncoding.paddedShape(fullTensorTy.getShape()),
+        sliceEncoding.getParent());
+    // remove any register padded added by toLinearLayout for the parent
+    // encoding (e.g. if sizePerThread > 1 in the sliced dimension) and
+    // invert the layout
+    fullLayout = fullLayout.removeZeroBasesAlongDim(kRegister);
+    // and invert
+    fullLayout = fullLayout.pseudoinvert();
+
+    // repeat for the tile layout
+    tileLayout = triton::gpu::toLinearLayout(
+        sliceEncoding.paddedShape(tileTensorTy.getShape()),
+        sliceEncoding.getParent());
+    tileLayout = tileLayout.removeZeroBasesAlongDim(kRegister);
+
+    LLVM_DEBUG({
+      DBGS() << "Reset full layout using slice parent "
+             << sliceEncoding.getParent() << "\n  for type " << fullTensorTy
+             << "\n";
+      DBGS() << "New global layout: " << fullLayout << "\n";
+      DBGS() << "New tile layout: " << tileLayout << "\n";
+    });
+  }
+
+  assert(fullLayout.getNumInDims() == numOffsets &&
+         "expected number of tile element offsets to match source "
+         "layout in dims");
+
+  return std::make_pair(fullLayout, tileLayout);
 }
 
 struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
