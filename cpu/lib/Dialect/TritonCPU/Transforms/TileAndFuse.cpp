@@ -347,19 +347,7 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     combMapping.map(srcBlock.getArgument(0), acc);
     combMapping.map(srcBlock.getArgument(1), partial);
     auto newCombiner = rewriter.clone(*combiner, combMapping);
-#if 1
     newCombiner->getResult(0).setType(acc.getType());
-#else
-    // TODO: need to updateTensorType here
-    SmallVector<int32_t> slicedTileShape;
-    for (auto [i, t] : llvm::enumerate(tileShape)) {
-      if (i == reduceOp.getAxis())
-        continue;
-      slicedTileShape.push_back(t);
-    }
-    newCombiner->getResult(0).setType(
-        updateTensorType(newAccum.getResult().getType(), slicedTileShape));
-#endif
 
     SmallVector<Value> partials(newCombiner->getResults().begin(),
                                 newCombiner->getResults().end());
