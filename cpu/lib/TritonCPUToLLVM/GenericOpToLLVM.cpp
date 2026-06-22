@@ -422,7 +422,7 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
         tileOffsets,
         [context, elemTy, bufferPtr](TritonLLVMOpBuilder &b, Value bufferIndex,
                                      Value elem) {
-          Value gep = b.gep(ptr_ty(context), elemTy, ptr, bufferIndex);
+          Value gep = b.gep(ptr_ty(context), elemTy, bufferPtr, bufferIndex);
           b.store(elem, gep);
         });
   }
