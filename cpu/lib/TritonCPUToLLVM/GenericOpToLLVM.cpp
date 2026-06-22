@@ -411,8 +411,6 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
             .getResult(0);
     Type elemTy = llvmStruct.getBody()[0];
 
-#if 1
-
     auto tileTensorTy = cast<RankedTensorType>(tile.getType());
     MLIRContext *context = rewriter.getContext();
     scatterTileToFullTensor(
@@ -423,52 +421,6 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
           Value gep = b.gep(ptr_ty(context), elemTy, ptr, bufferIndex);
           b.store(elem, gep);
         });
-
-#else
-
-    auto tileTensorTy = cast<RankedTensorType>(tile.getType());
-    LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
-    LinearLayout fullTensorInverseLayout =
-        triton::gpu::toLinearLayout(tensorTy).pseudoinvert();
-
-    auto tileRegisterToTensorRegister =
-        tileLayout.compose(fullTensorInverseLayout);
-    auto kRegister = StringAttr::get(rewriter.getContext(), "register");
-    // can we use flattenOffsets or sublayout to avoid needing these?
-    auto kLane = StringAttr::get(rewriter.getContext(), "lane");
-    auto kWarp = StringAttr::get(rewriter.getContext(), "warp");
-    auto kBlock = StringAttr::get(rewriter.getContext(), "block");
-
-    SmallVector<std::pair<StringAttr, Value>> originInputDims;
-    for (auto [dim, offset] :
-         llvm::zip(fullTensorInverseLayout.getInDimNames(), tileOffsets)) {
-      originInputDims.push_back({dim, offset});
-    }
-
-    // maps the origin input dims to an origin register which we use to convert
-    // the relative tile registers to absolute positions in the output tensor
-    auto tileOriginMappedDims = applyLinearLayout(
-        loc, rewriter, fullTensorInverseLayout, originInputDims);
-    assert(!tileOriginMappedDims.empty() &&
-           tileOriginMappedDims.front().first == kRegister);
-    Value originRegister = tileOriginMappedDims.front().second;
-
-    for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
-      // compute the tile register to full tensor register mapping
-      Value elem = b.extract_val(llvmStruct.getBody()[j], llvmTile, j);
-
-      auto relativeRegister = tileRegisterToTensorRegister.apply(
-          {{kRegister, j}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
-      assert(!relativeRegister.empty() &&
-             relativeRegister.front().first == kRegister);
-
-      Value bufferIndex =
-          b.xor_(originRegister, b.i32_val(relativeRegister.front().second));
-      Value gep =
-          b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, bufferIndex);
-      b.store(elem, gep);
-    }
-#endif
   }
 }
 
@@ -732,12 +684,7 @@ void LoopHelper::scatterTileToFullTensor(
 
     Value bufferIndex =
         b.xor_(originRegister, b.i32_val(relativeRegister.front().second));
-#if 1
     scatter(b, bufferIndex, elem);
-#else
-    Value gep = b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, bufferIndex);
-    b.store(elem, gep);
-#endif
   }
 }
 
