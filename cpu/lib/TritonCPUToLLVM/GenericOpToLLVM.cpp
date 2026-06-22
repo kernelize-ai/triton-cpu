@@ -413,7 +413,7 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
 
 #if 1
 
-    auto tileTensorTy = cast<RankedTensorType>(tileType);
+    auto tileTensorTy = cast<RankedTensorType>(tile.getType());
     MLIRContext *context = rewriter.getContext();
     scatterTileToFullTensor(
         rewriter, loc, tileTensorTy, llvmStruct, llvmTile, tensorTy,
@@ -564,8 +564,8 @@ Value LoopHelper::extractTileFromFullTensor(
     // The sliced dimension has no effect on the position of the sliced
     // tile within the original sliced tensor.
     auto sliceEncoding =
-        dyn_cast<triton::gpu::SliceEncodingAttr>(fullTensorTy.getEncoding());
-    assert(sliceEncoding && sliceEncoding == tileTensorTy.getEncoding());
+        cast<triton::gpu::SliceEncodingAttr>(fullTensorTy.getEncoding());
+    assert(sliceEncoding == tileTensorTy.getEncoding());
 
     // compute a linear layout representing the parent encoding but
     // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
@@ -651,17 +651,61 @@ void LoopHelper::scatterTileToFullTensor(
         scatter) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  LinearLayout tileLayout =
-      triton::gpu::toLinearLayout(tileTensorTy).flattenIns();
-  // full tensor inverse layout maps full tensor dims to registers. We flatten
-  // the input dimensions because the only dimension we are concerned with is
-  // the (first) register dim - all others will be 1.
+  LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
   LinearLayout fullTensorInverseLayout =
-      triton::gpu::toLinearLayout(fullTensorTy).flattenIns().pseudoinvert();
+      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert();
 
-  auto tileRegisterToTensorRegister =
-      tileLayout.compose(fullTensorInverseLayout);
   auto kRegister = StringAttr::get(rewriter.getContext(), "register");
+
+  // TODO: can we unify with the extract path?
+  if (fullTensorInverseLayout.getNumInDims() < tileOffsets.size()) {
+    // for tensors with sliced encoding we restore the sliced dimension
+    // with size 1 which allows us to pass the elem offsets directly.
+    // The sliced dimension has no effect on the position of the sliced
+    // tile within the original sliced tensor.
+    auto sliceEncoding =
+        cast<triton::gpu::SliceEncodingAttr>(fullTensorTy.getEncoding());
+    assert(sliceEncoding == tileTensorTy.getEncoding());
+
+    // compute a linear layout representing the parent encoding but
+    // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
+    fullTensorInverseLayout = triton::gpu::toLinearLayout(
+        sliceEncoding.paddedShape(fullTensorTy.getShape()),
+        sliceEncoding.getParent());
+    // remove any register padded added by toLinearLayout for the parent
+    // encoding (e.g. if sizePerThread > 1 in the sliced dimension) and
+    // invert the layout
+    fullTensorInverseLayout =
+        fullTensorInverseLayout.removeZeroBasesAlongDim(kRegister);
+    // and invert
+    fullTensorInverseLayout = fullTensorInverseLayout.pseudoinvert();
+
+    // repeat for the tile layout
+    tileLayout = triton::gpu::toLinearLayout(
+        sliceEncoding.paddedShape(tileTensorTy.getShape()),
+        sliceEncoding.getParent());
+    tileLayout = tileLayout.removeZeroBasesAlongDim(kRegister);
+
+    LLVM_DEBUG({
+      DBGS() << "Reset full layout using slice parent "
+             << sliceEncoding.getParent() << "\n  for type " << fullTensorTy
+             << "\n";
+      DBGS() << "New global layout: " << fullTensorInverseLayout << "\n";
+      DBGS() << "New tile layout: " << tileLayout << "\n";
+    });
+  }
+
+  assert(fullTensorInverseLayout.getNumInDims() == tileOffsets.size() &&
+         "expected number of tile element offsets to match source "
+         "layout in dims");
+
+  // Compose tileLayout with fullLayout to map tile_register to registers
+  // in the global tensor
+  // Note that we flatten both dimensions to remove lane, warp, and
+  // block which are all equal to 1. This gives us a tile register <->
+  // source tensor mapping
+  auto tileRegisterToTensorRegister =
+      tileLayout.compose(fullTensorInverseLayout).flattenIns().flattenOuts();
 
   SmallVector<std::pair<StringAttr, Value>> originInputDims;
   for (auto [dim, offset] :
