@@ -125,7 +125,9 @@ public:
   // update loop carried iter arg state, scattering to global buffers as
   // necessary.
   void updateIterArgs(ConversionPatternRewriter &rewriter,
-                      ArrayRef<Value> newIterArgVals);
+                      ArrayRef<Value> newIterArgVals,
+                      ArrayRef<unsigned> elemOffset,
+                      std::optional<unsigned> loopIndex = std::nullopt);
 
   SmallVector<Value> getIterArgVals() const { return loopIterArgs; }
 
@@ -471,7 +473,9 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
 }
 
 void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
-                                ArrayRef<Value> newIterArgVals) {
+                                ArrayRef<Value> newIterArgVals,
+                                ArrayRef<unsigned> elemOffset,
+                                std::optional<unsigned> loopIndex) {
   unsigned totalIterArgs = llvm::count_if(
       args, [](const ArgInfo &a) { return a.kind == ArgInfo::Kind::IterArg; });
   assert(newIterArgVals.size() == totalIterArgs &&
@@ -487,22 +491,49 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
         // buffer ptr inter args may be forwarded from the previous loop
         // level. only update the tile data for iter args that are the result
         // of a ttc.yield, which will have triton types
-        if (isa<RankedTensorType>(yieldVal.getType())) {
+        if (auto tileTensorTy =
+                dyn_cast<RankedTensorType>(yieldVal.getType())) {
           Location loc = yieldVal.getLoc();
 
-          auto b = TritonLLVMOpBuilder(loc, rewriter);
-          auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
-          auto castedYieldVal = UnrealizedConversionCastOp::create(
-                                    rewriter, loc, arg.llvmType, yieldVal)
-                                    .getResult(0);
-          for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
-            Value elem =
-                b.extract_val(llvmStruct.getBody()[j], castedYieldVal, j);
-            Value idx = b.add(iterArgOffset, b.i32_val(j));
-            Value gep =
-                b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
-                      arg.bufferPtr, ValueRange{idx});
-            b.store(elem, gep);
+          if (loopIndex.has_value()) {
+            // static offsets path
+            auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
+            Type elemTy = llvmStruct.getBody()[0];
+            auto llvmTile = UnrealizedConversionCastOp::create(
+                                rewriter, loc, arg.llvmType, yieldVal)
+                                .getResult(0);
+            auto tensorTy = cast<RankedTensorType>(arg.operand.getType());
+
+            auto b = TritonLLVMOpBuilder(loc, rewriter);
+            SmallVector<Value> offsetVals;
+            for (auto offset : elemOffset)
+              offsetVals.push_back(b.i32_val(offset));
+
+            Value ptr = arg.bufferPtr;
+            MLIRContext *context = rewriter.getContext();
+            scatterTileToFullTensor(
+                rewriter, loc, tileTensorTy, llvmStruct, llvmTile, tensorTy,
+                offsetVals,
+                [context, elemTy, ptr](TritonLLVMOpBuilder &b,
+                                       Value bufferIndex, Value elem) {
+                  Value gep = b.gep(ptr_ty(context), elemTy, ptr, bufferIndex);
+                  b.store(elem, gep);
+                });
+          } else {
+            auto b = TritonLLVMOpBuilder(loc, rewriter);
+            auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
+            auto castedYieldVal = UnrealizedConversionCastOp::create(
+                                      rewriter, loc, arg.llvmType, yieldVal)
+                                      .getResult(0);
+            for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
+              Value elem =
+                  b.extract_val(llvmStruct.getBody()[j], castedYieldVal, j);
+              Value idx = b.add(iterArgOffset, b.i32_val(j));
+              Value gep =
+                  b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
+                        arg.bufferPtr, ValueRange{idx});
+              b.store(elem, gep);
+            }
           }
         }
         loopIterArgs.push_back(arg.bufferPtr);
@@ -620,12 +651,13 @@ void LoopHelper::scatterTileToFullTensor(
         scatter) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
-  LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
+  LinearLayout tileLayout =
+      triton::gpu::toLinearLayout(tileTensorTy).flattenIns();
   // full tensor inverse layout maps full tensor dims to registers. We flatten
-  // the outputs because the only dimension we are concerned with is the (first)
-  // register dim - all others will be 1.
+  // the input dimensions because the only dimension we are concerned with is
+  // the (first) register dim - all others will be 1.
   LinearLayout fullTensorInverseLayout =
-      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert().flattenOuts();
+      triton::gpu::toLinearLayout(fullTensorTy).flattenIns().pseudoinvert();
 
   auto tileRegisterToTensorRegister =
       tileLayout.compose(fullTensorInverseLayout);
@@ -834,7 +866,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       auto [newIterArgVals, loopTiles] =
           cloneTileBody(op, rewriter, chunkedArgs);
-      helper.updateIterArgs(rewriter, newIterArgVals);
+      helper.updateIterArgs(rewriter, newIterArgVals, elemOffset, i);
       SmallVector<Type> resultTypes =
           llvm::map_to_vector(loopTiles, [&](Value tile) {
             return getTypeConverter()->convertType(tile.getType());
@@ -959,7 +991,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         SmallVector<Value> newIterArgVals(yieldOp.getValues().begin(),
                                           yieldOp.getValues().begin() +
                                               numIterArgs);
-        helper.updateIterArgs(rewriter, newIterArgVals);
+        helper.updateIterArgs(rewriter, newIterArgVals, {});
 
         // scatter non-iter-arg tensor tiles
         SmallVector<Value> loopTiles(yieldOp.getValues().begin() + numIterArgs,
@@ -1016,7 +1048,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
 
-          helper.updateIterArgs(rewriter, innerIterArgVals);
+          helper.updateIterArgs(rewriter, innerIterArgVals, {});
           emitNestedLoops(op, helper, rewriter, dim + 1, blockShape, tileShape,
                           vectorSize, afterBlock);
 
@@ -1024,7 +1056,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           return helper.getIterArgVals();
         });
 
-    helper.updateIterArgs(rewriter, finalCarried);
+    helper.updateIterArgs(rewriter, finalCarried, {});
   }
 
   LogicalResult
