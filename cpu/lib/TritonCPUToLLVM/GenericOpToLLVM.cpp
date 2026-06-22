@@ -170,6 +170,14 @@ public:
     return llvm::is_contained(reductionDims, d);
   }
 
+  static Value extractTileFromFullTensor(ConversionPatternRewriter &rewriter,
+                                            Location loc,
+                                            RankedTensorType tileTensorTy,
+                                            LLVM::LLVMStructType tileStructTy,
+                                            Value fullTensor,
+                                            RankedTensorType fullTensorTy,
+                                            ArrayRef<unsigned> elemOffsets);
+
 private:
   SmallVector<ArgInfo> args;
   SmallVector<Value> loopIterArgs;
@@ -304,9 +312,16 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
       if (loopIndex.has_value()) {
         auto tensorTy = dyn_cast<RankedTensorType>(argInfo.tritonType);
         if (tensorTy && !argInfo.bufferPtr) {
+          // TODO: refactor into helper
           assert(argInfo.convertedArg && "expected adaptor-converted arg "
                                          "for non-alloca tensor operand");
           auto tileStructTy = cast<LLVM::LLVMStructType>(argInfo.llvmType);
+          auto fullTensorTy =
+              cast<RankedTensorType>(argInfo.operand.getType());
+#if 1
+          Value newTile = extractTileFromFullTensor(rewriter, loc, tensorTy, tileStructTy, argInfo.convertedArg, fullTensorTy, elemOffset);
+          blockArgs.push_back(newTile);
+#else
           Value tile = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
           TritonLLVMOpBuilder b(argInfo.operand.getLoc(), rewriter);
 
@@ -403,6 +418,7 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
                                  rewriter, loc, argInfo.tritonType, tile)
                                  .getResult(0);
           blockArgs.push_back(castedTile);
+#endif 
           continue;
         }
       }
@@ -547,6 +563,105 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
       }
     }
   }
+}
+
+Value LoopHelper::extractTileFromFullTensor(ConversionPatternRewriter &rewriter,
+                                            Location loc,
+                                            RankedTensorType tileTensorTy,
+                                            LLVM::LLVMStructType tileStructTy,
+                                            Value fullTensor,
+                                            RankedTensorType fullTensorTy,
+                                            ArrayRef<unsigned> elemOffsets) {
+  Value tile = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
+  TritonLLVMOpBuilder b(loc, rewriter);
+
+  auto kRegister = StringAttr::get(rewriter.getContext(), "register");
+  // compute linear layouts for the tile tensor and full tensor. We will compose
+  // these layouts to obtain register -> register mappings for the extraction.
+  LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
+  LinearLayout fullLayout =
+      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert();
+  if (fullLayout.getNumInDims() < elemOffsets.size()) {
+    // for tensors with sliced encoding we restore the sliced dimension
+    // with size 1 which allows us to pass the elem offsets directly.
+    // The sliced dimension has no effect on the position of the sliced
+    // tile within the original sliced tensor.
+    auto sliceEncoding =
+        dyn_cast<triton::gpu::SliceEncodingAttr>(fullTensorTy.getEncoding());
+    assert(sliceEncoding && sliceEncoding == tileTensorTy.getEncoding());
+
+    // compute a linear layout representing the parent encoding but
+    // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
+    fullLayout = triton::gpu::toLinearLayout(
+        sliceEncoding.paddedShape(fullTensorTy.getShape()),
+        sliceEncoding.getParent());
+    // remove any register padded added by toLinearLayout for the parent
+    // encoding (e.g. if sizePerThread > 1 in the sliced dimension) and
+    // invert the layout
+    fullLayout = fullLayout.removeZeroBasesAlongDim(kRegister);
+    // and invert
+    fullLayout = fullLayout.pseudoinvert();
+
+    // repeat for the tile layout
+    tileLayout = triton::gpu::toLinearLayout(
+        sliceEncoding.paddedShape(tileTensorTy.getShape()),
+        sliceEncoding.getParent());
+    tileLayout = tileLayout.removeZeroBasesAlongDim(kRegister);
+
+    LLVM_DEBUG({
+      DBGS() << "Reset full layout using slice parent "
+             << sliceEncoding.getParent() << "\n  for type " << fullTensorTy
+             << "\n";
+      DBGS() << "New global layout: " << fullLayout << "\n";
+      DBGS() << "New tile layout: " << tileLayout << "\n";
+    });
+  }
+
+  assert(fullLayout.getNumInDims() == elemOffsets.size() &&
+         "expected number of tile element offsets to match source "
+         "layout in dims");
+
+  SmallVector<std::pair<StringAttr, int32_t>> fullLayoutOffsets;
+  for (auto [dim, offset] :
+       llvm::zip(fullLayout.getInDimNames(), elemOffsets)) {
+    // the full layout is inverted, so map to the tile layouts out dims to
+    // get the correct tensor size
+    auto tileDimSize = tileLayout.getOutDimSize(dim);
+    // if the full layout dim size matches the tile layout dim size then
+    // this dimension is not tiled
+    int32_t tiledOffset =
+        tileDimSize == fullLayout.getInDimSize(dim) ? 0 : offset;
+    fullLayoutOffsets.emplace_back(dim, tiledOffset);
+  }
+  auto originOffset = fullLayout.apply(fullLayoutOffsets).front();
+  assert(originOffset.first == kRegister &&
+         "expected origin offset to be in the register space");
+  int32_t origin = originOffset.second;
+
+  // Compose tileLayout with fullLayout to map tile_register to registers
+  // in the global tensor
+  // Note that we flatten both dimensions to remove lane, warp, and
+  // block which are all equal to 1. This gives us a tile register <->
+  // source tensor mapping
+  LinearLayout tileToFullSrc =
+      tileLayout.compose(fullLayout).flattenIns().flattenOuts();
+  LDBG("Tile to source tensor register mapping layout: " << tileToFullSrc);
+
+  for (unsigned j = 0; j < tileToFullSrc.getTotalInDimSize(); ++j) {
+    auto relRegOffset = tileToFullSrc.apply({{kRegister, j}}).front();
+    assert(relRegOffset.first == kRegister &&
+           "expected offset to be in the register space");
+    int32_t srcReg = origin ^ relRegOffset.second;
+
+    Value extractedElement =
+        b.extract_val(tileStructTy.getBody()[j], fullTensor, srcReg);
+    tile = b.insert_val(tileStructTy, tile, extractedElement, j);
+  }
+
+  Value castedTile = UnrealizedConversionCastOp::create(
+                         rewriter, loc, tileTensorTy, tile)
+                         .getResult(0);
+  return castedTile;
 }
 
 struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
