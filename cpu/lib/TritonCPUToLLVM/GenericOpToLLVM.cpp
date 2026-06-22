@@ -176,6 +176,14 @@ public:
       RankedTensorType fullTensorTy, ArrayRef<unsigned> elemOffsets,
       llvm::function_ref<Value(TritonLLVMOpBuilder &, Type, int32_t)> extract);
 
+  static void scatterTileToFullTensor(
+      ConversionPatternRewriter &rewriter, Location loc,
+      RankedTensorType tileTensorTy, LLVM::LLVMStructType tileStructTy,
+      Value tile, RankedTensorType fullTensorTy, ArrayRef<Value> tileOffsets,
+      llvm::function_ref<void(TritonLLVMOpBuilder &b, Value bufferIndex,
+                              Value elem)>
+          scatter);
+
 private:
   SmallVector<ArgInfo> args;
   SmallVector<Value> loopIterArgs;
@@ -389,6 +397,7 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
 void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
                                 ArrayRef<Value> results,
                                 ArrayRef<Type> resultTypes) {
+  // TODO: resultTypes needed?
   for (auto [tile, tileType, ptr, tensorTy] :
        llvm::zip(results, resultTypes, materializedResults,
                  materializedResultTensorTypes)) {
@@ -399,6 +408,21 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
         UnrealizedConversionCastOp::create(rewriter, loc, llvmStruct, tile)
             .getResult(0);
     Type elemTy = llvmStruct.getBody()[0];
+
+#if 1
+
+    auto tileTensorTy = cast<RankedTensorType>(tileType);
+    MLIRContext *context = rewriter.getContext();
+    scatterTileToFullTensor(
+        rewriter, loc, tileTensorTy, llvmStruct, llvmTile, tensorTy,
+        tileOffsets,
+        [context, elemTy, ptr](TritonLLVMOpBuilder &b, Value bufferIndex,
+                               Value elem) {
+          Value gep = b.gep(ptr_ty(context), elemTy, ptr, bufferIndex);
+          b.store(elem, gep);
+        });
+
+#else
 
     auto tileTensorTy = cast<RankedTensorType>(tile.getType());
     LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
@@ -442,6 +466,7 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
           b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, bufferIndex);
       b.store(elem, gep);
     }
+#endif
   }
 }
 
@@ -584,6 +609,60 @@ Value LoopHelper::extractTileFromFullTensor(
       UnrealizedConversionCastOp::create(rewriter, loc, tileTensorTy, tile)
           .getResult(0);
   return castedTile;
+}
+
+void LoopHelper::scatterTileToFullTensor(
+    ConversionPatternRewriter &rewriter, Location loc,
+    RankedTensorType tileTensorTy, LLVM::LLVMStructType tileStructTy,
+    Value tile, RankedTensorType fullTensorTy, ArrayRef<Value> tileOffsets,
+    llvm::function_ref<void(TritonLLVMOpBuilder &b, Value bufferIndex,
+                            Value elem)>
+        scatter) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+  LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
+  // full tensor inverse layout maps full tensor dims to registers. We flatten
+  // the outputs because the only dimension we are concerned with is the (first)
+  // register dim - all others will be 1.
+  LinearLayout fullTensorInverseLayout =
+      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert().flattenOuts();
+
+  auto tileRegisterToTensorRegister =
+      tileLayout.compose(fullTensorInverseLayout);
+  auto kRegister = StringAttr::get(rewriter.getContext(), "register");
+
+  SmallVector<std::pair<StringAttr, Value>> originInputDims;
+  for (auto [dim, offset] :
+       llvm::zip(fullTensorInverseLayout.getInDimNames(), tileOffsets)) {
+    originInputDims.push_back({dim, offset});
+  }
+
+  // maps the origin input dims to an origin register which we use to convert
+  // the relative tile registers to absolute positions in the output tensor
+  auto tileOriginMappedDims = applyLinearLayout(
+      loc, rewriter, fullTensorInverseLayout, originInputDims);
+  assert(!tileOriginMappedDims.empty() &&
+         tileOriginMappedDims.front().first == kRegister);
+  Value originRegister = tileOriginMappedDims.front().second;
+
+  for (unsigned j = 0; j < tileStructTy.getBody().size(); ++j) {
+    // compute the tile register to full tensor register mapping
+    Value elem = b.extract_val(tileStructTy.getBody()[j], tile, j);
+
+    auto relativeRegister =
+        tileRegisterToTensorRegister.apply({{kRegister, j}});
+    assert(!relativeRegister.empty() &&
+           relativeRegister.front().first == kRegister);
+
+    Value bufferIndex =
+        b.xor_(originRegister, b.i32_val(relativeRegister.front().second));
+#if 1
+    scatter(b, bufferIndex, elem);
+#else
+    Value gep = b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, bufferIndex);
+    b.store(elem, gep);
+#endif
+  }
 }
 
 struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
