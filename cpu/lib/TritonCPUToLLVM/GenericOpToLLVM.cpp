@@ -416,11 +416,12 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
 
     auto tileTensorTy = cast<RankedTensorType>(tile.getType());
     MLIRContext *context = rewriter.getContext();
+    Value bufferPtr = ptr; // captured structured bindings are a C++20 extension
     scatterTileToFullTensor(
         rewriter, loc, tileTensorTy, llvmStruct, llvmTile, tensorTy,
         tileOffsets,
-        [context, elemTy, ptr](TritonLLVMOpBuilder &b, Value bufferIndex,
-                               Value elem) {
+        [context, elemTy, bufferPtr](TritonLLVMOpBuilder &b, Value bufferIndex,
+                                     Value elem) {
           Value gep = b.gep(ptr_ty(context), elemTy, ptr, bufferIndex);
           b.store(elem, gep);
         });
@@ -443,7 +444,7 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
     if (arg.kind == ArgInfo::Kind::IterArg) {
       Value yieldVal = newIterArgVals[yieldIdx++];
       if (arg.bufferPtr) {
-        // buffer ptr inter args may be forwarded from the previous loop
+        // buffer ptr iter args may be forwarded from the previous loop
         // level. only update the tile data for iter args that are the result
         // of a ttc.yield, which will have triton types
         if (auto tileTensorTy =
@@ -544,8 +545,6 @@ Value LoopHelper::extractTileFromFullTensor(
     int32_t srcReg = origin ^ relRegOffset.second;
 
     Value extractedElement = extract(b, tileStructTy.getBody()[j], srcReg);
-    // Value extractedElement =
-    // b.extract_val(tileStructTy.getBody()[j], fullTensor, srcReg);
     tile = b.insert_val(tileStructTy, tile, extractedElement, j);
   }
 
@@ -629,7 +628,7 @@ LoopHelper::computeTileAndFullTensorLayouts(MLIRContext *context,
     assert(sliceEncoding == tileTensorTy.getEncoding());
 
     // compute a linear layout representing the parent encoding but
-    // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
+    // using the sliced encoding padded shape (i.e. slice dim set to 1)
     fullLayout = triton::gpu::toLinearLayout(
         sliceEncoding.paddedShape(fullTensorTy.getShape()),
         sliceEncoding.getParent());
