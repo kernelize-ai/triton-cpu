@@ -1,10 +1,12 @@
+#include "PatternTritonGPUOpToLLVM.h"
 #include "TargetInfo.h"
 
-#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
-#include "mlir/Transforms/DialectConversion.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
-#include "PatternTritonGPUOpToLLVM.h"
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
+
+#include "mlir/Transforms/DialectConversion.h"
+
 #include <functional>
 #include <numeric>
 
@@ -312,14 +314,52 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
           LinearLayout tileLayout = triton::gpu::toLinearLayout(tensorTy);
 
           // get the starting register index for this tile in the source tensor
+          auto globalTensorTy =
+              cast<RankedTensorType>(argInfo.operand.getType());
           LinearLayout srcLayout =
-              triton::gpu::toLinearLayout(
-                  cast<RankedTensorType>(argInfo.operand.getType()))
-                  .pseudoinvert();
-          SmallVector<std::pair<StringAttr, int32_t>> srcLayoutOffsets;
+              triton::gpu::toLinearLayout(globalTensorTy).pseudoinvert();
+
+          if (srcLayout.getNumInDims() < elemOffset.size()) {
+            // for tensors with sliced encoding we restore the sliced dimension
+            // with size 1 which allows us to pass the elem offsets directly.
+            // The sliced dimension has no effect on the position of the sliced
+            // tile within the original sliced tensor.
+            auto sliceEncoding = dyn_cast<triton::gpu::SliceEncodingAttr>(
+                globalTensorTy.getEncoding());
+            assert(sliceEncoding == tensorTy.getEncoding());
+
+            // compute a linear layout representing the parent encoding but
+            // uisng the sliced encoding padded shape (i.e. slice dim set to 1)
+            srcLayout = triton::gpu::toLinearLayout(
+                sliceEncoding.paddedShape(globalTensorTy.getShape()),
+                sliceEncoding.getParent());
+            // remove any register padded added by toLinearLayout for the parent
+            // encoding (e.g. if sizePerThread > 1 in the sliced dimension) and
+            // invert the layout
+            srcLayout = srcLayout.removeZeroBasesAlongDim(kRegister);
+            // and invert
+            srcLayout = srcLayout.pseudoinvert();
+
+            // repeat for the tile layout
+            tileLayout = triton::gpu::toLinearLayout(
+                sliceEncoding.paddedShape(tensorTy.getShape()),
+                sliceEncoding.getParent());
+            tileLayout = tileLayout.removeZeroBasesAlongDim(kRegister);
+
+            LLVM_DEBUG({
+              DBGS() << "Reset srcLayout using slice parent "
+                     << sliceEncoding.getParent() << "\n  for type "
+                     << globalTensorTy << "\n";
+              DBGS() << "New global layout: " << srcLayout << "\n";
+              DBGS() << "New tile layout: " << tileLayout << "\n";
+            });
+          }
+
           assert(srcLayout.getNumInDims() == elemOffset.size() &&
                  "expected number of tile element offsets to match source "
                  "layout in dims");
+
+          SmallVector<std::pair<StringAttr, int32_t>> srcLayoutOffsets;
           for (auto [dim, layoutOffset] :
                llvm::zip(srcLayout.getInDimNames(), elemOffset)) {
             // the srcLayout is inverted, so map to the tile layouts out dims to
@@ -335,19 +375,21 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
           assert(originOffset.first == kRegister &&
                  "expected origin offset to be in the register space");
           int32_t origin = originOffset.second;
-
-          // Compose tileLayout with srcLayout to map tile_register to registers
-          // in the global tensor
-          LinearLayout tileToFullSrc =
-              tileLayout.compose(srcLayout).flattenIns();
-          auto flatDimName = llvm::to_vector(tileToFullSrc.getInDimNames())[0];
-
           LDBG("tile for loop index " << loopIndex.value()
                                       << " has origin register " << origin);
 
-          for (unsigned j = 0; j < tileToFullSrc.getInDimSize(flatDimName);
-               ++j) {
-            auto relRegOffset = tileToFullSrc.apply({{flatDimName, j}}).front();
+          // Compose tileLayout with srcLayout to map tile_register to registers
+          // in the global tensor
+          // Note that we flatten both dimensions to remove lane, warp, and
+          // block which are all equal to 1. This gives us a tile register <->
+          // source tensor mapping
+          LinearLayout tileToFullSrc =
+              tileLayout.compose(srcLayout).flattenIns().flattenOuts();
+          LDBG("Tile to source tensor register mapping layout: "
+               << tileToFullSrc);
+
+          for (unsigned j = 0; j < tileToFullSrc.getTotalInDimSize(); ++j) {
+            auto relRegOffset = tileToFullSrc.apply({{kRegister, j}}).front();
             assert(relRegOffset.first == kRegister &&
                    "expected offset to be in the register space");
             int32_t srcReg = origin ^ relRegOffset.second;
