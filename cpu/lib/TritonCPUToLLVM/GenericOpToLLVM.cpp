@@ -136,34 +136,43 @@ public:
                                 ValueRange genericResults,
                                 const TypeConverter *typeConverter) const {
     SmallVector<Value> ret;
-    ret.append(loopIterArgs.begin(), loopIterArgs.end());
-    if (requiresTensorMaterialization) {
-      auto tensorResults =
-          llvm::to_vector(llvm::make_filter_range(genericResults, [](Value v) {
-            return isa<RankedTensorType>(v.getType());
-          }));
-
-      for (auto [materializedResultPtr, opResult] :
-           llvm::zip(materializedResults, tensorResults)) {
-        assert(isa<LLVM::LLVMPointerType>(materializedResultPtr.getType()) &&
-               "expected materialized result buffer to be an LLVM pointer");
-        auto outputStructType = cast<LLVM::LLVMStructType>(
-            typeConverter->convertType(opResult.getType()));
-        Type elemTy = outputStructType.getBody()[0];
-        Value result = LLVM::UndefOp::create(rewriter, opResult.getLoc(),
-                                             outputStructType);
-
-        auto b = TritonLLVMOpBuilder(result.getLoc(), rewriter);
-        for (unsigned j = 0; j < outputStructType.getBody().size(); ++j) {
-          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
-                            elemTy, materializedResultPtr, b.i32_val(j));
-          Value loaded = b.load(elemTy, gep);
-          result = b.insert_val(outputStructType, result, loaded, j);
-        }
-        ret.push_back(result);
+    auto materializeTensor = [&](Value ptr, Value opResult) -> Value {
+      assert(isa<LLVM::LLVMPointerType>(ptr.getType()) &&
+             "expected materialized result buffer to be an LLVM pointer");
+      auto outputStructType = cast<LLVM::LLVMStructType>(
+          typeConverter->convertType(opResult.getType()));
+      Type elemTy = outputStructType.getBody()[0];
+      Value result =
+          LLVM::UndefOp::create(rewriter, opResult.getLoc(), outputStructType);
+      auto b = TritonLLVMOpBuilder(result.getLoc(), rewriter);
+      for (unsigned j = 0; j < outputStructType.getBody().size(); ++j) {
+        Value gep =
+            b.gep(ptr_ty(rewriter.getContext()), elemTy, ptr, b.i32_val(j));
+        Value loaded = b.load(elemTy, gep);
+        result = b.insert_val(outputStructType, result, loaded, j);
       }
-    } else {
-      ret.append(materializedResults.begin(), materializedResults.end());
+      return result;
+    };
+
+    for (auto [val, opResult] : llvm::zip(
+             loopIterArgs, genericResults.take_front(loopIterArgs.size()))) {
+      if (isa<RankedTensorType>(opResult.getType()) &&
+          requiresTensorMaterialization) {
+        ret.push_back(materializeTensor(val, opResult));
+      } else {
+        ret.push_back(val);
+      }
+    }
+
+    for (auto [val, opResult] :
+         llvm::zip(materializedResults,
+                   genericResults.drop_front(loopIterArgs.size()))) {
+      if (isa<RankedTensorType>(opResult.getType()) &&
+          requiresTensorMaterialization) {
+        ret.push_back(materializeTensor(val, opResult));
+      } else {
+        ret.push_back(val);
+      }
     }
     return ret;
   }
@@ -355,6 +364,7 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
                            int32_t srcReg) {
                 return b.extract_val(elemTy, fullTensor, srcReg);
               });
+          // TODO: do we need a cast here?
           blockArgs.push_back(newTile);
           continue;
         }
@@ -548,10 +558,7 @@ Value LoopHelper::extractTileFromFullTensor(
     tile = b.insert_val(tileStructTy, tile, extractedElement, j);
   }
 
-  Value castedTile =
-      UnrealizedConversionCastOp::create(rewriter, loc, tileTensorTy, tile)
-          .getResult(0);
-  return castedTile;
+  return tile;
 }
 
 void LoopHelper::scatterTileToFullTensor(
@@ -685,12 +692,11 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     assert(isa<LLVM::LLVMStructType>(llvmArg.getType()) &&
            "expected tensor value adaptor type to be a struct type");
     auto castOp = llvmArg.getDefiningOp<UnrealizedConversionCastOp>();
-    assert(castOp && "expected unrealized conversion cast defining op for "
-                     "generic op tensor input");
-    assert(castOp.getInputs().size() == 1 &&
-           isa<LLVM::LLVMPointerType>(castOp.getInputs()[0].getType()) &&
-           "expected materialized tensor from generic op to have LLVM pointer "
-           "type (alloca)");
+    if (!castOp || castOp.getInputs().size() != 1)
+      return {};
+
+    if (!isa<LLVM::LLVMPointerType>(castOp.getInputs()[0].getType()))
+      return {};
     return castOp.getInputs()[0];
   }
 
@@ -1110,17 +1116,14 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       results = helper.getResults(rewriter, !allUsersAreGeneric,
                                   op.getResults(), getTypeConverter());
     } else {
-      assert(allUsersAreGeneric && "expected all generic op users to also be "
-                                   "generic ops on dynamic path");
-
       LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
       emitNestedLoops(op, helper, rewriter, /*dim=*/0, blockShapeVals,
                       tileShape, vectorSize);
-      results =
-          helper.getResults(rewriter, /*requiresTensorMaterialization=*/false,
-                            op.getResults(), getTypeConverter());
+      results = helper.getResults(
+          rewriter, /*requiresTensorMaterialization=*/!allUsersAreGeneric,
+          op.getResults(), getTypeConverter());
     }
 
     if (results.empty())
