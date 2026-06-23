@@ -972,7 +972,6 @@ struct FuseTransOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         // the generic block arg tile shape
         newCvt->getResult(0).setType(updateTensorType(
             cast<RankedTensorType>(newCvt->getResult(0).getType()), tileShape));
-        // mapping.map(cvtOp.getSrc(), newCvt->getResult(0));
         cvtOp = cast<triton::gpu::ConvertLayoutOp>(
             newCvt); // overwrite the cvtOp with the new one so we can properly
                      // update block argument uses, as the Cvt was the previous
