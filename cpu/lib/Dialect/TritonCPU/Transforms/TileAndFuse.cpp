@@ -929,8 +929,8 @@ struct FuseTransOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
       SmallVector<int32_t> preTransposeTileShape;
       // for each dimension in the source, check if the transposed dimension is
       // tiled
-      for (auto [i, srcSize] : llvm::enumerate(srcTy.getShape())) {
-        auto transposeDim = inverseOrder[i];
+      for (auto [srcDim, srcSize] : llvm::enumerate(srcTy.getShape())) {
+        auto transposeDim = inverseOrder[srcDim];
         preTransposeTileShape.push_back(tiledIndices[transposeDim]
                                             ? tiledType.getShape()[transposeDim]
                                             : srcSize);
