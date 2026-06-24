@@ -94,6 +94,7 @@ public:
   }
 
   void preMaterializeStructIns(ConversionPatternRewriter &rewriter,
+                               const TypeConverter *typeConverter,
                                cpu::GenericOp generic);
 
   void addTileOffset(Value offset) { tileOffsets.push_back(offset); }
@@ -296,6 +297,7 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
 }
 
 void LoopHelper::preMaterializeStructIns(ConversionPatternRewriter &rewriter,
+                                         const TypeConverter *typeConverter,
                                          cpu::GenericOp generic) {
   unsigned nameIdx = loopIterArgs.size() + materializedResults.size();
 
@@ -307,12 +309,8 @@ void LoopHelper::preMaterializeStructIns(ConversionPatternRewriter &rewriter,
     if (arg.bufferPtr)
       continue; // already buffer-backed from prior generic
 
-    // copy the init value - TODO unify with the iter arg copy
-    assert(arg.operand.getDefiningOp() &&
-           "expected iter arg operand to be defined by an op");
-    auto castedInitOp =
-        cast<UnrealizedConversionCastOp>(arg.operand.getDefiningOp());
-    auto initVal = castedInitOp.getOperand(0);
+    assert(arg.convertedArg && "expected convertedArg for Ins tensor arg");
+    auto initVal = arg.convertedArg;
     auto initStructTy = cast<LLVM::LLVMStructType>(initVal.getType());
 
     Type elemTy = initStructTy.getBody()[0];
@@ -1178,7 +1176,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       // materialize any input tensors as buffers so we can dynamically index
       // from the generic loops
-      helper.preMaterializeStructIns(rewriter, op);
+      helper.preMaterializeStructIns(rewriter, getTypeConverter(), op);
 
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
