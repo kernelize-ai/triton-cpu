@@ -132,7 +132,7 @@ public:
   SmallVector<Value> getIterArgVals() const { return loopIterArgs; }
 
   SmallVector<Value> getResults(ConversionPatternRewriter &rewriter,
-                                const bool requiresTensorMaterialization,
+                                ArrayRef<bool> perResultMaterialize,
                                 ValueRange genericResults,
                                 const TypeConverter *typeConverter) const {
     SmallVector<Value> ret;
@@ -154,25 +154,28 @@ public:
       return result;
     };
 
+    unsigned idx = 0;
     for (auto [val, opResult] : llvm::zip(
              loopIterArgs, genericResults.take_front(loopIterArgs.size()))) {
       if (isa<RankedTensorType>(opResult.getType()) &&
-          requiresTensorMaterialization) {
+          perResultMaterialize[idx]) {
         ret.push_back(materializeTensor(val, opResult));
       } else {
         ret.push_back(val);
       }
+      ++idx;
     }
 
     for (auto [val, opResult] :
          llvm::zip(materializedResults,
                    genericResults.drop_front(loopIterArgs.size()))) {
       if (isa<RankedTensorType>(opResult.getType()) &&
-          requiresTensorMaterialization) {
+          perResultMaterialize[idx]) {
         ret.push_back(materializeTensor(val, opResult));
       } else {
         ret.push_back(val);
       }
+      ++idx;
     }
     return ret;
   }
@@ -1092,16 +1095,17 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       return failure();
     }
 
-    const bool genericHasTensorOutputs =
-        llvm::any_of(op->getResults(), [](Value result) {
-          return isa<RankedTensorType>(result.getType());
-        });
-    const bool allUsersAreGeneric =
-        genericHasTensorOutputs
-            ? llvm::all_of(
-                  op->getUsers(),
-                  [](Operation *user) { return isa<cpu::GenericOp>(user); })
-            : true;
+    // Compute per-result materialization flags. Only results consumed by
+    // non-generic ops need to be materialized into LLVM structs; results
+    // consumed exclusively by other generic ops can stay as buffer pointers.
+    SmallVector<bool> perResultMaterialize;
+    for (Value result : op.getResults()) {
+      bool needsMat = isa<RankedTensorType>(result.getType()) &&
+                      llvm::any_of(result.getUsers(), [](Operation *user) {
+                        return !isa<cpu::GenericOp>(user);
+                      });
+      perResultMaterialize.push_back(needsMat);
+    }
 
     SmallVector<Value> results;
     if (requiresTensorArgMaterialization || numChunks == 1) {
@@ -1113,7 +1117,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       emitUnrolled(op, helper, rewriter, numChunks, vectorSize, blockShape,
                    tileShape);
-      results = helper.getResults(rewriter, !allUsersAreGeneric,
+      results = helper.getResults(rewriter, perResultMaterialize,
                                   op.getResults(), getTypeConverter());
     } else {
       LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
@@ -1121,9 +1125,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                                         op.getBlockShape().end());
       emitNestedLoops(op, helper, rewriter, /*dim=*/0, blockShapeVals,
                       tileShape, vectorSize);
-      results = helper.getResults(
-          rewriter, /*requiresTensorMaterialization=*/!allUsersAreGeneric,
-          op.getResults(), getTypeConverter());
+      results = helper.getResults(rewriter, perResultMaterialize,
+                                  op.getResults(), getTypeConverter());
     }
 
     if (results.empty())
