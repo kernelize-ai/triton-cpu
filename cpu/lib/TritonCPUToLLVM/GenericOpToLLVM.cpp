@@ -207,6 +207,16 @@ public:
       MLIRContext *context, RankedTensorType tileTensorTy,
       RankedTensorType fullTensorTy, unsigned numOffsets);
 
+protected:
+  template <typename T>
+  SmallVector<T> getNonReductionTileOffsets(ArrayRef<T> offsets) const {
+    SmallVector<T> filtered;
+    for (auto [d, off] : llvm::enumerate(offsets))
+      if (!isReductionDim(d))
+        filtered.push_back(off);
+    return filtered;
+  }
+
 private:
   SmallVector<ArgInfo> args;
   SmallVector<Value> loopIterArgs;
@@ -350,16 +360,14 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
         Location loc = arg.operand.getLoc();
         // load this tiles elements from the global buffer
         auto tileStructTy = cast<LLVM::LLVMStructType>(arg.llvmType);
-        Type elemTy = tileStructTy.getBody()[0];
-        Value tileStruct = LLVM::UndefOp::create(rewriter, loc, tileStructTy);
-        auto b = TritonLLVMOpBuilder(loc, rewriter);
+        auto tileTensorTy = cast<RankedTensorType>(arg.tritonType);
+        auto fullTensorTy = cast<RankedTensorType>(arg.operand.getType());
+        Value buffer = arg.bufferPtr;
+        MLIRContext *context = rewriter.getContext();
 
+        Value newTile;
         if (loopIndex.has_value()) {
-          auto tileTensorTy = cast<RankedTensorType>(arg.tritonType);
-          auto fullTensorTy = cast<RankedTensorType>(arg.operand.getType());
-          Value buffer = arg.bufferPtr;
-          MLIRContext *context = rewriter.getContext();
-          Value newTile = extractTileFromFullTensor<int32_t>(
+          newTile = extractTileFromFullTensor<int32_t>(
               rewriter, loc, tileTensorTy, tileStructTy, fullTensorTy,
               elemOffset,
               [buffer, context](TritonLLVMOpBuilder &b, Type elemTy,
@@ -369,18 +377,18 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
                 Value elem = b.load(elemTy, gep);
                 return elem;
               });
-          blockArgs.push_back(newTile);
-          continue;
+        } else {
+          MLIRContext *context = rewriter.getContext();
+          newTile = extractTileFromFullTensor<Value>(
+              rewriter, loc, tileTensorTy, tileStructTy, fullTensorTy,
+              getNonReductionTileOffsets<Value>(tileOffsets),
+              [buffer, context](TritonLLVMOpBuilder &b, Type elemTy,
+                                Value srcReg) {
+                Value gep = b.gep(ptr_ty(context), elemTy, buffer, srcReg);
+                return b.load(elemTy, gep);
+              });
         }
-
-        for (unsigned j = 0; j < tileStructTy.getBody().size(); ++j) {
-          Value globalIdx = b.add(iterArgOffset, b.i32_val(j));
-          Value gep = b.gep(LLVM::LLVMPointerType::get(rewriter.getContext()),
-                            elemTy, arg.bufferPtr, ValueRange{globalIdx});
-          Value elem = b.load(elemTy, gep);
-          tileStruct = b.insert_val(tileStructTy, tileStruct, elem, j);
-        }
-        blockArgs.push_back(tileStruct);
+        blockArgs.push_back(newTile);
       } else {
         blockArgs.push_back(loopIterArgs[crtIndex]);
       }
@@ -508,26 +516,28 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
         // buffer ptr iter args may be forwarded from the previous loop
         // level. only update the tile data for iter args that are the result
         // of a ttc.yield, which will have triton types
+        // TODO: should this be an assert? when would we not yield a tensor
+        // type?
         if (auto tileTensorTy =
                 dyn_cast<RankedTensorType>(yieldVal.getType())) {
           Location loc = yieldVal.getLoc();
+          auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
+          Type elemTy = llvmStruct.getBody()[0];
+
+          auto llvmTile = UnrealizedConversionCastOp::create(
+                              rewriter, loc, arg.llvmType, yieldVal)
+                              .getResult(0);
+          auto tensorTy = cast<RankedTensorType>(arg.operand.getType());
+          MLIRContext *context = rewriter.getContext();
+          Value ptr = arg.bufferPtr;
 
           if (loopIndex.has_value()) {
             // static offsets path
-            auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
-            Type elemTy = llvmStruct.getBody()[0];
-            auto llvmTile = UnrealizedConversionCastOp::create(
-                                rewriter, loc, arg.llvmType, yieldVal)
-                                .getResult(0);
-            auto tensorTy = cast<RankedTensorType>(arg.operand.getType());
-
             auto b = TritonLLVMOpBuilder(loc, rewriter);
             SmallVector<Value> offsetVals;
             for (auto offset : elemOffset)
               offsetVals.push_back(b.i32_val(offset));
 
-            Value ptr = arg.bufferPtr;
-            MLIRContext *context = rewriter.getContext();
             scatterTileToFullTensor(
                 rewriter, loc, tileTensorTy, llvmStruct, llvmTile, tensorTy,
                 offsetVals,
@@ -537,20 +547,14 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
                   b.store(elem, gep);
                 });
           } else {
-            auto b = TritonLLVMOpBuilder(loc, rewriter);
-            auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
-            auto castedYieldVal = UnrealizedConversionCastOp::create(
-                                      rewriter, loc, arg.llvmType, yieldVal)
-                                      .getResult(0);
-            for (unsigned j = 0; j < llvmStruct.getBody().size(); ++j) {
-              Value elem =
-                  b.extract_val(llvmStruct.getBody()[j], castedYieldVal, j);
-              Value idx = b.add(iterArgOffset, b.i32_val(j));
-              Value gep =
-                  b.gep(ptr_ty(rewriter.getContext()), llvmStruct.getBody()[j],
-                        arg.bufferPtr, ValueRange{idx});
-              b.store(elem, gep);
-            }
+            scatterTileToFullTensor(
+                rewriter, loc, tileTensorTy, llvmStruct, llvmTile, tensorTy,
+                getNonReductionTileOffsets<Value>(tileOffsets),
+                [context, elemTy, ptr](TritonLLVMOpBuilder &b,
+                                       Value bufferIndex, Value elem) {
+                  Value gep = b.gep(ptr_ty(context), elemTy, ptr, bufferIndex);
+                  b.store(elem, gep);
+                });
           }
         }
         loopIterArgs.push_back(arg.bufferPtr);
@@ -654,6 +658,9 @@ void LoopHelper::scatterTileToFullTensor(
       tileLayout.compose(fullTensorInverseLayout).flattenIns().flattenOuts();
 
   SmallVector<std::pair<StringAttr, Value>> originInputDims;
+  assert(fullTensorInverseLayout.getNumInDims() == tileOffsets.size() &&
+         "expected num tile offsets to match num tensor dims when scattering "
+         "tiles to tensor");
   for (auto [dim, offset] :
        llvm::zip(fullTensorInverseLayout.getInDimNames(), tileOffsets)) {
     originInputDims.push_back({dim, offset});
