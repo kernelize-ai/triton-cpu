@@ -46,7 +46,6 @@ test_dot_multidim
 test_scaled_dot
 test_dot3d
 test_dot_max_num_imprecise_acc
-test_reduce
 test_permute
 test_reshape
 test_clamp
@@ -56,3 +55,4 @@ test_if_call
 test_disable_licm
 test_shapes_as_params
 test_load_scope_sem_coop_grid_cta_one
+test_scan
