@@ -15,9 +15,9 @@ using namespace mlir::triton;
 
 namespace {
 
-static Value allocateGlobalBuffer(ConversionPatternRewriter &rewriter,
-                                  Location loc, Type elemTy, unsigned numElems,
-                                  unsigned nameIdx, cpu::GenericOp generic) {
+static Value allocateBuffer(ConversionPatternRewriter &rewriter, Location loc,
+                            Type elemTy, unsigned numElems,
+                            cpu::GenericOp generic) {
   auto func = generic->getParentOfType<LLVM::LLVMFuncOp>();
   assert(func && "expected generic op to be inside an LLVM function");
 
@@ -79,7 +79,6 @@ public:
   }
 
   void preMaterializeStructIns(ConversionPatternRewriter &rewriter,
-                               const TypeConverter *typeConverter,
                                cpu::GenericOp generic);
 
   void addTileOffset(Value offset) { tileOffsets.push_back(offset); }
@@ -220,8 +219,8 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
         int64_t tensorElems =
             triton::gpu::toLinearLayout(tensorTy).getTotalInDimSize();
 
-        Value globalPtr = allocateGlobalBuffer(
-            rewriter, loc, elemTy, tensorElems, loopIterArgs.size(), generic);
+        Value globalPtr =
+            allocateBuffer(rewriter, loc, elemTy, tensorElems, generic);
         this->args[idx].bufferPtr = globalPtr;
 
         // copy the init value
@@ -246,10 +245,9 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
     }
   }
 
-  // Create temporary buffers for materialized
-  // results. This avoids loop-carried <blockSize x elemTy> phi nodes
-  // which would allocate tens of kilobytes on the stack and cause stack
-  // overflows for large block sizes (e.g. blockSize=4096).
+  // Create temporary storage for materialized results. This avoids loop-carried
+  // <blockSize x elemTy> phi nodes which dramatically inflate the IR size and
+  // increase register pressure.
   for (auto [i, resultTy] : llvm::enumerate(llvm::drop_begin(
            generic.getResultTypes(), generic.getNumIterArgs()))) {
     auto tensorTy = cast<RankedTensorType>(resultTy);
@@ -259,19 +257,15 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
     Type elemTy = typeConverter->convertType(tensorTy.getElementType());
     materializedResultTensorTypes.push_back(tensorTy);
 
-    Value globalPtr = allocateGlobalBuffer(
+    Value globalPtr = allocateBuffer(
         rewriter, generic.getResult(i + generic.getNumIterArgs()).getLoc(),
-        elemTy, tensorElems, materializedResults.size() + loopIterArgs.size(),
-        generic);
+        elemTy, tensorElems, generic);
     materializedResults.push_back(globalPtr);
   }
 }
 
 void LoopHelper::preMaterializeStructIns(ConversionPatternRewriter &rewriter,
-                                         const TypeConverter *typeConverter,
                                          cpu::GenericOp generic) {
-  unsigned nameIdx = loopIterArgs.size() + materializedResults.size();
-
   for (auto &arg : args) {
     if (arg.kind != ArgInfo::Kind::Ins)
       continue;
@@ -287,8 +281,8 @@ void LoopHelper::preMaterializeStructIns(ConversionPatternRewriter &rewriter,
     Type elemTy = initStructTy.getBody()[0];
     unsigned numElems = initStructTy.getBody().size();
 
-    Value buf = allocateGlobalBuffer(rewriter, arg.operand.getLoc(), elemTy,
-                                     numElems, nameIdx++, generic);
+    Value buf = allocateBuffer(rewriter, arg.operand.getLoc(), elemTy, numElems,
+                               generic);
     auto b = TritonLLVMOpBuilder(arg.operand.getLoc(), rewriter);
 
     for (unsigned i = 0; i < numElems; ++i) {
@@ -856,8 +850,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
     // use when building loop body block arguments but we need scalar values for
     // insert/extract value operations.
     SmallVector<int32_t> elemOffset(rank);
-    for (unsigned i = 0; i < numChunks; ++i) {
-      unsigned remaining = i;
+    for (int32_t i = 0; i < numChunks; ++i) {
+      int32_t remaining = i;
       LDBG("i = " << i);
       for (int d = rank - 1; d >= 0; --d) {
         int32_t nc = blockShape[d] / tileShape[d];
@@ -1139,7 +1133,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       LoopHelper helper(argInfos, op, getTypeConverter(), rewriter);
       // materialize any input tensors as buffers so we can dynamically index
       // from the generic loops
-      helper.preMaterializeStructIns(rewriter, getTypeConverter(), op);
+      helper.preMaterializeStructIns(rewriter, op);
 
       SmallVector<Value> blockShapeVals(op.getBlockShape().begin(),
                                         op.getBlockShape().end());
