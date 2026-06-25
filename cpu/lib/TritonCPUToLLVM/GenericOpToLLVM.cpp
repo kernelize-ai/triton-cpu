@@ -28,9 +28,9 @@ static Value allocateGlobalBuffer(ConversionPatternRewriter &rewriter,
   LDBG("Creating stack allocation for tensor of size " << numElems);
   Value one = LLVM::ConstantOp::create(rewriter, loc, rewriter.getI64Type(),
                                        rewriter.getI64IntegerAttr(1));
-  return LLVM::AllocaOp::create(rewriter, loc,
-                                LLVM::LLVMPointerType::get(rewriter.getContext()),
-                                globalArrayTy, one, /*alignment=*/4);
+  return LLVM::AllocaOp::create(
+      rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
+      globalArrayTy, one, /*alignment=*/4);
 }
 
 struct ArgInfo {
@@ -217,9 +217,8 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
         Location loc = arg.operand.getLoc();
         // allocate a global buffer for this iter arg
         auto tensorTy = cast<RankedTensorType>(arg.operand.getType());
-        int64_t tensorElems = std::accumulate(tensorTy.getShape().begin(),
-                                              tensorTy.getShape().end(),
-                                              int64_t{1}, std::multiplies<>());
+        int64_t tensorElems =
+            triton::gpu::toLinearLayout(tensorTy).getTotalInDimSize();
 
         Value globalPtr = allocateGlobalBuffer(
             rewriter, loc, elemTy, tensorElems, loopIterArgs.size(), generic);
@@ -247,23 +246,16 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
     }
   }
 
-  // Create temporary buffers in thread local global memory for materialized
+  // Create temporary buffers for materialized
   // results. This avoids loop-carried <blockSize x elemTy> phi nodes
   // which would allocate tens of kilobytes on the stack and cause stack
   // overflows for large block sizes (e.g. blockSize=4096).
-  //
-  // Globals are addressed via AddressOf in the function entry block so the
-  // pointer dominates all uses. Each thread gets its own copy since the
-  // globals are thread-local.
-  //
-  // TODO: we should probably check that generic results are only used by
-  // other generics or we will run into conversion problems
   for (auto [i, resultTy] : llvm::enumerate(llvm::drop_begin(
            generic.getResultTypes(), generic.getNumIterArgs()))) {
     auto tensorTy = cast<RankedTensorType>(resultTy);
+
     int64_t tensorElems =
-        std::accumulate(tensorTy.getShape().begin(), tensorTy.getShape().end(),
-                        int64_t{1}, std::multiplies<>());
+        triton::gpu::toLinearLayout(tensorTy).getTotalInDimSize();
     Type elemTy = typeConverter->convertType(tensorTy.getElementType());
     materializedResultTensorTypes.push_back(tensorTy);
 
