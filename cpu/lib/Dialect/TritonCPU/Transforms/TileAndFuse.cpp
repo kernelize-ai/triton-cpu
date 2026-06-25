@@ -705,6 +705,30 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
           assert(survivingDims.size() == 1 &&
                  "expected single surviving dim for make_dynamic_range");
           dim = survivingDims.front();
+
+          // If a tt.trans is in the forward slice of this blockArg (e.g. K
+          // transposed to K^T inside the generic body by
+          // FuseTransOpIntoGeneric), K's local surviving dim maps to a
+          // different output dim after the transpose. Apply the inverse
+          // permutation to get the correct tile IV.
+          // TODO: consider re-factoring this chain into a visitor that can
+          // compute the dim for any op based on the def-use chain
+          {
+            SetVector<Operation *> fwdSlice;
+            getForwardSlice(blockArg, &fwdSlice);
+            for (Operation *fwdOp : fwdSlice) {
+              if (auto transOp = dyn_cast<triton::TransOp>(fwdOp)) {
+                ArrayRef<int32_t> order = transOp.getOrder();
+                for (unsigned j = 0; j < order.size(); ++j) {
+                  if ((unsigned)order[j] == dim) {
+                    dim = j;
+                    break;
+                  }
+                }
+                break;
+              }
+            }
+          }
         }
         newOp = triton::cpu::MakeDynamicRangeOp::create(
             rewriter, makeRangeOp.getLoc(), newResultType,
