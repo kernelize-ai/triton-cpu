@@ -102,16 +102,6 @@ public:
 
   void popTileOffset() { tileOffsets.pop_back(); }
 
-  void incrementFlatOffset(ConversionPatternRewriter &rewriter, Value inc) {
-    auto b = TritonLLVMOpBuilder(flatOffset.getLoc(), rewriter);
-    flatOffset = b.add(flatOffset, inc);
-  }
-
-  void incrementIterArgOffset(ConversionPatternRewriter &rewriter, Value inc) {
-    auto b = TritonLLVMOpBuilder(flatOffset.getLoc(), rewriter);
-    iterArgOffset = b.add(iterArgOffset, inc);
-  }
-
   // build loop body block arguments for the current loop level. Adds
   // arguments for loop induction vars, generic iter args, and generic
   // operands. Handles extracting the appropriate tile for non-alloca tensor
@@ -225,8 +215,6 @@ private:
   SmallVector<RankedTensorType> materializedResultTensorTypes;
 
   SmallVector<Value> tileOffsets;
-  Value flatOffset;
-  Value iterArgOffset;
   SmallVector<int32_t> reductionDims;
 };
 
@@ -235,10 +223,6 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
                        ConversionPatternRewriter &rewriter)
     : args(args.begin(), args.end()),
       reductionDims(generic.getReductionDims()) {
-
-  auto gb = TritonLLVMOpBuilder(generic.getLoc(), rewriter);
-  flatOffset = gb.i32_val(0);
-  iterArgOffset = gb.i32_val(0);
 
   for (auto [idx, arg] : llvm::enumerate(this->args)) {
     if (arg.kind == ArgInfo::Kind::IterArg) {
@@ -921,7 +905,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             return getTypeConverter()->convertType(tile.getType());
           });
       helper.scatterResults(rewriter, loopTiles, resultTypes);
-      helper.incrementFlatOffset(rewriter, b.i32_val(vectorSize));
     }
   }
 
@@ -1090,10 +1073,6 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             Block *afterBlock) -> SmallVector<Value> {
           helper.addTileOffset(dimTileOffset);
 
-          auto bb = TritonLLVMOpBuilder(loc, rewriter);
-          helper.incrementFlatOffset(rewriter, bb.mul(loopI, innerStride));
-          helper.incrementIterArgOffset(rewriter,
-                                        bb.mul(loopI, innerIterArgStride));
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
 
