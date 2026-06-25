@@ -20,32 +20,17 @@ static Value allocateGlobalBuffer(ConversionPatternRewriter &rewriter,
                                   unsigned nameIdx, cpu::GenericOp generic) {
   auto func = generic->getParentOfType<LLVM::LLVMFuncOp>();
   assert(func && "expected generic op to be inside an LLVM function");
-  auto module = generic->getParentOfType<ModuleOp>();
-  assert(module && "expected generic op to be inside a module");
 
   auto globalArrayTy = LLVM::LLVMArrayType::get(elemTy, numElems);
 
-  std::string globalName;
-  do {
-    globalName = (func.getName() + "_tac_" + std::to_string(nameIdx++)).str();
-  } while (module.lookupSymbol(globalName));
-  {
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(module.getBody());
-    LLVM::GlobalOp::create(rewriter, loc, globalArrayTy,
-                           /*isConstant=*/false, LLVM::Linkage::Internal,
-                           globalName, Attribute{},
-                           /*alignment=*/4, /*addrSpace=*/0,
-                           /*dsoLocal=*/false, /*threadLocal=*/true);
-  }
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointToStart(&func.getBody().front());
-  LDBG("Creating thread local global allocation `"
-       << globalName << "` for tensor of size " << numElems);
-  Value globalPtr = LLVM::AddressOfOp::create(
-      rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
-      globalName);
-  return globalPtr;
+  LDBG("Creating stack allocation for tensor of size " << numElems);
+  Value one = LLVM::ConstantOp::create(rewriter, loc, rewriter.getI64Type(),
+                                       rewriter.getI64IntegerAttr(1));
+  return LLVM::AllocaOp::create(rewriter, loc,
+                                LLVM::LLVMPointerType::get(rewriter.getContext()),
+                                globalArrayTy, one, /*alignment=*/4);
 }
 
 struct ArgInfo {
