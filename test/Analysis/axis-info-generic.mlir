@@ -16,7 +16,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
 
         %x_3 = tt.addptr %x, %offsets_1 : tensor<512x!tt.ptr<f32>, #blocked>, tensor<512xi32, #blocked>
 
-        // CHECK-COUNT-128: ttc.masked_load {{.*}} -> vector<4xf32>
+        // CHECK: ttc.masked_load {{.*}} : (!llvm.ptr<1>, vector<4xi1>, vector<4xf32>) -> vector<4xf32>
+        // CHECK-NOT: ttc.masked_load
         ttc.generic ins (%x_3 : tensor<512x!tt.ptr<f32>, #blocked>) blocks [%c512_i32 : i32] attributes {tileShape = array<i32: 4>, reductionDims = array<i32>} body {
             ^bb0(%offset:i32, %arg0: tensor<4x!tt.ptr<f32>, #blocked>):
                 %x_10 = tt.load %arg0 : tensor<4x!tt.ptr<f32>, #blocked>
@@ -64,8 +65,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.shar
       %stride_cm: i32 {tt.divisibility = 16 : i32},
       %offs_am: i32 {tt.divisibility = 16 : i32}, %offs_bn: i32 {tt.divisibility = 16 : i32}) {
 
-    // 4 M-tiles × 1 N-tile = 4 body invocations, each must emit one vector<8xf16> store.
-    // CHECK-COUNT-4: ttc.masked_store {{.*}} : (!llvm.ptr<1>, vector<8xf16>, vector<8xi1>) -> ()
+    // 4 M-tiles × 1 N-tile = loop 4 times, loop body must emit one vector<8xf16> store.
+    // CHECK: ttc.masked_store {{.*}} : (!llvm.ptr<1>, vector<8xf16>, vector<8xi1>) -> ()
     // CHECK-NOT: ttc.masked_store {{.*}} : (!llvm.ptr<1>, vector<1xf16>
     %c4_i32 = arith.constant 4 : i32
     %c8_i32 = arith.constant 8 : i32
