@@ -20,12 +20,12 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/SubtargetFeature.h"
-
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
 
 #include <iostream>
 
-namespace py = pybind11;
+namespace py = nanobind;
 
 std::string getDefaultTargerOrProcessTriple() {
   // Return process triple iff the default target triple is empty.
@@ -51,7 +51,7 @@ static unsigned getMaxVectorWidthBits(llvm::StringRef featureStr) {
   return 128;
 }
 
-void init_triton_cpu_passes(py::module &&m) {
+void init_triton_cpu_passes(py::module_ &m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createConvertTritonCPUToLLVMPass());
   });
@@ -66,7 +66,7 @@ void init_triton_cpu_passes(py::module &&m) {
   });
 }
 
-void init_triton_cpu_passes_ttgpuir(py::module &&m) {
+void init_triton_cpu_passes_ttgpuir(py::module_ &m) {
   m.def(
       "add_accelerate_matmul",
       [](mlir::PassManager &pm, bool optimizeBlockLayout,
@@ -94,12 +94,14 @@ void init_triton_cpu_passes_ttgpuir(py::module &&m) {
   });
 }
 
-void init_triton_cpu(py::module &&m) {
+void init_triton_cpu(py::module_ &m) {
   auto passes = m.def_submodule("passes");
   // Triton to TritonGPU passes specific to the Triton CPU plugin
-  init_triton_cpu_passes_ttgpuir(passes.def_submodule("ttgpuir"));
+  auto ttgpuir_m = passes.def_submodule("ttgpuir");
+  init_triton_cpu_passes_ttgpuir(ttgpuir_m);
   // TritonGPU to LLVM passes specific to the Triton CPU plugin
-  init_triton_cpu_passes(passes.def_submodule("ttcpuir"));
+  auto ttcpuir_m = passes.def_submodule("ttcpuir");
+  init_triton_cpu_passes(ttcpuir_m);
 
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
@@ -182,7 +184,7 @@ void init_triton_cpu(py::module &&m) {
     if (parser->Run(/*NoInitialTextSection=*/false))
       throw std::runtime_error("assembly failed");
 
-    return py::bytes(std::string(result.begin(), result.end()));
+    return py::bytes(result.data(), result.size());
   });
 
   m.def("get_default_target_triple",
