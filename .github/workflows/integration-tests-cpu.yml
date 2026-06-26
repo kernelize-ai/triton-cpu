@@ -138,6 +138,13 @@ jobs:
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
         run: python python/tutorials/01-vector-add.py
+      - name: Run fused-attention tests
+        working-directory: ./triton
+        env:
+          TRITON_DEFAULT_BACKEND: "cpu"
+        run: |
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python -m pytest ../triton-cpu/python/tutorials/06-fused-attention.py
+
       - name: Run gluon tests
         working-directory: ./triton
         run: |
