@@ -143,7 +143,7 @@ jobs:
         env:
           TRITON_DEFAULT_BACKEND: "cpu"
         run: |
-          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python -m pytest ../triton-cpu/python/tutorials/06-fused-attention.py
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python -m pytest ../python/tutorials/06-fused-attention.py
 
       - name: Run gluon tests
         working-directory: ./triton
