@@ -1,6 +1,8 @@
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/DenseMap.h"
 
 namespace mlir {
 
@@ -140,6 +142,52 @@ std::string GenericOp::getHeader() {
   llvm::raw_string_ostream os(s);
   print(os, OpPrintingFlags().skipRegions());
   return s;
+}
+
+namespace {
+
+struct DeduplicateGenericIns : mlir::OpRewritePattern<GenericOp> {
+  using OpRewritePattern<GenericOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(GenericOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    ValueRange ins = op.getIns();
+    unsigned insOffset = op.getInsArgOffset();
+    Block *body = &op.getBody().front();
+
+    llvm::SmallDenseMap<Value, unsigned> firstOccurrence;
+    SmallVector<unsigned> toRemove;
+    for (auto [i, val] : llvm::enumerate(ins)) {
+      auto [it, inserted] = firstOccurrence.try_emplace(val, (unsigned)i);
+      if (!inserted)
+        toRemove.push_back(i);
+    }
+    if (toRemove.empty())
+      return failure();
+
+    // Process back-to-front so earlier block arg indices stay valid.
+    SmallVector<Value> newIns(ins);
+    rewriter.modifyOpInPlace(op, [&]() {
+      for (unsigned i : llvm::reverse(toRemove)) {
+        unsigned firstIdx = firstOccurrence.lookup(ins[i]);
+        BlockArgument firstArg = body->getArgument(insOffset + firstIdx);
+        BlockArgument dupArg = body->getArgument(insOffset + i);
+        dupArg.replaceAllUsesWith(firstArg);
+        body->eraseArgument(insOffset + i);
+        newIns.erase(newIns.begin() + i);
+      }
+      op.getInsMutable().assign(newIns);
+    });
+    return success();
+  }
+};
+
+} // namespace
+
+void GenericOp::getCanonicalizationPatterns(mlir::RewritePatternSet &patterns,
+                                            mlir::MLIRContext *context) {
+  patterns.add<DeduplicateGenericIns>(context);
 }
 
 LogicalResult MakeDynamicRangeOp::verify() {

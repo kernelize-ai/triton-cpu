@@ -180,6 +180,8 @@ class CPUBackend(BaseBackend):
         passes.common.add_symbol_dce(pm)
         if options.tile_and_fuse is True:
             cpu.passes.ttgpuir.add_tile_and_fuse(pm)
+            # canonicalize immediately to remove duplicate generic args
+            passes.common.add_canonicalizer(pm)
         passes.common.add_sccp(pm)
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)

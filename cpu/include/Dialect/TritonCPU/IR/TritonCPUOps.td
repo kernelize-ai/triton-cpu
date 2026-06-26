@@ -268,6 +268,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
   let regions = (region AnyRegion:$body);
 
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 
   let builders = [
     OpBuilder<(ins "TypeRange":$results, "ValueRange":$ins, "ValueRange":$blockShape, "ArrayRef<int32_t>":$tileShape), [{
