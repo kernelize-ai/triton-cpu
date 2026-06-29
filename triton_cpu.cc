@@ -17,7 +17,9 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Parallel.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/SubtargetFeature.h"
 #include <nanobind/nanobind.h>
@@ -201,6 +203,22 @@ void init_triton_cpu(py::module_ &m) {
       features += (F.second ? "+" : "-") + F.first().str();
     }
     return features;
+  });
+
+  m.def("init_cpu_targets", []() {
+    static std::once_flag init_flag;
+    std::call_once(init_flag, []() {
+      llvm::InitializeAllTargetInfos();
+      llvm::InitializeAllTargets();
+      llvm::InitializeAllTargetMCs();
+      llvm::InitializeAllAsmParsers();
+      llvm::InitializeAllAsmPrinters();
+    });
+    // Disable LLVM's internal parallelism. Triton kernels produce small LLVM
+    // modules where pass-level parallelism is not beneficial, and LLVM's global
+    // thread pool is not fork-safe: a forked child inherits the pool's state
+    // but not its threads, causing SIGABRT on use or cleanup.
+    llvm::parallel::strategy = llvm::hardware_concurrency(1);
   });
 
   m.def("attach_target_triple",

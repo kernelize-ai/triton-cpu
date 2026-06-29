@@ -233,7 +233,7 @@ class CPUBackend(BaseBackend):
         pm.run(mod, "make_llir")
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
-        llvm.init_targets()
+        cpu.init_cpu_targets()
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         cpu.attach_target_triple(llvm_mod, cpu.get_default_target_triple())
