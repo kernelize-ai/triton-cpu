@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
-pytest.importorskip("nexus")
+pytest.importorskip("knexus")
 
 
 @pytest.fixture
