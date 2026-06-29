@@ -132,7 +132,7 @@ jobs:
           TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "test_interleave and not test_interleave_scalars"
           TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr) and not test_reduce1d[1-sum-float16-512]"
 
-          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "test_dot["
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest -n 4 --device "cpu" python/test/unit/language/test_core.py -k "test_dot["
 
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
