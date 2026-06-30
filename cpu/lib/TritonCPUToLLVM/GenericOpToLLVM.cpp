@@ -208,6 +208,8 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
     : args(args.begin(), args.end()),
       reductionDims(generic.getReductionDims()) {
 
+  auto kRegister = StringAttr::get(rewriter.getContext(), "register");
+
   for (auto [idx, arg] : llvm::enumerate(this->args)) {
     if (arg.kind == ArgInfo::Kind::IterArg) {
       if (auto tileTensorTy = dyn_cast<RankedTensorType>(arg.tritonType)) {
@@ -216,8 +218,9 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
         Location loc = arg.operand.getLoc();
         // allocate a global buffer for this iter arg
         auto tensorTy = cast<RankedTensorType>(arg.operand.getType());
-        int64_t tensorElems =
-            triton::gpu::toLinearLayout(tensorTy).getTotalInDimSize();
+        auto ll = triton::gpu::toLinearLayout(tensorTy);
+        ll = ll.removeZeroBasesAlongDim(kRegister);
+        int64_t tensorElems = ll.getTotalInDimSize();
 
         Value globalPtr =
             allocateBuffer(rewriter, loc, elemTy, tensorElems, generic);
@@ -252,8 +255,9 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
            generic.getResultTypes(), generic.getNumIterArgs()))) {
     auto tensorTy = cast<RankedTensorType>(resultTy);
 
-    int64_t tensorElems =
-        triton::gpu::toLinearLayout(tensorTy).getTotalInDimSize();
+    auto ll = triton::gpu::toLinearLayout(tensorTy);
+    ll = ll.removeZeroBasesAlongDim(kRegister);
+    int64_t tensorElems = ll.getTotalInDimSize();
     Type elemTy = typeConverter->convertType(tensorTy.getElementType());
     materializedResultTensorTypes.push_back(tensorTy);
 
@@ -655,9 +659,22 @@ LoopHelper::computeTileAndFullTensorLayouts(MLIRContext *context,
   // compute linear layouts for the tile tensor and full tensor. We will
   // compose these layouts to obtain register -> register mappings for the
   // extraction.
+  // Note that Triton tensors are represented without broadcast elements in
+  // LLVM. We remove zero bases along the register dim to accurately model the
+  // LLVM (register-level) representation of the tensor
   LinearLayout tileLayout = triton::gpu::toLinearLayout(tileTensorTy);
-  LinearLayout fullLayout =
-      triton::gpu::toLinearLayout(fullTensorTy).pseudoinvert();
+  tileLayout = tileLayout.removeZeroBasesAlongDim(kRegister);
+
+  LinearLayout fullLayout = triton::gpu::toLinearLayout(fullTensorTy);
+  fullLayout = fullLayout.removeZeroBasesAlongDim(kRegister);
+  fullLayout = fullLayout.pseudoinvert();
+
+  LLVM_DEBUG({
+    DBGS() << "Compute tile to tensor linear layouts for " << tileTensorTy
+           << " to " << fullTensorTy << "\n";
+    DBGS() << "Inverted global layout: " << fullLayout << "\n";
+    DBGS() << "Tile layout: " << tileLayout << "\n";
+  });
 
   if (fullLayout.getNumInDims() < numOffsets) {
     // for tensors with sliced encoding we restore the sliced dimension
@@ -693,6 +710,9 @@ LoopHelper::computeTileAndFullTensorLayouts(MLIRContext *context,
       DBGS() << "New global layout: " << fullLayout << "\n";
       DBGS() << "New tile layout: " << tileLayout << "\n";
     });
+  } else {
+    // the LLVM aggregate representation of the triton tensor will remove
+    // broadcast registers
   }
 
   assert(fullLayout.getNumInDims() == numOffsets &&

@@ -43,7 +43,8 @@ struct MakeDynamicRangeOpConversion
       retVals[multiDim.index()] = b.add(multiDim.value()[0], start);
     }
     auto typeConverter = getTypeConverter();
-    Value result = packLLElements(loc, typeConverter, retVals, rewriter, ty);
+    Value result =
+        packTensorElements(loc, typeConverter, retVals, rewriter, ty);
     rewriter.replaceOp(op, result);
     return success();
   }

@@ -113,9 +113,9 @@ class NexusCpuUtils:
         pass
 
     def load_binary(self, name, kernel, shared_mem, device):
-        import nexus
+        import knexus
         device_idx = cpu_knobs.cpu.nexus_device_id
-        rt = nexus.get_runtime("cpu")
+        rt = knexus.get_runtime("cpu")
         dev = rt.get_device(device_idx)
         # Keep temp file persistent: library may be JIT-compiled lazily on first run.
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".so", delete=False) as f:
@@ -459,7 +459,7 @@ class NexusCPULauncher:
         self.metadata = metadata
 
     def __call__(self, gridX, gridY, gridZ, stream, kernel_handle, *args):
-        import nexus
+        import knexus
 
         packed_metadata = args[0]
         launch_metadata = args[1]
@@ -476,7 +476,7 @@ class NexusCPULauncher:
         if enter_hook is not None:
             enter_hook(launch_metadata)
 
-        rt = nexus.get_runtime("cpu")
+        rt = knexus.get_runtime("cpu")
         dev = rt.get_device(device_idx)
         if not hasattr(self, "sched"):
             self.sched = dev.create_schedule()

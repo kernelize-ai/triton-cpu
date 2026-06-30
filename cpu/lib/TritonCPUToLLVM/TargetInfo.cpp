@@ -48,6 +48,18 @@ Value TargetInfo::ballot(RewriterBase &rewriter, Location loc, Type type,
   return Value();
 }
 
+Value TargetInfo::getGlobalTimer(RewriterBase &rewriter, Location loc) const {
+  // TODO: we could support this using llvm.readsteadycounter but we would need
+  // some way to determine the rate per device
+  llvm::report_fatal_error("get global timer not yet supported on CPU");
+  return Value();
+}
+
+StringRef TargetInfo::getAtomicSyncScope(MemSyncScope scope) const {
+  llvm::report_fatal_error("get atomic sync scope not yet supported on CPU");
+  return "";
+}
+
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
                          triton::gpu::AddrSpace targets) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
