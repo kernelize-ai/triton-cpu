@@ -404,14 +404,11 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
             });
         blockArgs.push_back(tileStruct);
       } else if (isa<PointerType>(argInfo.tritonType)) {
-        // we might have a tt.ptr hiding in an unrealized conversion cast
-        // due to late conversion of generic op block arguments. Use
-        // unrealized conversion cast which will be folded away later
         if (argInfo.tritonType != argInfo.llvmType) {
-          blockArgs.push_back(
-              UnrealizedConversionCastOp::create(
-                  rewriter, loc, argInfo.llvmType, argInfo.operand)
-                  .getResult(0));
+          assert(argInfo.convertedArg &&
+                 "expected adaptor arg value to be stored for non-buffer "
+                 "packed generic operand");
+          blockArgs.push_back(argInfo.convertedArg);
         } else {
           blockArgs.push_back(argInfo.operand);
         }
@@ -795,12 +792,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         argInfo.llvmType = getTypeConverter()->convertType(origArg.getType());
       } else {
         argInfo.llvmType = getTypeConverter()->convertType(origArg.getType());
-        if (isa<RankedTensorType>(argInfo.tritonType)) {
-          // tensor arguments that aren't backed by an alloca need to store the
-          // adaptor value so they can be sliced when inputs to the cloned loop
-          // body are created during unrolling
-          argInfo.convertedArg = adaptor.getIns()[i];
-        }
+        argInfo.convertedArg = adaptor.getIns()[i];
       }
       args.push_back(argInfo);
     }
