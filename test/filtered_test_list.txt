@@ -56,3 +56,6 @@ test_disable_licm
 test_shapes_as_params
 test_load_scope_sem_coop_grid_cta_one
 test_scan
+test_atomic_poll_no_timeout_uses_no_shared_memory
+test_atomic_poll
+test_chained_reductions
