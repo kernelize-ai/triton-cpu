@@ -112,6 +112,67 @@ struct ConvertTritonFunc : public OpConversionPattern<triton::FuncOp> {
         return getArgVal;
       };
 
+      // The multicast lowering (ConvertMulticastOp) appends 2 semaphore
+      // compile-time args per multicast op, placed right after the CB ports.
+      // Reserve those slots so the TensorAccessorArgs chain starts *after* the
+      // semaphores and doesn't collide with them. We count multicasts
+      // program-wide (not just in this func) so the reservation is uniform
+      // across the reader/writer/compute kernels, which share one compile_args
+      // vector in the driver -- otherwise the writer (no multicast) would put
+      // its accessors where the reader's semaphores live.
+      //
+      // TODO: Match by op-name string (`triton_tenstorrent.multicast`) rather
+      // than the C++ type to avoid including the TritonTenstorrent dialect
+      // header here, which would pull the `mlir::triton::npu::tt` namespace
+      // into scope and shadow the `tt::ttkernel` references throughout this
+      // file.
+      unsigned numReservedSemaphoreArgs = 0;
+      if (auto moduleOp = funcOp->getParentOfType<ModuleOp>())
+        moduleOp.walk([&](Operation *op) {
+          if (op->getName().getStringRef() == "triton_tenstorrent.multicast")
+            numReservedSemaphoreArgs += 2;
+        });
+
+      // Build one chained `ttkernel.TensorAccessorArgs` per tensor input (in
+      // input order) at the start of the kernel. The first sits at compile-time
+      // arg offset `ctArgs.size() + numReservedSemaphoreArgs` (CB ports, then
+      // the reserved multicast semaphores); the rest chain via `prev_args` so
+      // the runtime resolves their variable-size offsets. Each is tagged with
+      // the common-arg index of its buffer's base address so the memory-op
+      // lowering can look up the right accessor when building the
+      // `TensorAccessor` for a load/store. The compute thread reads from CBs,
+      // never communicates via semaphores, and never issues NOC tile reads, so
+      // it has no use for TensorAccessors.
+      const bool isComputeThread =
+          getThreadTypeFromFunctionName(funcOp.getName()) ==
+          tt::ttkernel::ThreadType::Compute;
+      Value prevAccessorArgs = nullptr;
+      auto buildAccessorArgs = [&](unsigned baseArgIdx) {
+        if (isComputeThread)
+          return;
+        ttkernel::TensorAccessorArgsOp argsOp;
+        if (!prevAccessorArgs) {
+          Value ctaBase = arith::createConstantI32(
+              loc, rewriter,
+              static_cast<int32_t>(ctArgs.size() + numReservedSemaphoreArgs));
+          Value crtaBase = arith::createConstantI32(loc, rewriter, 0);
+          argsOp = ttkernel::TensorAccessorArgsOp::create(
+              rewriter, loc, ttkernel::TensorAccessorArgsType::get(context),
+              /*cta_base=*/ctaBase, /*crta_base=*/crtaBase,
+              /*prev_args=*/Value(), /*cta_expr=*/StringAttr(),
+              /*crta_expr=*/StringAttr());
+        } else {
+          argsOp = ttkernel::TensorAccessorArgsOp::create(
+              rewriter, loc, ttkernel::TensorAccessorArgsType::get(context),
+              /*cta_base=*/Value(), /*crta_base=*/Value(),
+              /*prev_args=*/prevAccessorArgs, /*cta_expr=*/StringAttr(),
+              /*crta_expr=*/StringAttr());
+        }
+        argsOp->setAttr(kAccessorBaseArgIndexAttr,
+                        rewriter.getI32IntegerAttr(baseArgIdx));
+        prevAccessorArgs = argsOp.getResult();
+      };
+
       unsigned idx = 0;
       for (auto arg : oldEntry.getArguments()) {
         Type oldType = arg.getType();
@@ -120,6 +181,7 @@ struct ConvertTritonFunc : public OpConversionPattern<triton::FuncOp> {
           assert(typeConverter->convertType(oldType, unpacked).succeeded() &&
                  "failed to convert tensor descriptor type");
           ptrArgIndices.push_back(idx);
+          buildAccessorArgs(idx);
 
           SmallVector<Value> unpackedValues;
           unpackedValues.reserve(unpacked.size());
@@ -134,8 +196,10 @@ struct ConvertTritonFunc : public OpConversionPattern<triton::FuncOp> {
                              .getResult(0);
           argReplacements.push_back(packed);
         } else {
-          if (isa<PointerType>(oldType))
+          if (isa<PointerType>(oldType)) {
             ptrArgIndices.push_back(idx);
+            buildAccessorArgs(idx);
+          }
           Type newType = typeConverter->convertType(oldType);
 
           LDBG("Replacing arg " << idx << " of type " << oldType

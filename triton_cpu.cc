@@ -114,15 +114,18 @@ void init_triton_npu_passes_tenstorrent(py::module &&m) {
 
   // tt-mlir specific passes
   m.def("add_ttkernel_control_dst_selection", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::tt::ttkernel::createTTKernelControlDstSection());
+    mlir::OpPassManager &funcPm = pm.nest<mlir::func::FuncOp>();
+    funcPm.addPass(mlir::tt::ttkernel::createTTKernelControlDstSection());
   });
   m.def("add_ttkernel_device_zone_scopes", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::tt::ttkernel::createTTKernelInsertDeviceZoneScopes());
+    mlir::OpPassManager &funcPm = pm.nest<mlir::func::FuncOp>();
+    funcPm.addPass(mlir::tt::ttkernel::createTTKernelInsertDeviceZoneScopes());
   });
 
   // emit-c -- TODO should this be part of a different namespace?
   m.def("add_ttkernel_to_emitc", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::tt::createConvertTTKernelToEmitC());
+    mlir::OpPassManager &funcPm = pm.nest<mlir::func::FuncOp>();
+    funcPm.addPass(mlir::tt::createConvertTTKernelToEmitC());
   });
   m.def("add_form_expressions_pass", [](mlir::PassManager &pm) {
     pm.addPass(mlir::emitc::createFormExpressionsPass());
@@ -142,7 +145,8 @@ void init_triton_npu_passes_tenstorrent(py::module &&m) {
 
   // ttkernel
   m.def("add_ttkernel_hoist_inits", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::tt::ttkernel::createTTKernelHoistInits());
+    mlir::OpPassManager &funcPm = pm.nest<mlir::func::FuncOp>();
+    funcPm.addPass(mlir::tt::ttkernel::createTTKernelHoistInits());
   });
 }
 
@@ -265,7 +269,9 @@ void init_tenstorrent_d2m_passes(py::module &&m) {
         [](mlir::PassManager &pm, bool ttnnMode) {
           d2m::ConvertD2MToTTKernelOptions D2MToTTKernelOptions;
           D2MToTTKernelOptions.ttnnMode = ttnnMode;
-          pm.addPass(createConvertD2MToTTKernelPass(D2MToTTKernelOptions));
+
+          mlir::OpPassManager &funcPm = pm.nest<mlir::func::FuncOp>();
+          funcPm.addPass(createConvertD2MToTTKernelPass(D2MToTTKernelOptions));
         });
 
   m.def("add_convert_d2m_to_ttmetal", [](mlir::PassManager &pm) {

@@ -262,10 +262,22 @@ void matmul_multi_core(
     std::vector<uint32_t> compile_args = {static_cast<uint32_t>(CBIndex::c_0),
                                         static_cast<uint32_t>(CBIndex::c_1),
                                         static_cast<uint32_t>(CBIndex::c_2),
-                                        static_cast<uint32_t>(CBIndex::c_4), 
+                                        static_cast<uint32_t>(CBIndex::c_4),
                                         in0_mcast_sender_semaphore_id,
                                         in0_mcast_receiver_semaphore_id};
-    
+
+    // Each generated kernel builds a chain of TensorAccessors (one per tensor
+    // input) reading their interleaved-DRAM layout from compile-time args.
+    // Append one block per buffer *after* the 4 CB indices and the 2 multicast
+    // semaphores, in function-input order (A, B, C/dst, bias) -- the same order
+    // as the buffer addresses in common_args. The codegen reserves the 2
+    // semaphore slots (see TritonFuncOpToFuncOp), so the accessor chain starts
+    // at compile-time-arg offset 6 (4 CB ports + 2 semaphores).
+    TensorAccessorArgs(src0_dram_buffer).append_to(compile_args);  // A (MxK)
+    TensorAccessorArgs(src1_dram_buffer).append_to(compile_args);  // B (KxN)
+    TensorAccessorArgs(dst_dram_buffer).append_to(compile_args);   // C (MxN)
+    TensorAccessorArgs(bias_dram_buffer).append_to(compile_args);  // bias (MxN)
+
     auto reader_id = tt_metal::CreateKernel(
         program,
         OVERRIDE_KERNEL_PREFIX "matmul_fused/kernels/dataflow/reader.cpp",
@@ -454,9 +466,10 @@ int main(int argc, char* argv[]) {
 
         // Create source data with specified matrix dimensions
         // Matrix dimensions - use command line args if provided, otherwise use defaults
-        uint32_t M = 256;  // Number of rows in matrix A (default)
-        uint32_t N = 128;  // Number of columns in matrix B (default)
-        uint32_t K = 64;   // Inner dimension for multiplication (default)
+        // TODO: multicast is currently hard coded for specific shapes, don't deviate from 1 tile in M and 40 tiles in N
+        uint32_t M = 64;  // Number of rows in matrix A (default)
+        uint32_t N = 2560;  // Number of columns in matrix B (default)
+        uint32_t K = 9728;   // Inner dimension for multiplication (default)
         
         if (argc >= 4) {
             M = std::atoi(argv[1]);

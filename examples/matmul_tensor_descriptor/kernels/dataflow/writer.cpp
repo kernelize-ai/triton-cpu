@@ -1,7 +1,11 @@
-// matmul_kernel_tma__writer
 #include <cstdint>
+#include "api/compile_time_args.h"
+#include "api/core_local_mem.h"
 #include "api/dataflow/circular_buffer.h"
 #include "api/dataflow/dataflow_api.h"
+#include "api/dataflow/endpoints.h"
+#include "api/dataflow/noc.h"
+#include "api/tensor/noc_traits.h"
 #include "tools/profiler/kernel_profiler.hpp"
 
 // SPDX-FileCopyrightText: (c) 2025 Tenstorrent AI ULC
@@ -65,172 +69,106 @@ std::uint32_t convert_logical_y_to_translated(std::uint32_t logical_y) {
 
 #endif
 
-
-// SPDX-FileCopyrightText: (c) 2025 Tenstorrent AI ULC
-//
-// SPDX-License-Identifier: Apache-2.0
-
-#ifndef TTMLIR_TARGET_TTKERNEL_LLKS_EXPERIMENTAL_DATAFLOW_API_H
-#define TTMLIR_TARGET_TTKERNEL_LLKS_EXPERIMENTAL_DATAFLOW_API_H
-
-namespace experimental {
-
-FORCE_INLINE
-std::uint64_t
-get_noc_multicast_addr(std::uint32_t noc_x_start, std::uint32_t noc_y_start,
-                       std::uint32_t noc_x_end, std::uint32_t noc_y_end,
-                       std::uint32_t addr, uint8_t noc = noc_index) {
-  /*
-      Get an encoding which contains tensix core and address you want to
-      read from/write to via the noc
-  */
-  if (noc) {
-    // noc 1
-    return NOC_MULTICAST_ADDR(
-        DYNAMIC_NOC_X(noc, noc_x_end), DYNAMIC_NOC_Y(noc, noc_y_end),
-        DYNAMIC_NOC_X(noc, noc_x_start), DYNAMIC_NOC_Y(noc, noc_y_start), addr);
-  } else {
-    // noc 0
-    return NOC_MULTICAST_ADDR(
-        DYNAMIC_NOC_X(noc, noc_x_start), DYNAMIC_NOC_Y(noc, noc_y_start),
-        DYNAMIC_NOC_X(noc, noc_x_end), DYNAMIC_NOC_Y(noc, noc_y_end), addr);
-  }
-}
-
-} // namespace experimental
-
-#endif
-
 void kernel_main() {
   bool v1 = false;
   uint32_t v2 = 0;
   uint32_t v3 = 32;
-  size_t v4 = 0;
-  size_t v5 = 1;
-  int32_t v6 = 63;
-  int32_t v7 = 0;
-  int32_t v8 = 64;
-  int32_t v9 = 1;
-  bool v10 = true;
+  int32_t v4 = 0;
+  int32_t v5 = 5;
+  size_t v6 = 0;
+  size_t v7 = 1;
+  int32_t v8 = 63;
+  int32_t v9 = 64;
+  int32_t v10 = 1;
   int32_t v11 = 65535;
   int32_t v12 = 16;
   int32_t v13 = 4;
-  int32_t v14 = 32;
-  int32_t v15 = 2048;
-  int32_t v16 = 4096;
-  int32_t v17 = 6144;
-  int32_t v18 = 8192;
-  int32_t v19 = get_common_arg_val<uint32_t>(v4);
+  int8_t v14 = 0;
+  int32_t v15 = 32;
+  int32_t v16 = 2048;
+  int32_t v17 = 4096;
+  int32_t v18 = 6144;
+  UnicastEndpoint unicast_ep;
+  MulticastEndpoint mcast_ep;
+  Noc noc0(0);
+  DeviceZoneScopedN("kernel_outer_matmul_kernel_tma__writer");
+  auto tensor_accessor_args_0 = TensorAccessorArgs<5, 0>();
+  int32_t v19 = get_common_arg_val<uint32_t>(v6);
   int32_t v20 = get_common_arg_val<uint32_t>(2);
+  auto tensor_accessor_args_1 = TensorAccessorArgs<tensor_accessor_args_0.next_compile_time_args_offset(), tensor_accessor_args_0.next_common_runtime_args_offset()>();
+  auto tensor_accessor_args_2 = TensorAccessorArgs<tensor_accessor_args_1.next_compile_time_args_offset(), tensor_accessor_args_1.next_common_runtime_args_offset()>();
   int32_t v21 = get_common_arg_val<uint32_t>(20);
   int32_t v22 = get_common_arg_val<uint32_t>(22);
   int32_t v23 = get_common_arg_val<uint32_t>(30);
   int32_t v24 = get_common_arg_val<uint32_t>(31);
   int32_t v25 = get_common_arg_val<uint32_t>(32);
   CircularBuffer cb_ctarg_2(get_compile_time_arg_val(2));
-  DataFormat v26 = get_dataformat(get_compile_time_arg_val(2));
-  int32_t v27 = get_tile_size(get_compile_time_arg_val(2));
-  InterleavedAddrGenFast<true> v28;
-  v28.bank_base_address = v21;
-  v28.page_size = v27;
-  v28.data_format = v26;
-  InterleavedAddrGenFast<true> v29 = v28;
+  int32_t v26 = get_tile_size(get_compile_time_arg_val(2));
+  TensorAccessor v27 = TensorAccessor(tensor_accessor_args_2, v21, v26);
   CircularBuffer cb_ctarg_0(get_compile_time_arg_val(0));
-  DataFormat v30 = get_dataformat(get_compile_time_arg_val(0));
-  int32_t v31 = get_tile_size(get_compile_time_arg_val(0));
-  int32_t v32 = get_arg_val<uint32_t>(v5);
-  int32_t v33 = get_arg_val<uint32_t>(v4);
-  int32_t v34 = (int32_t) ((uint32_t) v24 + (uint32_t) v6) / v8;
-  int32_t v35 = get_arg_val<uint32_t>(3);
-  int32_t v36 = get_arg_val<uint32_t>(4);
-  int32_t v37 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v12 < v3 ? (uint32_t) v35 >> (uint32_t) v12 : v2)) & (uint32_t) v11);
-  int32_t v38 = (int32_t) ((uint32_t) v35 & (uint32_t) v11);
-  int32_t v39 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v12 < v3 ? (uint32_t) v36 >> (uint32_t) v12 : v2)) & (uint32_t) v11);
-  int32_t v40 = (int32_t) ((uint32_t) v36 & (uint32_t) v11);
-  int32_t v41 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) v39 + (uint32_t) v9)) * (uint32_t) ((int32_t) ((uint32_t) v40 + (uint32_t) v9)))) - (uint32_t) v9);
-  int32_t v42 = v22 != (int32_t) ((uint32_t) (v22 / v14) * (uint32_t) v14) & v22 < v7 == v1 ? (int32_t) ((uint32_t) (v22 / v14) + (uint32_t) v9) : v22 / v14;
-  for (int32_t i43 = v33; i43 < v32; i43 += v9) {
-    int32_t v44 = i43 / v34;
-    int32_t v45 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v23 + (uint32_t) v6) / v8) - (uint32_t) v44) < v9 ? (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v23 + (uint32_t) v6) / v8) - (uint32_t) v44) : v9;
-    int32_t v46 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v44 + (uint32_t) (i43 % v45))) * (uint32_t) v8);
-    for (int32_t j47 = v7; j47 < ((int32_t) ((uint32_t) v25 + (uint32_t) v6) / v8); j47 += v9) {
-      int32_t v48 = get_semaphore(get_compile_time_arg_val(3));
-      int32_t v49 = get_semaphore(get_compile_time_arg_val(4));
-      if (v37 == (int32_t) ((ptrdiff_t) get_absolute_logical_x()) & v38 == (int32_t) ((ptrdiff_t) get_absolute_logical_y())) {
+  int32_t v28 = get_tile_size(get_compile_time_arg_val(0));
+  int32_t v29 = get_arg_val<uint32_t>(v7);
+  int32_t v30 = get_arg_val<uint32_t>(v6);
+  int32_t v31 = (int32_t) ((uint32_t) v24 + (uint32_t) v8) / v9;
+  int32_t v32 = get_arg_val<uint32_t>(3);
+  int32_t v33 = get_arg_val<uint32_t>(4);
+  int32_t v34 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v12 < v3 ? (uint32_t) v32 >> (uint32_t) v12 : v2)) & (uint32_t) v11);
+  int32_t v35 = (int32_t) ((uint32_t) v32 & (uint32_t) v11);
+  int32_t v36 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v12 < v3 ? (uint32_t) v33 >> (uint32_t) v12 : v2)) & (uint32_t) v11);
+  int32_t v37 = (int32_t) ((uint32_t) v33 & (uint32_t) v11);
+  int32_t v38 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) v36 + (uint32_t) v10)) * (uint32_t) ((int32_t) ((uint32_t) v37 + (uint32_t) v10)))) - (uint32_t) v10);
+  int32_t v39 = v22 != (int32_t) ((uint32_t) (v22 / v15) * (uint32_t) v15) && v22 < v4 == v1 ? (int32_t) ((uint32_t) (v22 / v15) + (uint32_t) v10) : v22 / v15;
+  for (int32_t i40 = v30; i40 < v29; i40 += v10) {
+    int32_t v41 = i40 / v31;
+    int32_t v42 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v23 + (uint32_t) v8) / v9) - (uint32_t) v41) < v10 ? (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v23 + (uint32_t) v8) / v9) - (uint32_t) v41) : v10;
+    int32_t v43 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v41 + (uint32_t) (i40 % v42))) * (uint32_t) v9);
+    for (int32_t j44 = v4; j44 < ((int32_t) ((uint32_t) v25 + (uint32_t) v8) / v9); j44 += v10) {
+      int32_t v45 = get_semaphore(get_compile_time_arg_val(3));
+      int32_t v46 = get_semaphore(get_compile_time_arg_val(4));
+      if (v34 == (int32_t) ((ptrdiff_t) get_absolute_logical_x()) && v35 == (int32_t) ((ptrdiff_t) get_absolute_logical_y())) {
         cb_ctarg_0.reserve_back(v13);
-        InterleavedAddrGenFast<true> v50;
-        v50.bank_base_address = v19;
-        v50.page_size = v31;
-        v50.data_format = v30;
-        InterleavedAddrGenFast<true> v51 = v50;
-        int32_t v52 = v20 != (int32_t) ((uint32_t) (v20 / v14) * (uint32_t) v14) & v20 < v7 == v1 ? (int32_t) ((uint32_t) (v20 / v14) + (uint32_t) v9) : v20 / v14;
-        int32_t v53 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) (v46 / v14) * (uint32_t) v52)) + (uint32_t) ((int32_t) ((uint32_t) j47 * (uint32_t) v8) / v14));
-        uint64_t temp_323 = v51.get_noc_addr(v53, v7);
-        noc_async_read(temp_323, cb_ctarg_0.get_write_ptr(), v31);
-        int32_t v54 = (int32_t) ((uint32_t) cb_ctarg_0.get_write_ptr() + (uint32_t) v15);
-        int32_t v55 = (int32_t) ((uint32_t) v53 + (uint32_t) v9);
-        uint64_t temp_335 = v51.get_noc_addr(v55, v7);
-        noc_async_read(temp_335, v54, v31);
-        int32_t v56 = (int32_t) ((uint32_t) cb_ctarg_0.get_write_ptr() + (uint32_t) v16);
-        uint64_t temp_347 = v51.get_noc_addr((int32_t) ((uint32_t) v53 + (uint32_t) v52), v7);
-        noc_async_read(temp_347, v56, v31);
-        int32_t v57 = (int32_t) ((uint32_t) cb_ctarg_0.get_write_ptr() + (uint32_t) v17);
-        uint64_t temp_359 = v51.get_noc_addr((int32_t) ((uint32_t) v55 + (uint32_t) v52), v7);
-        noc_async_read(temp_359, v57, v31);
-        {
-        DeviceZoneScopedN("noc_async_read_barrier");
-        noc_async_read_barrier();
-        }
-        tt_l1_ptr uint32_t* v58 = reinterpret_cast<tt_l1_ptr uint32_t*>(v48);
-        experimental::semaphore_wait(v58, v41);
-        noc_semaphore_set(v58, v4);
-        size_t v59 = experimental::convert_logical_y_to_translated(v40);
-        size_t v60 = experimental::convert_logical_x_to_translated(v39);
-        size_t v61 = experimental::convert_logical_y_to_translated(v38);
-        size_t v62 = experimental::convert_logical_x_to_translated(v37);
-        int64_t v63 = experimental::get_noc_multicast_addr(v62, v61, v60, v59, cb_ctarg_0.get_write_ptr());
-        noc_async_write_multicast(cb_ctarg_0.get_write_ptr(), v63, v18, v41);
-        {
-        DeviceZoneScopedN("noc_async_write_barrier");
-        noc_async_write_barrier();
-        }
-        tt_l1_ptr uint32_t* v64 = reinterpret_cast<tt_l1_ptr uint32_t*>(v49);
-        noc_semaphore_set(v64, v5);
-        int64_t v65 = experimental::get_noc_multicast_addr(v62, v61, v60, v59, v49);
-        noc_semaphore_set_multicast(v49, v65, v41);
+        TensorAccessor v47 = TensorAccessor(tensor_accessor_args_0, v19, v28);
+        int32_t v48 = v20 != (int32_t) ((uint32_t) (v20 / v15) * (uint32_t) v15) && v20 < v4 == v1 ? (int32_t) ((uint32_t) (v20 / v15) + (uint32_t) v10) : v20 / v15;
+        int32_t v49 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) (v43 / v15) * (uint32_t) v48)) + (uint32_t) ((int32_t) ((uint32_t) j44 * (uint32_t) v9) / v15));
+        noc0.async_read(v47, CoreLocalMem<uint32_t>(cb_ctarg_0.get_write_ptr()), v47.get_aligned_page_size(), {.page_id = static_cast<uint32_t>(v49)}, {});
+        int32_t v50 = (int32_t) ((uint32_t) v49 + (uint32_t) v10);
+        noc0.async_read(v47, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_0.get_write_ptr() + (uint32_t) v16)), v47.get_aligned_page_size(), {.page_id = static_cast<uint32_t>(v50)}, {});
+        noc0.async_read(v47, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_0.get_write_ptr() + (uint32_t) v17)), v47.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v49 + (uint32_t) v48))}, {});
+        noc0.async_read(v47, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_0.get_write_ptr() + (uint32_t) v18)), v47.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v50 + (uint32_t) v48))}, {});
+        noc0.async_read_barrier();
+        tt_l1_ptr uint32_t* v51 = reinterpret_cast<tt_l1_ptr uint32_t*>(v45);
+        experimental::semaphore_wait(v51, v38);
+        noc_semaphore_set(v51, v6);
+        size_t v52 = experimental::convert_logical_y_to_translated(v37);
+        size_t v53 = experimental::convert_logical_x_to_translated(v36);
+        size_t v54 = experimental::convert_logical_y_to_translated(v35);
+        size_t v55 = experimental::convert_logical_x_to_translated(v34);
+        noc0.async_write_multicast(CoreLocalMem<uint32_t>(cb_ctarg_0.get_write_ptr()), mcast_ep, 8192, v38, {} , noc_traits_t<MulticastEndpoint>::dst_args_mcast_type{.noc_x_start = v55, .noc_y_start = v54, .noc_x_end = v53, .noc_y_end = v52, .addr = static_cast<uint32_t>(cb_ctarg_0.get_write_ptr())}, false);
+        noc0.async_write_barrier();
+        tt_l1_ptr uint32_t* v56 = reinterpret_cast<tt_l1_ptr uint32_t*>(v46);
+        noc_semaphore_set(v56, v7);
+        int64_t v57 = get_noc_multicast_addr(v55, v54, v53, v52, v46, v14);
+        noc_semaphore_set_multicast(v46, v57, v38);
       } else {
         cb_ctarg_0.reserve_back(v13);
-        size_t v66 = experimental::convert_logical_y_to_translated(v38);
-        size_t v67 = experimental::convert_logical_x_to_translated(v37);
-        int64_t v68 = get_noc_addr(v67, v66, v48);
-        noc_semaphore_inc(v68, v5);
-        tt_l1_ptr uint32_t* v69 = reinterpret_cast<tt_l1_ptr uint32_t*>(v49);
-        experimental::semaphore_wait(v69, v5);
-        noc_semaphore_set(v69, v4);
+        size_t v58 = experimental::convert_logical_y_to_translated(v35);
+        size_t v59 = experimental::convert_logical_x_to_translated(v34);
+        uint64_t noc_addr_3 = unicast_ep.get_noc_unicast_addr(static_cast<uint32_t>(v59), static_cast<uint32_t>(v58), static_cast<uint32_t>(v45), noc0.get_noc_id());
+        noc_semaphore_inc(noc_addr_3, v7, v14);
+        tt_l1_ptr uint32_t* v60 = reinterpret_cast<tt_l1_ptr uint32_t*>(v46);
+        experimental::semaphore_wait(v60, v7);
+        noc_semaphore_set(v60, v6);
       }
       cb_ctarg_0.push_back(v13);
     }
-    {
-    DeviceZoneScopedN("cb_wait_front");
     cb_ctarg_2.wait_front(v13);
-    }
-    int32_t v70 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) (v46 / v14) * (uint32_t) v42)) + (uint32_t) ((int32_t) ((uint32_t) ((i43 % v34) / v45) * (uint32_t) v8) / v14));
-    uint64_t temp_260 = v29.get_noc_addr(v70, v7);
-    noc_async_write(cb_ctarg_2.get_read_ptr(), temp_260, v27);
-    int32_t v71 = (int32_t) ((uint32_t) cb_ctarg_2.get_read_ptr() + (uint32_t) v15);
-    int32_t v72 = (int32_t) ((uint32_t) v70 + (uint32_t) v9);
-    uint64_t temp_272 = v29.get_noc_addr(v72, v7);
-    noc_async_write(v71, temp_272, v27);
-    int32_t v73 = (int32_t) ((uint32_t) cb_ctarg_2.get_read_ptr() + (uint32_t) v16);
-    uint64_t temp_284 = v29.get_noc_addr((int32_t) ((uint32_t) v70 + (uint32_t) v42), v7);
-    noc_async_write(v73, temp_284, v27);
-    int32_t v74 = (int32_t) ((uint32_t) cb_ctarg_2.get_read_ptr() + (uint32_t) v17);
-    uint64_t temp_296 = v29.get_noc_addr((int32_t) ((uint32_t) v72 + (uint32_t) v42), v7);
-    noc_async_write(v74, temp_296, v27);
-    {
-    DeviceZoneScopedN("noc_async_write_barrier");
-    noc_async_write_barrier();
-    }
+    int32_t v61 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) (v43 / v15) * (uint32_t) v39)) + (uint32_t) ((int32_t) ((uint32_t) ((i40 % v31) / v42) * (uint32_t) v9) / v15));
+    noc0.async_write(CoreLocalMem<uint32_t>(cb_ctarg_2.get_read_ptr()), v27, v27.get_aligned_page_size(), {} , {.page_id = static_cast<uint32_t>(v61)});
+    int32_t v62 = (int32_t) ((uint32_t) v61 + (uint32_t) v10);
+    noc0.async_write(CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_2.get_read_ptr() + (uint32_t) v16)), v27, v27.get_aligned_page_size(), {} , {.page_id = static_cast<uint32_t>(v62)});
+    noc0.async_write(CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_2.get_read_ptr() + (uint32_t) v17)), v27, v27.get_aligned_page_size(), {} , {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v61 + (uint32_t) v39))});
+    noc0.async_write(CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_2.get_read_ptr() + (uint32_t) v18)), v27, v27.get_aligned_page_size(), {} , {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v62 + (uint32_t) v39))});
+    noc0.async_write_barrier();
     cb_ctarg_2.pop_front(v13);
   }
   return;

@@ -1,7 +1,7 @@
-// matmul_kernel_fused__compute
 #include <cstdint>
+#include "api/compile_time_args.h"
 #include "api/compute/common.h"
-#include "api/compute/compute_kernel_api.h"
+#include "api/compute/compute_kernel_hw_startup.h"
 #include "api/compute/eltwise_binary_sfpu.h"
 #include "api/compute/matmul.h"
 #include "api/compute/pack.h"
@@ -14,113 +14,103 @@ inline uint32_t float_to_bits(const float f) { uint32_t r; __builtin_memcpy(&r, 
 #define INFINITY __builtin_inff()
 #endif
 void kernel_main() {
-  size_t v1 = 0;
-  size_t v2 = 1;
-  size_t v3 = 2;
-  size_t v4 = 3;
-  size_t v5 = 4;
-  size_t v6 = 5;
-  size_t v7 = 6;
-  size_t v8 = 7;
-  int32_t v9 = 0;
-  int32_t v10 = 1;
-  int32_t v11 = 16;
-  int32_t v12 = 8;
+  int32_t v1 = 15;
+  int32_t v2 = 7;
+  int32_t v3 = 14;
+  int32_t v4 = 6;
+  int32_t v5 = 13;
+  int32_t v6 = 5;
+  int32_t v7 = 12;
+  int32_t v8 = 4;
+  int32_t v9 = 11;
+  int32_t v10 = 3;
+  int32_t v11 = 10;
+  int32_t v12 = 2;
   int32_t v13 = 9;
-  int32_t v14 = 2;
-  int32_t v15 = 10;
-  int32_t v16 = 3;
-  int32_t v17 = 11;
-  int32_t v18 = 4;
-  int32_t v19 = 12;
-  int32_t v20 = 5;
-  int32_t v21 = 13;
-  int32_t v22 = 6;
-  int32_t v23 = 14;
-  int32_t v24 = 7;
-  int32_t v25 = 15;
+  int32_t v14 = 8;
+  int32_t v15 = 16;
+  int32_t v16 = 1;
+  int32_t v17 = 0;
+  size_t v18 = 7;
+  size_t v19 = 6;
+  size_t v20 = 5;
+  size_t v21 = 4;
+  size_t v22 = 3;
+  size_t v23 = 2;
+  size_t v24 = 1;
+  size_t v25 = 0;
+  DeviceZoneScopedN("kernel_outer_matmul_kernel_fused__compute");
   int32_t v26 = get_common_arg_val<uint32_t>(42);
   CircularBuffer cb_ctarg_3(get_compile_time_arg_val(3));
   CircularBuffer cb_ctarg_2(get_compile_time_arg_val(2));
   CircularBuffer cb_ctarg_1(get_compile_time_arg_val(1));
   CircularBuffer cb_ctarg_0(get_compile_time_arg_val(0));
-  mm_init(get_compile_time_arg_val(0), get_compile_time_arg_val(1), get_compile_time_arg_val(3), v9);
-  int32_t v27 = get_arg_val<uint32_t>(v2);
-  int32_t v28 = get_arg_val<uint32_t>(v1);
-  for (int32_t i29 = v28; i29 < v27; i29 += v10) {
+  compute_kernel_hw_startup<SrcOrder::Reverse>(get_compile_time_arg_val(0), get_compile_time_arg_val(1), get_compile_time_arg_val(3));
+  matmul_init(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v17);
+  int32_t v27 = get_arg_val<uint32_t>(v24);
+  int32_t v28 = get_arg_val<uint32_t>(v25);
+  for (int32_t i29 = v28; i29 < v27; i29 += v16) {
     tile_regs_acquire();
-    mm_init_short(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v9);
-    for (int32_t j30 = v9; j30 < ((int32_t) ((uint32_t) v26 + (uint32_t) 255) / 256); j30 += v10) {
-      {
-      DeviceZoneScopedN("cb_wait_front");
-      cb_ctarg_0.wait_front(v11);
-      }
-      {
-      DeviceZoneScopedN("cb_wait_front");
-      cb_ctarg_1.wait_front(v11);
-      }
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v9, v9, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v9, v12, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v12, v9, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v12, v12, v4);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v10, v10, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v10, v13, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v13, v10, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v13, v13, v4);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v14, v14, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v14, v15, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v15, v14, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v15, v15, v4);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v16, v16, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v16, v17, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v17, v16, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v17, v17, v4);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v18, v18, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v18, v19, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v19, v18, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v19, v19, v4);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v20, v20, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v20, v21, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v21, v20, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v21, v21, v4);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v22, v22, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v22, v23, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v23, v22, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v23, v23, v4);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v24, v24, v1);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v24, v25, v2);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v25, v24, v3);
-      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v25, v25, v4);
-      cb_ctarg_0.pop_front(v11);
-      cb_ctarg_1.pop_front(v11);
+    matmul_init(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v17);
+    for (int32_t j30 = v17; j30 < ((int32_t) ((uint32_t) v26 + (uint32_t) 255) / 256); j30 += v16) {
+      cb_ctarg_0.wait_front(v15);
+      cb_ctarg_1.wait_front(v15);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v17, v17, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v17, v14, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v14, v17, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v14, v14, v22);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v16, v16, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v16, v13, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v13, v16, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v13, v13, v22);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v12, v12, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v12, v11, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v11, v12, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v11, v11, v22);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v10, v10, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v10, v9, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v9, v10, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v9, v9, v22);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v8, v8, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v8, v7, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v7, v8, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v7, v7, v22);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v6, v6, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v6, v5, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v5, v6, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v5, v5, v22);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v4, v4, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v4, v3, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v3, v4, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v3, v3, v22);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v2, v2, v25);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v2, v1, v24);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v1, v2, v23);
+      matmul_tiles(get_compile_time_arg_val(0), get_compile_time_arg_val(1), v1, v1, v22);
+      cb_ctarg_0.pop_front(v15);
+      cb_ctarg_1.pop_front(v15);
     }
-    {
-    DeviceZoneScopedN("cb_wait_front");
-    cb_ctarg_2.wait_front(v18);
-    }
+    cb_ctarg_2.wait_front(v8);
     copy_tile_init(get_compile_time_arg_val(2));
-    copy_tile(get_compile_time_arg_val(2), v1, v5);
-    copy_tile(get_compile_time_arg_val(2), v2, v6);
-    copy_tile(get_compile_time_arg_val(2), v3, v7);
-    copy_tile(get_compile_time_arg_val(2), v4, v8);
-    cb_ctarg_2.pop_front(v18);
+    copy_tile(get_compile_time_arg_val(2), v25, v21);
+    copy_tile(get_compile_time_arg_val(2), v24, v20);
+    copy_tile(get_compile_time_arg_val(2), v23, v19);
+    copy_tile(get_compile_time_arg_val(2), v22, v18);
+    cb_ctarg_2.pop_front(v8);
     add_binary_tile_init();
-    add_binary_tile(v1, v5, v1);
-    add_binary_tile(v2, v6, v2);
-    add_binary_tile(v3, v7, v3);
-    add_binary_tile(v4, v8, v4);
-    cb_ctarg_3.reserve_back(v18);
+    add_binary_tile(v25, v21, v25);
+    add_binary_tile(v24, v20, v24);
+    add_binary_tile(v23, v19, v23);
+    add_binary_tile(v22, v18, v22);
+    cb_ctarg_3.reserve_back(v8);
     tile_regs_commit();
-    {
-    DeviceZoneScopedN("tile_regs_wait");
     tile_regs_wait();
-    }
-    pack_tile<true>(v9, get_compile_time_arg_val(3), v9);
-    pack_tile<true>(v10, get_compile_time_arg_val(3), v10);
-    pack_tile<true>(v14, get_compile_time_arg_val(3), v14);
+    pack_tile<true>(v17, get_compile_time_arg_val(3), v17);
     pack_tile<true>(v16, get_compile_time_arg_val(3), v16);
+    pack_tile<true>(v12, get_compile_time_arg_val(3), v12);
+    pack_tile<true>(v10, get_compile_time_arg_val(3), v10);
     tile_regs_release();
-    cb_ctarg_3.push_back(v18);
+    cb_ctarg_3.push_back(v8);
   }
   return;
 }

@@ -207,7 +207,17 @@ void matmul_multi_core(
     std::vector<uint32_t> compile_args = {static_cast<uint32_t>(CBIndex::c_0),
                                         static_cast<uint32_t>(CBIndex::c_1),
                                         static_cast<uint32_t>(CBIndex::c_16)};
-    
+
+    // Each generated kernel builds a chain of TensorAccessors (one per tensor
+    // input) that read their interleaved-DRAM layout from compile-time args.
+    // Append one block per buffer *after* the CB indices, in function-input
+    // order (A, B, C) -- the same order as the buffer addresses in common_args.
+    // Unlike vector-add these three buffers have different shapes, so the blocks
+    // genuinely differ; the kernel chains them so the runtime resolves offsets.
+    TensorAccessorArgs(src0_dram_buffer).append_to(compile_args);  // A (MxK)
+    TensorAccessorArgs(src1_dram_buffer).append_to(compile_args);  // B (KxN)
+    TensorAccessorArgs(dst_dram_buffer).append_to(compile_args);   // C (MxN)
+
     auto reader_id = tt_metal::CreateKernel(
         program,
         OVERRIDE_KERNEL_PREFIX "matmul/kernels/dataflow/reader.cpp",

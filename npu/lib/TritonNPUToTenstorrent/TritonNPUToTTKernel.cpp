@@ -224,6 +224,7 @@ struct ConvertTritonNPUToTTKernelPass
     funcTarget.addLegalOp<UnrealizedConversionCastOp>();
     funcTarget.addLegalOp<ttkernel::GetArgValOp>();
     funcTarget.addLegalOp<ttkernel::GetCommonArgValOp>();
+    funcTarget.addLegalOp<ttkernel::TensorAccessorArgsOp>();
 
     mlir::RewritePatternSet funcPatterns(context);
     populateFuncOpConversionPattern(typeConverter, funcPatterns,

@@ -90,6 +90,92 @@ static Value applyLinearLayout(ConversionPatternRewriter &rewriter,
   return offset;
 }
 
+// A buffer's base address is materialized by the func conversion as a
+// `ttkernel.get_common_arg_val(idx)`; recover `idx` so we can match the buffer
+// to the `TensorAccessorArgs` built for it at function entry.
+static std::optional<int64_t> getBaseCommonArgIndex(Value baseAddr) {
+  auto getArg = baseAddr.getDefiningOp<ttkernel::GetCommonArgValOp>();
+  if (!getArg)
+    return std::nullopt;
+  auto cst = getArg.getArgIndex().getDefiningOp<arith::ConstantOp>();
+  if (!cst)
+    return std::nullopt;
+  if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValue()))
+    return intAttr.getInt();
+  return std::nullopt;
+}
+
+// Find the chained `TensorAccessorArgs` that the func conversion built at the
+// enclosing kernel's entry for the buffer whose base address has the given
+// common-arg index (tagged with kAccessorBaseArgIndexAttr). See
+// TritonFuncOpToFuncOp.cpp.
+static Value findAccessorArgsForBuffer(Operation *op, int64_t baseArgIndex) {
+  auto funcOp = op->getParentOfType<func::FuncOp>();
+  if (!funcOp)
+    return nullptr;
+  Value result;
+  funcOp.walk([&](ttkernel::TensorAccessorArgsOp argsOp) {
+    auto attr = argsOp->getAttrOfType<IntegerAttr>(kAccessorBaseArgIndexAttr);
+    if (attr && attr.getInt() == baseArgIndex) {
+      result = argsOp.getResult();
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return result;
+}
+
+// Build a TensorAccessor for a load/store by pairing the buffer's runtime base
+// address + page size with the chained `TensorAccessorArgs` reserved for that
+// buffer at function entry. This replaces the deprecated
+// GetInterleavedAddrGenFast (removed upstream in tt-mlir#8802); the
+// interleaved/sharding/DRAM config now travels in compile-time args the host
+// pushes via TensorAccessorArgs.
+static Value createTensorAccessor(ConversionPatternRewriter &rewriter,
+                                  Location loc, Operation *op, Value baseAddr,
+                                  Value pageSize) {
+  std::optional<int64_t> argIdx = getBaseCommonArgIndex(baseAddr);
+  assert(argIdx &&
+         "expected buffer base address to come from get_common_arg_val");
+  Value accessorArgs = findAccessorArgsForBuffer(op, *argIdx);
+  assert(
+      accessorArgs &&
+      "no TensorAccessorArgs found for buffer; expected the func-entry chain "
+      "built in TritonFuncOpToFuncOp");
+  return ttkernel::TensorAccessorOp::create(
+      rewriter, loc, ttkernel::TensorAccessorType::get(rewriter.getContext()),
+      accessorArgs, baseAddr, pageSize);
+}
+
+// The OO TensorAccessor EmitC path (tt-mlir#8802) requires a *statically known*
+// NoC index on the tile read/write ops and their barriers. The old
+// noc_async_read used the implicit `noc_index` global, but the new `Noc` object
+// is constructed with an explicit compile-time index.
+//
+// Every NoC op in a kernel runs on *that kernel's* NoC, regardless of whether
+// it is a read or a write: the reader kernel runs on RISCV_1 (NOC 1) and the
+// writer on RISCV_0 (NOC 0). In particular a read issued from the writer (e.g.
+// the matmul writer loading an input tile) must still use NOC 0 -- issuing it
+// on NOC 1 from RISCV_0 leaves the read outstanding forever and hangs the
+// barrier. The driver's DataMovementConfig must match (reader .noc =
+// NOC::RISCV_1_default, writer .noc = NOC::RISCV_0_default).
+static constexpr int64_t kReaderNocIndex = 1;
+static constexpr int64_t kWriterNocIndex = 0;
+
+static Value createNocId(ConversionPatternRewriter &rewriter, Location loc,
+                         int64_t nocIndex) {
+  return arith::ConstantOp::create(rewriter, loc,
+                                   rewriter.getI8IntegerAttr(nocIndex));
+}
+
+// Resolve the NoC index for a data-movement op from its enclosing kernel func.
+static int64_t getKernelNocIndex(Operation *op) {
+  auto funcOp = op->getParentOfType<func::FuncOp>();
+  assert(funcOp && "expected data-movement op inside a kernel func");
+  return funcOp.getSymName().ends_with("__writer") ? kWriterNocIndex
+                                                   : kReaderNocIndex;
+}
+
 struct ConvertLoadOp : public OpConversionPattern<triton::LoadOp> {
   using OpConversionPattern<triton::LoadOp>::OpConversionPattern;
 
@@ -127,12 +213,9 @@ struct ConvertLoadOp : public OpConversionPattern<triton::LoadOp> {
     auto opInsertionPt = rewriter.saveInsertionPoint();
     rewriter.setInsertionPointAfterValue(cb);
 
-    auto dataFormat = ttkernel::GetDataFormatOp::create(rewriter, loc, cb);
     auto pageSize = ttkernel::GetTileSizeOp::create(rewriter, loc, cb);
 
-    Value trueVal = arith::createConstantI1(loc, rewriter, 1);
-    Value addrGen = ttkernel::GetInterleavedAddrGenFastOp::create(
-        rewriter, loc, /*dram=*/trueVal, baseAddr, pageSize, dataFormat);
+    Value addrGen = createTensorAccessor(rewriter, loc, op, baseAddr, pageSize);
 
     rewriter.restoreInsertionPoint(opInsertionPt);
 
@@ -140,8 +223,6 @@ struct ConvertLoadOp : public OpConversionPattern<triton::LoadOp> {
     Value offset = adaptor.getPtr();
     Value baseTileIndex =
         arith::DivUIOp::create(rewriter, loc, offset, pageSize);
-
-    Value const0 = arith::createConstantI32(loc, rewriter, 0);
 
     // determine how many tiles we need to load by converting the shape to tiles
     const int32_t numTiles = cast<ttkernel::CBType>(cb.getType()).getNumTiles();
@@ -158,12 +239,10 @@ struct ConvertLoadOp : public OpConversionPattern<triton::LoadOp> {
       rewriter.setInsertionPointToStart(loadTileLoop.getBody());
       Value crtL1Address = loadTileLoop.getRegionIterArgs()[0];
       Value crtTileIndex = loadTileLoop.getRegionIterArgs()[1];
-      // TODO: should the offset be const0 here? the only examples we have are
-      // TensorAccessor...
-      Value nocAddr = ttkernel::InterleavedAddrGenFastGetNocAddrOp::create(
-          rewriter, loc, addrGen, crtTileIndex, const0, Value());
-      ttkernel::NocAsyncReadOp::create(rewriter, loc, nocAddr, crtL1Address,
-                                       pageSize);
+
+      ttkernel::NocAsyncReadTileOp::create(
+          rewriter, loc, crtTileIndex, addrGen, crtL1Address,
+          createNocId(rewriter, loc, getKernelNocIndex(op)));
       Value nextL1Address =
           arith::AddIOp::create(rewriter, loc, crtL1Address, pageSize);
       Value nextTileIndex =
@@ -174,7 +253,8 @@ struct ConvertLoadOp : public OpConversionPattern<triton::LoadOp> {
     }
 
     rewriter.setInsertionPointAfter(loadTileLoop);
-    ttkernel::NocAsyncReadBarrierOp::create(rewriter, loc);
+    ttkernel::NocAsyncReadBarrierOp::create(
+        rewriter, loc, createNocId(rewriter, loc, getKernelNocIndex(op)));
 
     rewriter.eraseOp(op);
     return success();
@@ -215,7 +295,6 @@ struct ConvertTensorDescLoadOp
     auto opInsertionPt = rewriter.saveInsertionPoint();
     rewriter.setInsertionPointAfterValue(cb);
 
-    auto dataFormat = ttkernel::GetDataFormatOp::create(rewriter, loc, cb);
     auto pageSize = ttkernel::GetTileSizeOp::create(rewriter, loc, cb);
 
     rewriter.restoreInsertionPoint(opInsertionPt);
@@ -254,11 +333,8 @@ struct ConvertTensorDescLoadOp
 
     ttkernel::CBReserveBackOp::create(rewriter, loc, cb, numPages);
 
-    Value trueVal = arith::createConstantI1(loc, rewriter, 1);
-
     Value baseAddr = desc.getPtr();
-    Value addrGen = ttkernel::GetInterleavedAddrGenFastOp::create(
-        rewriter, loc, /*dram=*/trueVal, baseAddr, pageSize, dataFormat);
+    Value addrGen = createTensorAccessor(rewriter, loc, op, baseAddr, pageSize);
 
     auto offsets = op.getIndices();
 
@@ -294,7 +370,6 @@ struct ConvertTensorDescLoadOp
         loc, rewriter.create<arith::MulIOp>(loc, baseTileH, strideH),
         baseTileW);
 
-    Value const0 = arith::createConstantI32(loc, rewriter, 0);
     for (unsigned i = 0; i < blockTilesH; i++) {
       for (unsigned j = 0; j < blockTilesW; j++) {
         // compute the L1 index for this row and column
@@ -333,14 +408,14 @@ struct ConvertTensorDescLoadOp
         }
 
         // issue the read
-        Value nocAddr = ttkernel::InterleavedAddrGenFastGetNocAddrOp::create(
-            rewriter, loc, addrGen, crtIndex, const0, Value());
-        ttkernel::NocAsyncReadOp::create(rewriter, loc, nocAddr, crtL1Address,
-                                         pageSize);
+        ttkernel::NocAsyncReadTileOp::create(
+            rewriter, loc, crtIndex, addrGen, crtL1Address,
+            createNocId(rewriter, loc, getKernelNocIndex(op)));
       }
     }
 
-    ttkernel::NocAsyncReadBarrierOp::create(rewriter, loc);
+    ttkernel::NocAsyncReadBarrierOp::create(
+        rewriter, loc, createNocId(rewriter, loc, getKernelNocIndex(op)));
     rewriter.eraseOp(op);
     return success();
   }
@@ -379,12 +454,9 @@ struct ConvertStoreOp : public OpConversionPattern<triton::StoreOp> {
     auto opInsertionPt = rewriter.saveInsertionPoint();
     rewriter.setInsertionPointAfterValue(cb);
 
-    auto dataFormat = ttkernel::GetDataFormatOp::create(rewriter, loc, cb);
     auto pageSize = ttkernel::GetTileSizeOp::create(rewriter, loc, cb);
 
-    Value trueVal = arith::createConstantI1(loc, rewriter, 1);
-    Value addrGen = ttkernel::GetInterleavedAddrGenFastOp::create(
-        rewriter, loc, /*dram=*/trueVal, baseAddr, pageSize, dataFormat);
+    Value addrGen = createTensorAccessor(rewriter, loc, op, baseAddr, pageSize);
 
     rewriter.restoreInsertionPoint(opInsertionPt);
 
@@ -392,8 +464,6 @@ struct ConvertStoreOp : public OpConversionPattern<triton::StoreOp> {
     Value offset = adaptor.getPtr();
     Value baseTileIndex =
         arith::DivUIOp::create(rewriter, loc, offset, pageSize);
-
-    Value const0 = arith::createConstantI32(loc, rewriter, 0);
 
     // determine how many tiles we need to load by converting the shape to tiles
     const int32_t numTiles = cast<ttkernel::CBType>(cb.getType()).getNumTiles();
@@ -412,13 +482,9 @@ struct ConvertStoreOp : public OpConversionPattern<triton::StoreOp> {
       Value crtL1Address = storeTileLoop.getRegionIterArgs()[0];
       Value crtTileIndex = storeTileLoop.getRegionIterArgs()[1];
 
-      // TODO: should the offset be const0 here? the only examples we have are
-      // TensorAccessor..
-      Value nocAddr = ttkernel::InterleavedAddrGenFastGetNocAddrOp::create(
-          rewriter, loc, addrGen, crtTileIndex, const0, Value());
-
-      ttkernel::NocAsyncWriteOp::create(rewriter, loc, crtL1Address, nocAddr,
-                                        pageSize);
+      ttkernel::NocAsyncWriteTileOp::create(
+          rewriter, loc, crtTileIndex, addrGen, crtL1Address,
+          createNocId(rewriter, loc, getKernelNocIndex(op)));
 
       Value nextL1Address =
           arith::AddIOp::create(rewriter, loc, crtL1Address, pageSize);
@@ -430,7 +496,8 @@ struct ConvertStoreOp : public OpConversionPattern<triton::StoreOp> {
     }
     rewriter.setInsertionPointAfter(storeTileLoop);
 
-    ttkernel::NocAsyncWriteBarrierOp::create(rewriter, loc);
+    ttkernel::NocAsyncWriteBarrierOp::create(
+        rewriter, loc, createNocId(rewriter, loc, getKernelNocIndex(op)));
     ttkernel::CBPopFrontOp::create(rewriter, loc, cb, numPages);
 
     rewriter.eraseOp(op);
@@ -579,13 +646,10 @@ struct ConvertTensorDescStoreOp
     auto opInsertionPt = rewriter.saveInsertionPoint();
     rewriter.setInsertionPointAfterValue(cb);
 
-    auto dataFormat = ttkernel::GetDataFormatOp::create(rewriter, loc, cb);
     auto pageSize = ttkernel::GetTileSizeOp::create(rewriter, loc, cb);
 
-    Value trueVal = arith::createConstantI1(loc, rewriter, true);
     Value baseAddr = desc.getPtr();
-    Value addrGen = ttkernel::GetInterleavedAddrGenFastOp::create(
-        rewriter, loc, /*dram=*/trueVal, baseAddr, pageSize, dataFormat);
+    Value addrGen = createTensorAccessor(rewriter, loc, op, baseAddr, pageSize);
 
     rewriter.restoreInsertionPoint(opInsertionPt);
 
@@ -618,8 +682,6 @@ struct ConvertTensorDescStoreOp
 
     Value l1BaseAddr = ttkernel::GetReadPtrOp::create(rewriter, loc, cb);
     StringAttr tileDimName = S("tile");
-
-    Value const0 = arith::createConstantI32(loc, rewriter, 0);
 
     LDBG("Tile load loop - block shape: (" << blockShape[0] << ", "
                                            << blockShape[1] << ")\n");
@@ -687,15 +749,14 @@ struct ConvertTensorDescStoreOp
         }
 
         // issue the write
-        Value nocAddr = ttkernel::InterleavedAddrGenFastGetNocAddrOp::create(
-            rewriter, loc, addrGen, crtIndex, const0, Value());
-
-        ttkernel::NocAsyncWriteOp::create(rewriter, loc, crtL1Address, nocAddr,
-                                          pageSize);
+        ttkernel::NocAsyncWriteTileOp::create(
+            rewriter, loc, crtIndex, addrGen, crtL1Address,
+            createNocId(rewriter, loc, getKernelNocIndex(op)));
       }
     }
 
-    ttkernel::NocAsyncWriteBarrierOp::create(rewriter, loc);
+    ttkernel::NocAsyncWriteBarrierOp::create(
+        rewriter, loc, createNocId(rewriter, loc, getKernelNocIndex(op)));
     ttkernel::CBPopFrontOp::create(rewriter, loc, cb, numPages);
 
     rewriter.eraseOp(op);
@@ -884,6 +945,8 @@ struct ConvertMulticastOp : public OpConversionPattern<npu::tt::MulticastOp> {
         cast<ttkernel::CBType>(cb.getType()).getNumTiles();
     Value numPages = arith::createConstantI32(loc, rewriter, numCbTiles);
 
+    Value nocId = createNocId(rewriter, loc, getKernelNocIndex(multicastOp));
+
     scf::IfOp isSender =
         scf::IfOp::create(rewriter, loc, ValueRange{}, isSenderBool);
     scf::IfOp::ensureTerminator(isSender.getThenRegion(), rewriter, loc);
@@ -914,17 +977,17 @@ struct ConvertMulticastOp : public OpConversionPattern<npu::tt::MulticastOp> {
           rewriter, loc, l1SenderAddr,
           arith::createIndexConstant(loc, rewriter, 0));
 
-      // get the multicast addresses
-      auto mcastAddr = ttkernel::ExperimentalGetNocMulticastAddrOp::create(
-          rewriter, loc, convertVirtualToPhysicalIndex(senderIndexX, true),
+      // emit the multicast write
+      ttkernel::NocAsyncWriteMulticastOp::create(
+          rewriter, loc, l1BaseAddr,
+          arith::createConstantI32(loc, rewriter, cbPageSize * numCbTiles),
+          numDests, convertVirtualToPhysicalIndex(senderIndexX, true),
           convertVirtualToPhysicalIndex(senderIndexY, false),
           convertVirtualToPhysicalIndex(mcastEndX, true),
-          convertVirtualToPhysicalIndex(mcastEndY, false), l1BaseAddr, nullptr);
-      ttkernel::NocAsyncWriteMulticastOp::create(
-          rewriter, loc, l1BaseAddr, mcastAddr,
-          arith::createConstantI32(loc, rewriter, cbPageSize * numCbTiles),
-          numDests, nullptr, nullptr, nullptr);
-      ttkernel::NocAsyncWriteBarrierOp::create(rewriter, loc);
+          convertVirtualToPhysicalIndex(mcastEndY, false), l1BaseAddr, nocId,
+          nullptr);
+
+      ttkernel::NocAsyncWriteBarrierOp::create(rewriter, loc, nocId);
 
       // signal multicast completion using the receiver data ready semaphore
       // set the local value for the semaphore first
@@ -937,16 +1000,15 @@ struct ConvertMulticastOp : public OpConversionPattern<npu::tt::MulticastOp> {
           arith::createIndexConstant(loc, rewriter, 1));
 
       // get the noc address for multicast operation
-      auto mcastCompleteAddr =
-          ttkernel::ExperimentalGetNocMulticastAddrOp::create(
-              rewriter, loc, convertVirtualToPhysicalIndex(senderIndexX, true),
-              convertVirtualToPhysicalIndex(senderIndexY, false),
-              convertVirtualToPhysicalIndex(mcastEndX, true),
-              convertVirtualToPhysicalIndex(mcastEndY, false),
-              receiverSemaphore, nullptr);
+      auto mcastCompleteAddr = ttkernel::GetNocMulticastAddrOp::create(
+          rewriter, loc, convertVirtualToPhysicalIndex(senderIndexX, true),
+          convertVirtualToPhysicalIndex(senderIndexY, false),
+          convertVirtualToPhysicalIndex(mcastEndX, true),
+          convertVirtualToPhysicalIndex(mcastEndY, false), receiverSemaphore,
+          nocId);
       ttkernel::NocSemaphoreSetMulticastOp::create(
           rewriter, loc, receiverSemaphore, mcastCompleteAddr, numDests,
-          nullptr, nullptr);
+          /*linked=*/nullptr);
     }
 
     {
@@ -959,10 +1021,11 @@ struct ConvertMulticastOp : public OpConversionPattern<npu::tt::MulticastOp> {
       // first, notify the sender that we are ready to receive
       auto remoteNocAddr = ttkernel::GetNocAddrOp::create(
           rewriter, loc, convertVirtualToPhysicalIndex(senderIndexX, true),
-          convertVirtualToPhysicalIndex(senderIndexY, false), senderSemaphore);
+          convertVirtualToPhysicalIndex(senderIndexY, false), senderSemaphore,
+          nocId);
       ttkernel::NocSemaphoreIncOp::create(
           rewriter, loc, remoteNocAddr,
-          arith::createIndexConstant(loc, rewriter, 1), nullptr);
+          arith::createIndexConstant(loc, rewriter, 1), nocId);
       // cast the receiver semaphore to the L1 ptr
       auto l1ReceiverAddr = ttkernel::CastToL1PtrOp::create(
           rewriter, loc,

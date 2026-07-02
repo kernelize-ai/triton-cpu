@@ -8,6 +8,7 @@
 #include <tt-metalium/bfloat16.hpp>
 #include "tt-metalium/constants.hpp"
 #include <tt-metalium/distributed.hpp>
+#include <tt-metalium/tensor_accessor_args.hpp>
 
 using namespace tt;
 using namespace tt::tt_metal;
@@ -105,6 +106,13 @@ int main() {
     std::vector<uint32_t> compile_args = {static_cast<uint32_t>(CBIndex::c_0),
                                           static_cast<uint32_t>(CBIndex::c_1),
                                           static_cast<uint32_t>(CBIndex::c_16)};
+
+    // Each generated kernel builds a TensorAccessor that reads its (interleaved,
+    // DRAM) layout from compile-time args. We append those args *after* the CB
+    // indices to match the order expected in the TTKernel lowering
+    TensorAccessorArgs(src0_dram_buffer).append_to(compile_args);
+    TensorAccessorArgs(src1_dram_buffer).append_to(compile_args);
+    TensorAccessorArgs(dst_dram_buffer).append_to(compile_args);
 
 #ifdef TRITON
     KernelHandle binary_reader_kernel_id = CreateKernel(

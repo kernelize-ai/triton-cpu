@@ -13,6 +13,8 @@ static constexpr llvm::StringLiteral kTTNumCommonArgsAttr =
     "tt.num_common_args";
 static constexpr llvm::StringLiteral kTTNumPerCoreArgsAttr =
     "tt.num_per_core_args";
+static constexpr llvm::StringLiteral kAccessorBaseArgIndexAttr =
+    "tt.accessor_base_arg_index";
 
 namespace PerCoreArgOffsets {
 constexpr int kBlockStart = 0;

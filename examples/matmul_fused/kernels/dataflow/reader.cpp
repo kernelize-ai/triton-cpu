@@ -1,135 +1,91 @@
-// matmul_kernel_fused__reader
 #include <cstdint>
+#include "api/compile_time_args.h"
+#include "api/core_local_mem.h"
 #include "api/dataflow/circular_buffer.h"
 #include "api/dataflow/dataflow_api.h"
+#include "api/dataflow/endpoints.h"
+#include "api/dataflow/noc.h"
+#include "api/tensor/noc_traits.h"
 #include "tools/profiler/kernel_profiler.hpp"
 void kernel_main() {
   bool v1 = false;
-  int32_t v2 = 63;
-  int32_t v3 = 0;
+  int32_t v2 = 0;
+  int32_t v3 = 63;
   int32_t v4 = 256;
   int32_t v5 = 64;
   int32_t v6 = 1;
   int32_t v7 = 16;
-  bool v8 = true;
-  int32_t v9 = 32;
+  int32_t v8 = 32;
+  int8_t v9 = 1;
   int32_t v10 = 2048;
   int32_t v11 = 4096;
   int32_t v12 = 6144;
   int32_t v13 = 4;
+  Noc noc1(1);
+  DeviceZoneScopedN("kernel_outer_matmul_kernel_fused__reader");
+  auto tensor_accessor_args_0 = TensorAccessorArgs<6, 0>();
+  auto tensor_accessor_args_1 = TensorAccessorArgs<tensor_accessor_args_0.next_compile_time_args_offset(), tensor_accessor_args_0.next_common_runtime_args_offset()>();
   int32_t v14 = get_common_arg_val<uint32_t>(10);
   int32_t v15 = get_common_arg_val<uint32_t>(12);
+  auto tensor_accessor_args_2 = TensorAccessorArgs<tensor_accessor_args_1.next_compile_time_args_offset(), tensor_accessor_args_1.next_common_runtime_args_offset()>();
+  auto tensor_accessor_args_3 = TensorAccessorArgs<tensor_accessor_args_2.next_compile_time_args_offset(), tensor_accessor_args_2.next_common_runtime_args_offset()>();
   int32_t v16 = get_common_arg_val<uint32_t>(30);
   int32_t v17 = get_common_arg_val<uint32_t>(32);
   int32_t v18 = get_common_arg_val<uint32_t>(40);
   int32_t v19 = get_common_arg_val<uint32_t>(41);
   int32_t v20 = get_common_arg_val<uint32_t>(42);
   CircularBuffer cb_ctarg_2(get_compile_time_arg_val(2));
-  DataFormat v21 = get_dataformat(get_compile_time_arg_val(2));
-  int32_t v22 = get_tile_size(get_compile_time_arg_val(2));
+  int32_t v21 = get_tile_size(get_compile_time_arg_val(2));
   CircularBuffer cb_ctarg_1(get_compile_time_arg_val(1));
-  DataFormat v23 = get_dataformat(get_compile_time_arg_val(1));
-  int32_t v24 = get_tile_size(get_compile_time_arg_val(1));
-  int32_t v25 = get_arg_val<uint32_t>(1);
-  int32_t v26 = get_arg_val<uint32_t>(0);
-  int32_t v27 = (int32_t) ((uint32_t) v19 + (uint32_t) v2) / v5;
-  int32_t v28 = v15 != (int32_t) ((uint32_t) (v15 / v9) * (uint32_t) v9) & v15 < v3 == v1 ? (int32_t) ((uint32_t) (v15 / v9) + (uint32_t) v6) : v15 / v9;
-  int32_t v29 = (int32_t) ((uint32_t) v28 * (uint32_t) 2);
-  int32_t v30 = (int32_t) ((uint32_t) v28 * (uint32_t) 3);
-  int32_t v31 = (int32_t) ((uint32_t) v28 * (uint32_t) v13);
-  int32_t v32 = (int32_t) ((uint32_t) v28 * (uint32_t) 5);
-  int32_t v33 = (int32_t) ((uint32_t) v28 * (uint32_t) 6);
-  int32_t v34 = (int32_t) ((uint32_t) v28 * (uint32_t) 7);
-  int32_t v35 = v17 != (int32_t) ((uint32_t) (v17 / v9) * (uint32_t) v9) & v17 < v3 == v1 ? (int32_t) ((uint32_t) (v17 / v9) + (uint32_t) v6) : v17 / v9;
-  for (int32_t i36 = v26; i36 < v25; i36 += v6) {
-    int32_t v37 = i36 / v27;
-    int32_t v38 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v18 + (uint32_t) v2) / v5) - (uint32_t) v37) < v6 ? (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v18 + (uint32_t) v2) / v5) - (uint32_t) v37) : v6;
-    int32_t v39 = (int32_t) ((uint32_t) ((i36 % v27) / v38) * (uint32_t) v5) / v9;
-    for (int32_t j40 = v3; j40 < ((int32_t) ((uint32_t) v20 + (uint32_t) 255) / v4); j40 += v6) {
+  int32_t v22 = get_tile_size(get_compile_time_arg_val(1));
+  int32_t v23 = get_arg_val<uint32_t>(1);
+  int32_t v24 = get_arg_val<uint32_t>(0);
+  int32_t v25 = (int32_t) ((uint32_t) v19 + (uint32_t) v3) / v5;
+  int32_t v26 = v15 != (int32_t) ((uint32_t) (v15 / v8) * (uint32_t) v8) && v15 < v2 == v1 ? (int32_t) ((uint32_t) (v15 / v8) + (uint32_t) v6) : v15 / v8;
+  int32_t v27 = (int32_t) ((uint32_t) v26 * (uint32_t) 2);
+  int32_t v28 = (int32_t) ((uint32_t) v26 * (uint32_t) 3);
+  int32_t v29 = (int32_t) ((uint32_t) v26 * (uint32_t) v13);
+  int32_t v30 = (int32_t) ((uint32_t) v26 * (uint32_t) 5);
+  int32_t v31 = (int32_t) ((uint32_t) v26 * (uint32_t) 6);
+  int32_t v32 = (int32_t) ((uint32_t) v26 * (uint32_t) 7);
+  int32_t v33 = v17 != (int32_t) ((uint32_t) (v17 / v8) * (uint32_t) v8) && v17 < v2 == v1 ? (int32_t) ((uint32_t) (v17 / v8) + (uint32_t) v6) : v17 / v8;
+  for (int32_t i34 = v24; i34 < v23; i34 += v6) {
+    int32_t v35 = i34 / v25;
+    int32_t v36 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v18 + (uint32_t) v3) / v5) - (uint32_t) v35) < v6 ? (int32_t) ((uint32_t) ((int32_t) ((uint32_t) v18 + (uint32_t) v3) / v5) - (uint32_t) v35) : v6;
+    int32_t v37 = (int32_t) ((uint32_t) ((i34 % v25) / v36) * (uint32_t) v5) / v8;
+    for (int32_t j38 = v2; j38 < ((int32_t) ((uint32_t) v20 + (uint32_t) 255) / v4); j38 += v6) {
       cb_ctarg_1.reserve_back(v7);
-      InterleavedAddrGenFast<true> v41;
-      v41.bank_base_address = v14;
-      v41.page_size = v24;
-      v41.data_format = v23;
-      InterleavedAddrGenFast<true> v42 = v41;
-      int32_t v43 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) j40 * (uint32_t) v4) / v9) * (uint32_t) v28)) + (uint32_t) v39);
-      uint64_t temp_528 = v42.get_noc_addr(v43, v3);
-      noc_async_read(temp_528, cb_ctarg_1.get_write_ptr(), v24);
-      int32_t v44 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 16384);
-      int32_t v45 = (int32_t) ((uint32_t) v43 + (uint32_t) v6);
-      uint64_t temp_540 = v42.get_noc_addr(v45, v3);
-      noc_async_read(temp_540, v44, v24);
-      int32_t v46 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) v10);
-      uint64_t temp_552 = v42.get_noc_addr((int32_t) ((uint32_t) v43 + (uint32_t) v28), v3);
-      noc_async_read(temp_552, v46, v24);
-      int32_t v47 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 18432);
-      uint64_t temp_564 = v42.get_noc_addr((int32_t) ((uint32_t) v45 + (uint32_t) v28), v3);
-      noc_async_read(temp_564, v47, v24);
-      int32_t v48 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) v11);
-      uint64_t temp_576 = v42.get_noc_addr((int32_t) ((uint32_t) v43 + (uint32_t) v29), v3);
-      noc_async_read(temp_576, v48, v24);
-      int32_t v49 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 20480);
-      uint64_t temp_588 = v42.get_noc_addr((int32_t) ((uint32_t) v45 + (uint32_t) v29), v3);
-      noc_async_read(temp_588, v49, v24);
-      int32_t v50 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) v12);
-      uint64_t temp_600 = v42.get_noc_addr((int32_t) ((uint32_t) v43 + (uint32_t) v30), v3);
-      noc_async_read(temp_600, v50, v24);
-      int32_t v51 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 22528);
-      uint64_t temp_612 = v42.get_noc_addr((int32_t) ((uint32_t) v45 + (uint32_t) v30), v3);
-      noc_async_read(temp_612, v51, v24);
-      int32_t v52 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 8192);
-      uint64_t temp_624 = v42.get_noc_addr((int32_t) ((uint32_t) v43 + (uint32_t) v31), v3);
-      noc_async_read(temp_624, v52, v24);
-      int32_t v53 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 24576);
-      uint64_t temp_636 = v42.get_noc_addr((int32_t) ((uint32_t) v45 + (uint32_t) v31), v3);
-      noc_async_read(temp_636, v53, v24);
-      int32_t v54 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 10240);
-      uint64_t temp_648 = v42.get_noc_addr((int32_t) ((uint32_t) v43 + (uint32_t) v32), v3);
-      noc_async_read(temp_648, v54, v24);
-      int32_t v55 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 26624);
-      uint64_t temp_660 = v42.get_noc_addr((int32_t) ((uint32_t) v45 + (uint32_t) v32), v3);
-      noc_async_read(temp_660, v55, v24);
-      int32_t v56 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 12288);
-      uint64_t temp_672 = v42.get_noc_addr((int32_t) ((uint32_t) v43 + (uint32_t) v33), v3);
-      noc_async_read(temp_672, v56, v24);
-      int32_t v57 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 28672);
-      uint64_t temp_684 = v42.get_noc_addr((int32_t) ((uint32_t) v45 + (uint32_t) v33), v3);
-      noc_async_read(temp_684, v57, v24);
-      int32_t v58 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 14336);
-      uint64_t temp_696 = v42.get_noc_addr((int32_t) ((uint32_t) v43 + (uint32_t) v34), v3);
-      noc_async_read(temp_696, v58, v24);
-      int32_t v59 = (int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 30720);
-      uint64_t temp_708 = v42.get_noc_addr((int32_t) ((uint32_t) v45 + (uint32_t) v34), v3);
-      noc_async_read(temp_708, v59, v24);
-      {
-      DeviceZoneScopedN("noc_async_read_barrier");
-      noc_async_read_barrier();
-      }
+      TensorAccessor v39 = TensorAccessor(tensor_accessor_args_1, v14, v22);
+      int32_t v40 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) j38 * (uint32_t) v4) / v8) * (uint32_t) v26)) + (uint32_t) v37);
+      noc1.async_read(v39, CoreLocalMem<uint32_t>(cb_ctarg_1.get_write_ptr()), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>(v40)}, {});
+      int32_t v41 = (int32_t) ((uint32_t) v40 + (uint32_t) v6);
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 16384)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>(v41)}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) v10)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v40 + (uint32_t) v26))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 18432)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v41 + (uint32_t) v26))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) v11)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v40 + (uint32_t) v27))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 20480)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v41 + (uint32_t) v27))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) v12)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v40 + (uint32_t) v28))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 22528)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v41 + (uint32_t) v28))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 8192)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v40 + (uint32_t) v29))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 24576)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v41 + (uint32_t) v29))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 10240)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v40 + (uint32_t) v30))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 26624)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v41 + (uint32_t) v30))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 12288)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v40 + (uint32_t) v31))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 28672)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v41 + (uint32_t) v31))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 14336)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v40 + (uint32_t) v32))}, {});
+      noc1.async_read(v39, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_1.get_write_ptr() + (uint32_t) 30720)), v39.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v41 + (uint32_t) v32))}, {});
+      noc1.async_read_barrier();
       cb_ctarg_1.push_back(v7);
     }
     cb_ctarg_2.reserve_back(v13);
-    InterleavedAddrGenFast<true> v60;
-    v60.bank_base_address = v16;
-    v60.page_size = v22;
-    v60.data_format = v21;
-    InterleavedAddrGenFast<true> v61 = v60;
-    int32_t v62 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) v37 + (uint32_t) (i36 % v38))) * (uint32_t) v5) / v9) * (uint32_t) v35)) + (uint32_t) v39);
-    uint64_t temp_508 = v61.get_noc_addr(v62, v3);
-    noc_async_read(temp_508, cb_ctarg_2.get_write_ptr(), v22);
-    int32_t v63 = (int32_t) ((uint32_t) cb_ctarg_2.get_write_ptr() + (uint32_t) v10);
-    int32_t v64 = (int32_t) ((uint32_t) v62 + (uint32_t) v6);
-    uint64_t temp_520 = v61.get_noc_addr(v64, v3);
-    noc_async_read(temp_520, v63, v22);
-    int32_t v65 = (int32_t) ((uint32_t) cb_ctarg_2.get_write_ptr() + (uint32_t) v11);
-    uint64_t temp_532 = v61.get_noc_addr((int32_t) ((uint32_t) v62 + (uint32_t) v35), v3);
-    noc_async_read(temp_532, v65, v22);
-    int32_t v66 = (int32_t) ((uint32_t) cb_ctarg_2.get_write_ptr() + (uint32_t) v12);
-    uint64_t temp_544 = v61.get_noc_addr((int32_t) ((uint32_t) v64 + (uint32_t) v35), v3);
-    noc_async_read(temp_544, v66, v22);
-    {
-    DeviceZoneScopedN("noc_async_read_barrier");
-    noc_async_read_barrier();
-    }
+    TensorAccessor v42 = TensorAccessor(tensor_accessor_args_3, v16, v21);
+    int32_t v43 = (int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) ((int32_t) ((uint32_t) v35 + (uint32_t) (i34 % v36))) * (uint32_t) v5) / v8) * (uint32_t) v33)) + (uint32_t) v37);
+    noc1.async_read(v42, CoreLocalMem<uint32_t>(cb_ctarg_2.get_write_ptr()), v42.get_aligned_page_size(), {.page_id = static_cast<uint32_t>(v43)}, {});
+    int32_t v44 = (int32_t) ((uint32_t) v43 + (uint32_t) v6);
+    noc1.async_read(v42, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_2.get_write_ptr() + (uint32_t) v10)), v42.get_aligned_page_size(), {.page_id = static_cast<uint32_t>(v44)}, {});
+    noc1.async_read(v42, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_2.get_write_ptr() + (uint32_t) v11)), v42.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v43 + (uint32_t) v33))}, {});
+    noc1.async_read(v42, CoreLocalMem<uint32_t>((int32_t) ((uint32_t) cb_ctarg_2.get_write_ptr() + (uint32_t) v12)), v42.get_aligned_page_size(), {.page_id = static_cast<uint32_t>((int32_t) ((uint32_t) v44 + (uint32_t) v33))}, {});
+    noc1.async_read_barrier();
     cb_ctarg_2.push_back(v13);
   }
   return;
