@@ -98,11 +98,12 @@ public:
 
   // stores generic body tensor results into global memory buffers.
   void scatterResults(ConversionPatternRewriter &rewriter,
-                      ArrayRef<Value> results, ArrayRef<Type> resultTypes);
+                      ArrayRef<Value> results, const TypeConverter *converter);
 
   // update loop carried iter arg state, scattering to global buffers as
   // necessary.
   void updateIterArgs(ConversionPatternRewriter &rewriter,
+                      const TypeConverter *converter,
                       ArrayRef<Value> newIterArgVals,
                       ArrayRef<int32_t> elemOffset,
                       std::optional<unsigned> loopIndex = std::nullopt);
@@ -427,23 +428,27 @@ SmallVector<Value> LoopHelper::getLoopBodyBlockArgs(
 
 void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
                                 ArrayRef<Value> results,
-                                ArrayRef<Type> resultTypes) {
-  for (auto [tile, tileType, ptr, tensorTy] :
-       llvm::zip(results, resultTypes, materializedResults,
-                 materializedResultTensorTypes)) {
+                                const TypeConverter *converter) {
+  for (auto [tile, ptr, tensorTy] :
+       llvm::zip(results, materializedResults, materializedResultTensorTypes)) {
     Location loc = tile.getLoc(); // or ptr?
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    auto llvmStruct = cast<LLVM::LLVMStructType>(tileType);
-    Value llvmTile =
-        UnrealizedConversionCastOp::create(rewriter, loc, llvmStruct, tile)
-            .getResult(0);
-    Type elemTy = llvmStruct.getBody()[0];
-
     auto tileTensorTy = cast<RankedTensorType>(tile.getType());
+
+    auto llvmStructTy =
+        cast<LLVM::LLVMStructType>(converter->convertType(tileTensorTy));
+    auto llvmTile = converter->materializeTargetConversion(rewriter, loc,
+                                                           llvmStructTy, tile);
+
+    // Value llvmTile =
+    //     UnrealizedConversionCastOp::create(rewriter, loc, llvmStruct, tile)
+    //         .getResult(0);
+    Type elemTy = llvmStructTy.getBody()[0];
+
     MLIRContext *context = rewriter.getContext();
     Value bufferPtr = ptr; // captured structured bindings are a C++20 extension
     scatterTileToFullTensor(
-        rewriter, loc, tileTensorTy, llvmStruct, llvmTile, tensorTy,
+        rewriter, loc, tileTensorTy, llvmStructTy, llvmTile, tensorTy,
         tileOffsets,
         [context, elemTy, bufferPtr](TritonLLVMOpBuilder &b, Value bufferIndex,
                                      Value elem) {
@@ -454,6 +459,7 @@ void LoopHelper::scatterResults(ConversionPatternRewriter &rewriter,
 }
 
 void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
+                                const TypeConverter *converter,
                                 ArrayRef<Value> newIterArgVals,
                                 ArrayRef<int32_t> elemOffset,
                                 std::optional<unsigned> loopIndex) {
@@ -479,10 +485,14 @@ void LoopHelper::updateIterArgs(ConversionPatternRewriter &rewriter,
           Location loc = yieldVal.getLoc();
           auto llvmStruct = cast<LLVM::LLVMStructType>(arg.llvmType);
           Type elemTy = llvmStruct.getBody()[0];
-
+#if 1
+          auto llvmTile = converter->materializeTargetConversion(
+              rewriter, loc, llvmStruct, yieldVal);
+#else
           auto llvmTile = UnrealizedConversionCastOp::create(
                               rewriter, loc, arg.llvmType, yieldVal)
                               .getResult(0);
+#endif
           auto tensorTy = cast<RankedTensorType>(arg.operand.getType());
           MLIRContext *context = rewriter.getContext();
           Value ptr = arg.bufferPtr;
@@ -882,12 +892,15 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
       auto [newIterArgVals, loopTiles] =
           cloneTileBody(op, rewriter, chunkedArgs);
-      helper.updateIterArgs(rewriter, newIterArgVals, elemOffset, i);
+      helper.updateIterArgs(rewriter, getTypeConverter(), newIterArgVals,
+                            elemOffset, i);
+#if 0
       SmallVector<Type> resultTypes =
           llvm::map_to_vector(loopTiles, [&](Value tile) {
             return getTypeConverter()->convertType(tile.getType());
           });
-      helper.scatterResults(rewriter, loopTiles, resultTypes);
+#endif
+      helper.scatterResults(rewriter, loopTiles, getTypeConverter());
     }
   }
 
@@ -1006,7 +1019,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
         SmallVector<Value> newIterArgVals(yieldOp.getValues().begin(),
                                           yieldOp.getValues().begin() +
                                               numIterArgs);
-        helper.updateIterArgs(rewriter, newIterArgVals, {});
+        helper.updateIterArgs(rewriter, getTypeConverter(), newIterArgVals, {});
 
         // scatter non-iter-arg tensor tiles
         SmallVector<Value> loopTiles(yieldOp.getValues().begin() + numIterArgs,
@@ -1015,7 +1028,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
             llvm::map_to_vector(loopTiles, [&](Value tile) {
               return getTypeConverter()->convertType(tile.getType());
             });
-        helper.scatterResults(rewriter, loopTiles, resultTypes);
+        helper.scatterResults(rewriter, loopTiles, getTypeConverter());
 
         rewriter.eraseOp(yieldOp);
         rewriter.setInsertionPointToEnd(&block);
@@ -1059,7 +1072,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
 
-          helper.updateIterArgs(rewriter, innerIterArgVals, {});
+          helper.updateIterArgs(rewriter, getTypeConverter(), innerIterArgVals,
+                                {});
           emitNestedLoops(op, helper, rewriter, dim + 1, blockShape, tileShape,
                           vectorSize, afterBlock);
 
@@ -1067,7 +1081,7 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
           return helper.getIterArgVals();
         });
 
-    helper.updateIterArgs(rewriter, finalCarried, {});
+    helper.updateIterArgs(rewriter, getTypeConverter(), finalCarried, {});
   }
 
   LogicalResult
