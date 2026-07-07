@@ -661,8 +661,74 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         // just fuse the existing op
         newOp = rewriter.clone(*op, mapping);
       } else {
-        auto rank = tileShape.size();
         auto newResultType = updateTensorType(resultType, tileShape);
+
+#if 1
+        std::optional<unsigned> survivingDim;
+        SetVector<Operation *> fwdSlice;
+        getForwardSlice(blockArg, &fwdSlice);
+        for (Operation *op : fwdSlice) {
+          if (auto expandDims = dyn_cast<triton::ExpandDimsOp>(op)) {
+            auto dim = expandDims.getAxis();
+
+            auto rank = cast<RankedTensorType>(expandDims.getResult().getType()).getRank();
+            SmallVector<unsigned> survivingDims(rank);
+            std::iota(survivingDims.begin(), survivingDims.end(), 0);
+            survivingDims.erase(survivingDims.begin() + dim);
+            assert(survivingDims.size() == 1 &&
+                   "expected single surviving dim for make_dynamic_range");
+            survivingDim = survivingDims.front();
+            break;
+          }
+          if (auto reshape = dyn_cast<triton::ReshapeOp>(op)) {
+            auto dim = reshape.getExpandDimsAxis();
+            if (!dim)
+              break;
+
+            auto rank = cast<RankedTensorType>(reshape.getResult().getType()).getRank();
+            SmallVector<unsigned> survivingDims(rank);
+            std::iota(survivingDims.begin(), survivingDims.end(), 0);
+            survivingDims.erase(survivingDims.begin() + *dim);
+            assert(survivingDims.size() == 1 &&
+                   "expected single surviving dim for make_dynamic_range");
+            survivingDim = survivingDims.front();
+            break;
+          }
+        }
+
+        unsigned dim;
+        if (!survivingDim) {
+          assert(tileShape.size() == 1 &&
+                 "range without an expand/reshape lift should be 1-D");
+          dim = 0;
+        } else {
+          dim = *survivingDim;
+          // If a tt.trans is in the forward slice of this blockArg (e.g. K
+          // transposed to K^T inside the generic body by
+          // FuseTransOpIntoGeneric), K's local surviving dim maps to a
+          // different output dim after the transpose. Apply the inverse
+          // permutation to get the correct tile IV.
+          // TODO: consider re-factoring this chain into a visitor that can
+          // compute the dim for any op based on the def-use chain
+          {
+            SetVector<Operation *> fwdSlice;
+            getForwardSlice(blockArg, &fwdSlice);
+            for (Operation *fwdOp : fwdSlice) {
+              if (auto transOp = dyn_cast<triton::TransOp>(fwdOp)) {
+                ArrayRef<int32_t> order = transOp.getOrder();
+                for (unsigned j = 0; j < order.size(); ++j) {
+                  if ((unsigned)order[j] == dim) {
+                    dim = j;
+                    break;
+                  }
+                }
+                break;
+              }
+            }
+          }
+        }
+#else
+        unsigned dim;
         auto sliceEncodingAttr =
             dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
         if (!sliceEncodingAttr) {
@@ -730,6 +796,7 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
             }
           }
         }
+#endif
         newOp = triton::cpu::MakeDynamicRangeOp::create(
             rewriter, makeRangeOp.getLoc(), newResultType,
             genericOp.getTileOffset(dim));
@@ -883,8 +950,14 @@ struct FuseExpandDimsIntoGeneric
       if (!op)
         continue;
 
-      auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op);
-      if (!expandDimsOp)
+      auto isDimExpansionOp = [](Operation* op) {
+        if (isa<triton::ExpandDimsOp>(op)) 
+          return true; 
+        if (auto reshape = dyn_cast<triton::ReshapeOp>(op)) 
+          return reshape.getExpandDimsAxis().has_value();
+        return false;
+      };
+      if (!isDimExpansionOp(op))
         continue;
 
       BlockArgument blockArg = body->getArgument(numIV + i);
@@ -892,7 +965,17 @@ struct FuseExpandDimsIntoGeneric
       SmallVector<int32_t> tileShape(tiledType.getShape());
       SmallVector<Value> newIns(genericOp.getIns());
 
-      unsigned axis = expandDimsOp.getAxis();
+      auto getAxis = [](Operation* op) -> unsigned {
+        if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+          return expandDimsOp.getAxis();
+        } else {
+          auto reshapeOp = cast<triton::ReshapeOp>(op);
+          auto expandDimsAxis = reshapeOp.getExpandDimsAxis();
+          assert(expandDimsAxis.has_value());
+          return *expandDimsAxis;
+        }
+      };
+      unsigned axis = getAxis(op);
       assert(tileShape[axis] == 1 &&
              "expected expand dims axis tile shape to be 1");
 
@@ -903,20 +986,30 @@ struct FuseExpandDimsIntoGeneric
         sourceTileShape.push_back(t);
       }
 
+      auto getSrc = [](Operation* op) {
+        if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+          return expandDimsOp.getSrc();
+        }
+        else {
+          auto reshapeOp = cast<triton::ReshapeOp>(op);
+          return reshapeOp.getSrc();
+        }
+      };
+      Value src = getSrc(op);
       RankedTensorType sourceTensorType =
-          cast<RankedTensorType>(expandDimsOp.getSrc().getType());
+          cast<RankedTensorType>(src.getType());
       IRMapping mapping;
       // 1. map src operand to block args
-      newIns.push_back(expandDimsOp.getSrc());
+      newIns.push_back(src);
       mapping.map(
-          expandDimsOp.getSrc(),
+          src,
           body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
-                            expandDimsOp.getSrc().getLoc()));
+                            src.getLoc()));
 
       // 2. clone expand dims
       rewriter.setInsertionPointToStart(body);
       Operation *newExpandDims = rewriter.clone(*op, mapping);
-      Type origResultType = expandDimsOp.getResult().getType();
+      Type origResultType = op->getResult(0).getType(); // expand dims / reshape only have 1 result
       newExpandDims->getResult(0).setType(
           updateTensorType(origResultType, tileShape));
 
@@ -1633,6 +1726,11 @@ struct TritonCPUTileAndFusePass
     LDBG("Module before fusion " << m);
 
     // Step 2: Fuse ops into each generic
+    DenseMap<pair<GenericOp, Operation*>, SmallVector<AxisEntry>> genericAxisMap;
+    m.walk([&](cpu::GenericOp g) {
+
+    });
+
     RewritePatternSet fusePatterns(context);
 
     fusePatterns.add<FuseElementwiseIntoGeneric>(context, benefitDefault);
@@ -1649,6 +1747,37 @@ struct TritonCPUTileAndFusePass
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
       signalPassFailure();
     }
+
+    // Verify all
+    WalkResult r = m.walk([&](cpu::GenericOp g) {
+      Block *body = &g.getBody().front();
+      for (auto [i, in] : llvm::enumerate(g.getIns())) {
+        if (!isa<RankedTensorType>(in.getType()))
+          continue;
+
+        BlockArgument tile = body->getArgument(g.getInsArgOffset() + i);
+        SetVector<Operation *> fwd;
+        getForwardSlice(tile, &fwd);
+        for (Operation *op : fwd)
+          if (auto t = dyn_cast<triton::TransOp>(op)) {
+            auto inTy = cast<RankedTensorType>(t.getSrc().getType());
+            auto order = t.getOrder();
+            for (unsigned j = 0; j < order.size(); ++j)
+              if ((unsigned)order[j] != j && inTy.getShape()[order[j]] > 1) {
+                g.emitError()
+                    << "Ins operand #" << i
+                    << " is transposed in-body over "
+                       "a tiled axis but was not fused to make_range; "
+                       "positional tile extraction would use the wrong "
+                       "induction variable";
+                return WalkResult::interrupt();
+              }
+          }
+      }
+      return WalkResult::advance();
+    });
+    if (r.wasInterrupted())
+      return signalPassFailure();
   }
 };
 
