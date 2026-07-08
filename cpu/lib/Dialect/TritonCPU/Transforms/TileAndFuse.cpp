@@ -4,6 +4,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/Support/Debug.h"
@@ -563,8 +564,17 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
         continue;
 
       if (!mlir::isMemoryEffectFree(op) &&
-          op->getBlock() != genericOp->getBlock())
-        continue;
+          op->getBlock() != genericOp->getBlock()) {
+        // A read-only op that dominates the generic is safe to clone because
+        // its inputs are already available and its loads observe the same
+        // memory regardless of how many times they execute.
+        DominanceInfo domInfo(genericOp->getParentOfType<FuncOp>());
+
+        bool readOnly = !mlir::hasEffect<mlir::MemoryEffects::Write>(op) &&
+                        !mlir::hasEffect<mlir::MemoryEffects::Allocate>(op);
+        if (!readOnly || !domInfo.dominates(op, genericOp))
+          continue;
+      }
 
       BlockArgument blockArg = body->getArgument(numIV + i);
       auto tiledType = dyn_cast<RankedTensorType>(blockArg.getType());
