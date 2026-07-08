@@ -158,8 +158,16 @@ LogicalResult AxisKindBackwardPropagation::visitOperation(
   // Handle ops that can permute the generic operand tensor chain mapping to
   // generic tile induction vars
   AxisKind existing = results[0]->getValue();
-  if (!existing.isKnown())
+  if (existing.isUninitialized())
     return success();
+  // differentiate uninitialized and unknown - propagate unknowns
+  if (existing.isUnknown()) {
+    for (auto [i, v] : llvm::enumerate(op->getOperands()))
+      if (isa<RankedTensorType>(v.getType()))
+        propagateIfChanged(operands[i],
+                           operands[i]->meet(AxisKind::getUnknown()));
+    return success();
+  }
 
   ArrayRef<int32_t> resultAxes = existing.getAxes();
 
@@ -241,8 +249,9 @@ LogicalResult AxisKindBackwardPropagation::seedGenericIns(
     unsigned idx = blockArg.getArgNumber();
     if (idx < insOperandOffset)
       return; // iter args unaffected by tiled axis
-    unsigned i = idx - insOperandOffset;
-    propagateIfChanged(operands[i], operands[i]->meet(operandKind));
+    unsigned operandIndex = idx - generic.getNumInductionVars();
+    propagateIfChanged(operands[operandIndex],
+                       operands[operandIndex]->meet(operandKind));
   };
 
   // TODO: this has to be kept in sync with the generic wrap code - can we embed
