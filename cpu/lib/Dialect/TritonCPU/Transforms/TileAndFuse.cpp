@@ -785,67 +785,48 @@ struct FuseConstantIntoGeneric : GenericOperandFusionPattern {
   }
 };
 
-struct FuseBroadcastIntoGeneric
-    : public mlir::OpRewritePattern<cpu::GenericOp> {
-  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+struct FuseBroadcastIntoGeneric : GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  LogicalResult
-  matchAndRewrite(cpu::GenericOp genericOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getInsArgOffset();
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+    auto broadcastOp = dyn_cast_or_null<triton::BroadcastOp>(op);
+    if (!broadcastOp)
+      return false;
+    return true;
+  }
 
-    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
-      Operation *op = insVal.getDefiningOp();
-      if (!op)
-        continue;
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
 
-      auto broadcastOp = dyn_cast<triton::BroadcastOp>(op);
-      if (!broadcastOp)
-        continue;
+    auto broadcastOp = cast<triton::BroadcastOp>(op);
+    RankedTensorType sourceTensorType =
+        cast<RankedTensorType>(broadcastOp.getSrc().getType());
+    SmallVector<int32_t> sourceTileShape = llvm::to_vector(
+        llvm::map_range(llvm::zip(sourceTensorType.getShape(), tileShape),
+                        [](auto pair) -> int32_t {
+                          auto [s, t] = pair;
+                          return s == 1 ? s : t;
+                        }));
 
-      BlockArgument blockArg = body->getArgument(numIV + i);
-      auto tiledType = cast<RankedTensorType>(blockArg.getType());
-      SmallVector<int32_t> tileShape(tiledType.getShape());
-      SmallVector<Value> newIns(genericOp.getIns());
+    IRMapping mapping;
+    // 1. map src operand to block args
+    newIns.push_back(broadcastOp.getSrc());
+    mapping.map(
+        broadcastOp.getSrc(),
+        body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
+                          broadcastOp.getSrc().getLoc()));
 
-      // broadcast source operand: only tile the non-broadcast dim
-      RankedTensorType sourceTensorType =
-          cast<RankedTensorType>(broadcastOp.getSrc().getType());
-      SmallVector<int32_t> sourceTileShape = llvm::to_vector(
-          llvm::map_range(llvm::zip(sourceTensorType.getShape(), tileShape),
-                          [](auto pair) -> int32_t {
-                            auto [s, t] = pair;
-                            return s == 1 ? s : t;
-                          }));
-
-      IRMapping mapping;
-      // 1. map src operand to block args
-      newIns.push_back(broadcastOp.getSrc());
-      mapping.map(
-          broadcastOp.getSrc(),
-          body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
-                            broadcastOp.getSrc().getLoc()));
-
-      // 2. clone the broadcast
-      rewriter.setInsertionPointToStart(body);
-      Operation *newBroadcast = rewriter.clone(*op, mapping);
-      Type origResultType = broadcastOp.getResult().getType();
-      newBroadcast->getResult(0).setType(
-          updateTensorType(origResultType, tileShape));
-
-      // 3. replace block arg and clean up
-      blockArg.replaceAllUsesWith(newBroadcast->getResult(0));
-      body->eraseArgument(numIV + i);
-      newIns.erase(newIns.begin() + i);
-
-      rewriter.modifyOpInPlace(
-          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
-
-      return success();
-    }
-
-    return failure();
+    // 2. clone the broadcast
+    rewriter.setInsertionPointToStart(body);
+    Operation *newBroadcast = rewriter.clone(*op, mapping);
+    Type origResultType = broadcastOp.getResult().getType();
+    newBroadcast->getResult(0).setType(
+        updateTensorType(origResultType, tileShape));
+    return newBroadcast->getResult(0);
   }
 };
 
