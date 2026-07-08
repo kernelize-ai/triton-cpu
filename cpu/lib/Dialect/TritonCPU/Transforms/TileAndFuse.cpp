@@ -1031,7 +1031,7 @@ struct FuseConvertLayoutOpIntoGeneric : public GenericOperandFusionPattern {
       return true;
     }
     // trivial CVT, fusible
-    return true; 
+    return true;
   }
 
   Value fuseOperand(Block *body, BlockArgument blockArg,
