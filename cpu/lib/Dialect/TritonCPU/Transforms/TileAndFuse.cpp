@@ -830,69 +830,54 @@ struct FuseBroadcastIntoGeneric : GenericOperandFusionPattern {
   }
 };
 
-struct FuseExpandDimsIntoGeneric
-    : public mlir::OpRewritePattern<cpu::GenericOp> {
-  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  LogicalResult
-  matchAndRewrite(cpu::GenericOp genericOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getInsArgOffset();
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+    auto expandDims = dyn_cast_or_null<triton::ExpandDimsOp>(op);
+    if (!expandDims)
+      return false;
+    return true;
+  }
 
-    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
-      Operation *op = insVal.getDefiningOp();
-      if (!op)
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+
+    auto expandDimsOp = cast<triton::ExpandDimsOp>(op);
+    unsigned axis = expandDimsOp.getAxis();
+    assert(tileShape[axis] == 1 &&
+           "expected expand dims axis tile shape to be 1");
+
+    SmallVector<int32_t> sourceTileShape;
+    for (auto [j, t] : llvm::enumerate(tileShape)) {
+      if (j == axis)
         continue;
-
-      auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op);
-      if (!expandDimsOp)
-        continue;
-
-      BlockArgument blockArg = body->getArgument(numIV + i);
-      auto tiledType = cast<RankedTensorType>(blockArg.getType());
-      SmallVector<int32_t> tileShape(tiledType.getShape());
-      SmallVector<Value> newIns(genericOp.getIns());
-
-      unsigned axis = expandDimsOp.getAxis();
-      assert(tileShape[axis] == 1 &&
-             "expected expand dims axis tile shape to be 1");
-
-      SmallVector<int32_t> sourceTileShape;
-      for (auto [j, t] : llvm::enumerate(tileShape)) {
-        if (j == axis)
-          continue;
-        sourceTileShape.push_back(t);
-      }
-
-      RankedTensorType sourceTensorType =
-          cast<RankedTensorType>(expandDimsOp.getSrc().getType());
-      IRMapping mapping;
-      // 1. map src operand to block args
-      newIns.push_back(expandDimsOp.getSrc());
-      mapping.map(
-          expandDimsOp.getSrc(),
-          body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
-                            expandDimsOp.getSrc().getLoc()));
-
-      // 2. clone expand dims
-      rewriter.setInsertionPointToStart(body);
-      Operation *newExpandDims = rewriter.clone(*op, mapping);
-      Type origResultType = expandDimsOp.getResult().getType();
-      newExpandDims->getResult(0).setType(
-          updateTensorType(origResultType, tileShape));
-
-      blockArg.replaceAllUsesWith(newExpandDims->getResult(0));
-      body->eraseArgument(numIV + i);
-      newIns.erase(newIns.begin() + i);
-
-      rewriter.modifyOpInPlace(
-          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
-
-      return success();
+      sourceTileShape.push_back(t);
     }
 
-    return failure();
+    RankedTensorType sourceTensorType =
+        cast<RankedTensorType>(expandDimsOp.getSrc().getType());
+
+    IRMapping mapping;
+    // 1. map src operand to block args
+    newIns.push_back(expandDimsOp.getSrc());
+    mapping.map(
+        expandDimsOp.getSrc(),
+        body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
+                          expandDimsOp.getSrc().getLoc()));
+
+    // 2. clone expand dims
+    rewriter.setInsertionPointToStart(body);
+    Operation *newExpandDims = rewriter.clone(*op, mapping);
+    Type origResultType = expandDimsOp.getResult().getType();
+    newExpandDims->getResult(0).setType(
+        updateTensorType(origResultType, tileShape));
+
+    return newExpandDims->getResult(0);
   }
 };
 
