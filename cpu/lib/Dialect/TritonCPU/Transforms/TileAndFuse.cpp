@@ -527,8 +527,45 @@ struct WrapConvertLayoutOp
   }
 };
 
-struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
+struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
   using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+
+  virtual bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const = 0;
+
+  virtual Value fuseOperand(Block *body, BlockArgument blockArg,
+                            SmallVector<Value> &newIns, Operation *op,
+                            mlir::PatternRewriter &rewriter) const = 0;
+
+  LogicalResult
+  matchAndRewrite(cpu::GenericOp genericOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Block *body = &genericOp.getBody().front();
+    unsigned insOffset = genericOp.getInsArgOffset();
+
+    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+      Operation *op = insVal.getDefiningOp();
+      if (!isFusibleOp(op, genericOp))
+        continue;
+
+      BlockArgument blockArg = body->getArgument(insOffset + i);
+
+      SmallVector<Value> newIns(genericOp.getIns());
+      Value newResult = fuseOperand(body, blockArg, newIns, op, rewriter);
+
+      blockArg.replaceAllUsesWith(newResult);
+      body->eraseArgument(insOffset + i);
+      newIns.erase(newIns.begin() + i);
+      rewriter.modifyOpInPlace(
+          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
+
+      return success();
+    }
+    return failure();
+  }
+};
+
+struct FuseElementwiseIntoGeneric : GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
   static bool isFusibleElementwise(Operation *op) {
     if (!op)
@@ -550,73 +587,44 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
     return false;
   }
 
-  LogicalResult
-  matchAndRewrite(cpu::GenericOp genericOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    Block *body = &genericOp.getBody().front();
-    // TODO: rename variable?
-    unsigned numIV = genericOp.getInsArgOffset();
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+    if (!isFusibleElementwise(op))
+      return false;
 
-    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
-      Operation *op = insVal.getDefiningOp();
-      if (!isFusibleElementwise(op))
-        continue;
+    if (!mlir::isMemoryEffectFree(op) &&
+        op->getBlock() != genericOp->getBlock())
+      return false;
 
-      if (!mlir::isMemoryEffectFree(op) &&
-          op->getBlock() != genericOp->getBlock())
-        continue;
+    return true;
+  }
 
-      BlockArgument blockArg = body->getArgument(numIV + i);
-      auto tiledType = dyn_cast<RankedTensorType>(blockArg.getType());
-      SmallVector<int32_t> tileShape;
-      if (!tiledType) {
-        const bool hasTensorOperands =
-            llvm::any_of(op->getOperands(), [&](Value operand) {
-              return isa<RankedTensorType>(operand.getType());
-            });
-        const bool isArithElementwise =
-            (isa<arith::ArithDialect, math::MathDialect>(op->getDialect())) &&
-            op->hasTrait<OpTrait::Elementwise>();
-
-        // fuse scalar elementwise ops too
-        if (hasTensorOperands || !isArithElementwise)
-          continue;
-      } else {
-        tileShape = llvm::map_to_vector(tiledType.getShape(), [](int64_t dim) {
-          return static_cast<int32_t>(dim);
-        });
-      }
-
-      SmallVector<Value> newIns(genericOp.getIns());
-
-      IRMapping mapping;
-      // 1. Add new block args for source op inputs at body end
-      for (Value operand : op->getOperands()) {
-        newIns.push_back(operand);
-        mapping.map(operand, body->addArgument(
-                                 updateTensorType(operand.getType(), tileShape),
-                                 operand.getLoc()));
-      }
-
-      // 2. clone
-      rewriter.setInsertionPointToStart(body);
-      Operation *newOp = rewriter.clone(*op, mapping);
-      Type origResultType = newOp->getResult(0).getType();
-      newOp->getResult(0).setType(updateTensorType(origResultType, tileShape));
-
-      // 3. replace block arg and clean up
-      // note that newOp must have 1 and only 1 result due to isFusible above
-      blockArg.replaceAllUsesWith(newOp->getResult(0));
-      body->eraseArgument(numIV + i);
-      newIns.erase(newIns.begin() + i);
-
-      rewriter.modifyOpInPlace(
-          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
-
-      return success();
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto tiledType = dyn_cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape;
+    if (tiledType) {
+      tileShape = llvm::map_to_vector(tiledType.getShape(), [](int64_t dim) {
+        return static_cast<int32_t>(dim);
+      });
     }
 
-    return failure();
+    IRMapping mapping;
+    // 1. Add new block args for source op inputs at body end
+    for (Value operand : op->getOperands()) {
+      newIns.push_back(operand);
+      mapping.map(operand, body->addArgument(
+                               updateTensorType(operand.getType(), tileShape),
+                               operand.getLoc()));
+    }
+
+    // 2. clone
+    rewriter.setInsertionPointToStart(body);
+    Operation *newOp = rewriter.clone(*op, mapping);
+    Type origResultType = newOp->getResult(0).getType();
+    newOp->getResult(0).setType(updateTensorType(origResultType, tileShape));
+
+    return newOp->getResult(0);
   }
 };
 
