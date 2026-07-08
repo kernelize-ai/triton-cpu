@@ -881,108 +881,93 @@ struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
   }
 };
 
-struct FuseTransOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
-  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+struct FuseTransOpIntoGeneric : public GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  LogicalResult
-  matchAndRewrite(cpu::GenericOp genericOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getInsArgOffset();
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+    if (!op)
+      return false;
 
-    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
-      Operation *op = insVal.getDefiningOp();
-      if (!op)
-        continue;
+    auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
+    if (cvtOp)
+      op = cvtOp.getSrc().getDefiningOp();
 
-      auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
-      if (cvtOp)
-        op = cvtOp.getSrc().getDefiningOp();
+    if (!op || !isa<triton::TransOp>(op))
+      return false;
+    return true;
+  }
 
-      if (!op || !isa<triton::TransOp>(op))
-        continue;
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
+    if (cvtOp)
+      op = cvtOp.getSrc().getDefiningOp();
 
-      auto transOp = cast<triton::TransOp>(op);
-      auto dstTy = cast<RankedTensorType>(transOp.getResult().getType());
+    auto transOp = cast<triton::TransOp>(op);
+    auto dstTy = cast<RankedTensorType>(transOp.getResult().getType());
 
-      BlockArgument blockArg = body->getArgument(numIV + i);
-      auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<bool> tiledIndices(tiledType.getRank());
+    for (auto [idx, dim] : llvm::enumerate(tiledType.getShape()))
+      tiledIndices[idx] = dstTy.getShape()[idx] != dim;
 
-      SmallVector<bool> tiledIndices(tiledType.getRank());
-      for (auto [idx, dim] : llvm::enumerate(tiledType.getShape()))
-        tiledIndices[idx] = dstTy.getShape()[idx] != dim;
+    ArrayRef<int32_t> order = transOp.getOrder();
 
-      ArrayRef<int32_t> order = transOp.getOrder();
+    SmallVector<int32_t> inverseOrder(order.size());
+    for (auto [d, e] : llvm::enumerate(order))
+      inverseOrder[e] = d;
 
-      SmallVector<int32_t> inverseOrder(order.size());
-      for (auto [d, e] : llvm::enumerate(order))
-        inverseOrder[e] = d;
-
-      auto srcTy = cast<RankedTensorType>(transOp.getSrc().getType());
-      SmallVector<int32_t> preTransposeTileShape;
-      // for each dimension in the source, check if the transposed dimension is
-      // tiled
-      for (auto [srcDim, srcSize] : llvm::enumerate(srcTy.getShape())) {
-        auto transposeDim = inverseOrder[srcDim];
-        preTransposeTileShape.push_back(tiledIndices[transposeDim]
-                                            ? tiledType.getShape()[transposeDim]
-                                            : srcSize);
-      }
-
-      LDBG("Fusing transpose with order "
-           << triton::join(order) << " into generic, replacing input "
-           << tiledType << " with pre-transpose tile shape: "
-           << triton::join(preTransposeTileShape));
-
-      SmallVector<Value> newIns(genericOp.getIns());
-
-      IRMapping mapping;
-      // 1. Add new block args for source op inputs at body end
-      Value operand = transOp.getSrc();
-      newIns.push_back(operand);
-      mapping.map(operand,
-                  body->addArgument(updateTensorType(operand.getType(),
-                                                     preTransposeTileShape),
-                                    operand.getLoc()));
-
-      // 2. clone
-      rewriter.setInsertionPointToStart(body);
-
-      auto tileShape =
-          llvm::map_to_vector(tiledType.getShape(), [](int64_t dim) {
-            return static_cast<int32_t>(dim);
-          });
-
-      Operation *newTrans = rewriter.clone(*transOp, mapping);
-      Type origResultType = newTrans->getResult(0).getType();
-      // the cloned transpose maintains the original tiled shape
-      newTrans->getResult(0).setType(
-          updateTensorType(origResultType, tileShape));
-
-      if (cvtOp) {
-        Operation *newCvt = rewriter.clone(*cvtOp, mapping);
-        // cvt op uses tile shape of the transpose result, which is the same as
-        // the generic block arg tile shape
-        newCvt->getResult(0).setType(updateTensorType(
-            cast<RankedTensorType>(newCvt->getResult(0).getType()), tileShape));
-        cvtOp = cast<triton::gpu::ConvertLayoutOp>(
-            newCvt); // overwrite the cvtOp with the new one so we can properly
-                     // update block argument uses, as the Cvt was the previous
-                     // input to the block arg
-      }
-
-      // 3. replace block arg and clean up
-      blockArg.replaceAllUsesWith(cvtOp ? cvtOp->getResult(0)
-                                        : newTrans->getResult(0));
-      body->eraseArgument(numIV + i);
-      newIns.erase(newIns.begin() + i);
-
-      rewriter.modifyOpInPlace(
-          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
-      return success();
+    auto srcTy = cast<RankedTensorType>(transOp.getSrc().getType());
+    SmallVector<int32_t> preTransposeTileShape;
+    // for each dimension in the source, check if the transposed dimension is
+    // tiled
+    for (auto [srcDim, srcSize] : llvm::enumerate(srcTy.getShape())) {
+      auto transposeDim = inverseOrder[srcDim];
+      preTransposeTileShape.push_back(tiledIndices[transposeDim]
+                                          ? tiledType.getShape()[transposeDim]
+                                          : srcSize);
     }
 
-    return failure();
+    LDBG("Fusing transpose with order "
+         << triton::join(order) << " into generic, replacing input "
+         << tiledType << " with pre-transpose tile shape: "
+         << triton::join(preTransposeTileShape));
+
+    IRMapping mapping;
+    // 1. Add new block args for source op inputs at body end
+    Value operand = transOp.getSrc();
+    newIns.push_back(operand);
+    mapping.map(operand,
+                body->addArgument(
+                    updateTensorType(operand.getType(), preTransposeTileShape),
+                    operand.getLoc()));
+
+    // 2. clone
+    rewriter.setInsertionPointToStart(body);
+
+    auto tileShape = llvm::map_to_vector(tiledType.getShape(), [](int64_t dim) {
+      return static_cast<int32_t>(dim);
+    });
+
+    Operation *newTrans = rewriter.clone(*transOp, mapping);
+    Type origResultType = newTrans->getResult(0).getType();
+    // the cloned transpose maintains the original tiled shape
+    newTrans->getResult(0).setType(updateTensorType(origResultType, tileShape));
+
+    if (cvtOp) {
+      Operation *newCvt = rewriter.clone(*cvtOp, mapping);
+      // cvt op uses tile shape of the transpose result, which is the same as
+      // the generic block arg tile shape
+      newCvt->getResult(0).setType(updateTensorType(
+          cast<RankedTensorType>(newCvt->getResult(0).getType()), tileShape));
+      cvtOp = cast<triton::gpu::ConvertLayoutOp>(
+          newCvt); // overwrite the cvtOp with the new one so we can properly
+                   // update block argument uses, as the Cvt was the previous
+                   // input to the block arg
+    }
+    return cvtOp ? cvtOp->getResult(0) : newTrans->getResult(0);
   }
 };
 
