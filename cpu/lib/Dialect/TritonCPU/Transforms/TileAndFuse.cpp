@@ -15,6 +15,8 @@
 
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
+#include "mlir/Analysis/DataFlow/SparseAnalysis.h" // TODO: remove when we move AxisKind to separate header
+
 #define DEBUG_TYPE "tritoncpu-tile-and-fuse"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
@@ -25,6 +27,249 @@ namespace cpu {
 
 #define GEN_PASS_DEF_TRITONCPUTILEANDFUSE
 #include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
+
+class AxisKind {
+public:
+  static constexpr int32_t kContracted = -1;
+
+  explicit AxisKind() = default;
+
+  AxisKind(ArrayRef<int32_t> axes) : state(State::Known), axes(axes) {}
+
+  static AxisKind getIdentity(unsigned rank) {
+    SmallVector<int32_t> a(rank);
+    std::iota(a.begin(), a.end(), 0);
+    return AxisKind(a);
+  }
+
+  static AxisKind getUninitialized() { return AxisKind{}; }
+  static AxisKind getUnknown() {
+    AxisKind a;
+    a.state = State::Unknown;
+    return a;
+  }
+
+  bool isKnown() const { return state == State::Known; }
+  bool isUninitialized() const { return state == State::Uninitialized; }
+  bool isUnknown() const { return state == State::Unknown; }
+
+  ArrayRef<int32_t> getAxes() const {
+    assert(isKnown() && "no axes on uninitialized/unknown AxisKind");
+    return axes;
+  }
+  unsigned getRank() const { return getAxes().size(); }
+
+  bool operator==(const AxisKind &rhs) const {
+    return state == rhs.state && (state != State::Known || axes == rhs.axes);
+  }
+
+  /// Backward "meet": combine the demands two uses place on a value.
+  ///   ⊥ ⊓ x = x,  x ⊓ x = x,  any disagreement -> ⊤ (Unknown).
+  /// Unlike TaskId's union-meet, ours requires *agreement*: a dim maps to
+  /// exactly one iteration axis, so conflicting demands are genuinely unknown.
+  static AxisKind meet(const AxisKind &a, const AxisKind &b) {
+    if (a.isUnknown() || b.isUnknown())
+      return getUnknown();
+    if (a.isUninitialized())
+      return b;
+    if (b.isUninitialized())
+      return a;
+    // both Known: must agree exactly (rank + every axis) or it's ambiguous.
+    if (a.axes.size() != b.axes.size())
+      return getUnknown();
+    return a.axes == b.axes ? a : getUnknown();
+  }
+
+  /// Backward analysis only meets; join is provided for framework symmetry and
+  /// uses the same agree-or-conflict rule.
+  static AxisKind join(const AxisKind &a, const AxisKind &b) {
+    return meet(a, b);
+  }
+
+  void print(llvm::raw_ostream &os) const {
+    if (isUninitialized()) {
+      os << "<UNINITIALIZED>";
+      return;
+    }
+    if (isUnknown()) {
+      os << "<UNKNOWN>";
+      return;
+    }
+    os << "[";
+    llvm::interleaveComma(axes, os, [&](int32_t e) {
+      if (e == kContracted)
+        os << "contracted";
+      else
+        os << "iter" << e;
+    });
+    os << "]";
+  }
+
+private:
+  enum class State : uint8_t { Uninitialized, Known, Unknown };
+  State state = State::Uninitialized;
+  SmallVector<int32_t> axes;
+};
+
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                     const AxisKind &kind) {
+  kind.print(os);
+  return os;
+}
+
+class AxisKindLattice : public mlir::dataflow::Lattice<AxisKind> {
+public:
+  using Lattice::Lattice;
+};
+
+class AxisKindBackwardPropagation
+    : public mlir::dataflow::SparseBackwardDataFlowAnalysis<AxisKindLattice> {
+public:
+  using SparseBackwardDataFlowAnalysis::SparseBackwardDataFlowAnalysis;
+
+  LogicalResult
+  visitOperation(Operation *op, ArrayRef<AxisKindLattice *> operands,
+                 ArrayRef<const AxisKindLattice *> results) override;
+
+  void visitBranchOperand(OpOperand &operand) override;
+
+  void visitCallOperand(OpOperand &operand) override;
+
+  void visitNonControlFlowArguments(RegionSuccessor &successor,
+                                    ArrayRef<BlockArgument> arguments) override;
+
+  void setToExitState(AxisKindLattice *lattice) override {}
+
+private:
+  LogicalResult seedGenericIns(GenericOp generic,
+                               ArrayRef<AxisKindLattice *> operands);
+};
+
+LogicalResult AxisKindBackwardPropagation::visitOperation(
+    Operation *op, ArrayRef<AxisKindLattice *> operands,
+    ArrayRef<const AxisKindLattice *> results) {
+  if (auto genericOp = dyn_cast<cpu::GenericOp>(op)) {
+    return seedGenericIns(genericOp, operands);
+  }
+
+  if (results.size() != 1)
+    return success();
+
+  // Handle ops that can permute the generic operand tensor chain mapping to
+  // generic tile induction vars
+  AxisKind existing = results[0]->getValue();
+  if (!existing.isKnown())
+    return success();
+
+  ArrayRef<int32_t> resultAxes = existing.getAxes();
+
+  TypeSwitch<Operation *>(op)
+      .Case<triton::TransOp>([&](triton::TransOp trans) {
+        SmallVector<int32_t> localAxes(trans.getOrder().size(),
+                                       AxisKind::kContracted);
+        // permute result axes according to transpose
+        for (auto [i, d] : llvm::enumerate(trans.getOrder()))
+          localAxes[d] = resultAxes[i];
+        propagateIfChanged(operands[0], operands[0]->meet(AxisKind(localAxes)));
+      })
+      .Case<triton::ExpandDimsOp>([&](triton::ExpandDimsOp expandDims) {
+        // drop the inserted axis as we traverse up the def-use chain
+        unsigned expansionAxis = expandDims.getAxis();
+        SmallVector<int32_t> localAxes(resultAxes.size() - 1);
+        for (unsigned d = 0; d < localAxes.size(); ++d)
+          localAxes[d] = resultAxes[d < expansionAxis ? d : d + 1];
+        propagateIfChanged(operands[0], operands[0]->meet(AxisKind(localAxes)));
+      })
+      .Case<triton::BroadcastOp>([&](triton::BroadcastOp broadcast) {
+        auto sourceTensorTy =
+            cast<RankedTensorType>(broadcast.getSrc().getType());
+        auto sourceShape = sourceTensorTy.getShape();
+        SmallVector<int32_t> localAxes(sourceShape.size());
+        for (unsigned d = 0; d < sourceShape.size(); d++) {
+          // broadcasted dimension is contracted
+          localAxes[d] =
+              (sourceShape[d] == 1) ? AxisKind::kContracted : resultAxes[d];
+        }
+        propagateIfChanged(operands[0], operands[0]->meet(AxisKind(localAxes)));
+      })
+      .Case<triton::MakeRangeOp>([&](triton::MakeRangeOp) {
+        // no propagation - but maybe we should debug print here?
+      })
+      .Default([&](Operation *op) {
+        for (auto [i, v] : llvm::enumerate(op->getOperands())) {
+          if (auto tensorTy = dyn_cast<RankedTensorType>(v.getType())) {
+            if (tensorTy.getRank() == existing.getRank()) {
+              propagateIfChanged(operands[i], operands[i]->meet(existing));
+            }
+          }
+        }
+      });
+
+  return success();
+}
+
+void AxisKindBackwardPropagation::visitBranchOperand(OpOperand &operand) {
+  // no-op: branches are not fused into GenericOps
+  return;
+}
+
+void AxisKindBackwardPropagation::visitCallOperand(OpOperand &operand) {
+  llvm_unreachable(
+      "Should not have any call operands in the IR after inlining.");
+}
+
+void AxisKindBackwardPropagation::visitNonControlFlowArguments(
+    RegionSuccessor &successor, ArrayRef<BlockArgument> arguments) {
+  // no-op: generic ops are the only non-control flow arguments we care about,
+  // and we don't descend into them
+  return;
+}
+
+LogicalResult AxisKindBackwardPropagation::seedGenericIns(
+    GenericOp generic, ArrayRef<AxisKindLattice *> operands) {
+  auto tileShape = generic.getTileShape();
+  Block *body = &generic.getBody().front();
+  Operation *root = &body->front();
+  unsigned insOperandOffset = generic.getInsArgOffset();
+
+  AxisKind identity = AxisKind::getIdentity(tileShape.size());
+
+  auto transfer = [&](Value operand, AxisKind operandKind) {
+    auto blockArg = dyn_cast<BlockArgument>(operand);
+    if (!blockArg || blockArg.getOwner() != body)
+      return;
+    unsigned idx = blockArg.getArgNumber();
+    if (idx < insOperandOffset)
+      return; // iter args unaffected by tiled axis
+    unsigned i = idx - insOperandOffset;
+    propagateIfChanged(operands[i], operands[i]->meet(operandKind));
+  };
+
+  // TODO: this has to be kept in sync with the generic wrap code - can we embed
+  // this in the GenericOp definition?
+  TypeSwitch<Operation *>(root)
+      .Case<triton::DotOp>([&](triton::DotOp dot) {
+        transfer(dot.getA(),
+                 AxisKind({identity.getAxes()[0], AxisKind::kContracted}));
+        transfer(dot.getB(),
+                 AxisKind({AxisKind::kContracted, identity.getAxes()[1]}));
+        transfer(dot.getC(), identity);
+      })
+      .Case<triton::ReduceOp>([&](triton::ReduceOp reduce) {
+        for (Value src : reduce.getSrcs())
+          transfer(src, identity);
+      })
+      .Default([&](Operation *) {
+        for (Value operand : root->getOperands()) {
+          if (auto tensorTy = dyn_cast<RankedTensorType>(operand.getType())) {
+            if (tensorTy.getRank() == tileShape.size())
+              transfer(operand, identity);
+          }
+        }
+      });
+
+  return success();
+}
 
 namespace {
 
@@ -623,6 +868,10 @@ struct FuseElementwiseIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
 struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
   using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
 
+  FuseMakeRangeIntoGeneric(MLIRContext *context, DataFlowSolver *solver,
+                           PatternBenefit benefit)
+      : OpRewritePattern(context, benefit), solver(solver) {}
+
   LogicalResult
   matchAndRewrite(cpu::GenericOp genericOp,
                   mlir::PatternRewriter &rewriter) const override {
@@ -730,6 +979,16 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
             }
           }
         }
+        auto *lattice =
+            solver->lookupState<AxisKindLattice>(makeRangeOp.getResult());
+        assert(lattice && "expected make range op result to have state in axis "
+                          "kind analysis lattice");
+        auto axisKind = lattice->getValue();
+        ArrayRef<int32_t> axes = axisKind.getAxes();
+        assert(axes.size() == 1 && "expected only one axis for make range");
+        assert(axes.front() == dim &&
+               "expected computed dim to match solver dim");
+
         newOp = triton::cpu::MakeDynamicRangeOp::create(
             rewriter, makeRangeOp.getLoc(), newResultType,
             genericOp.getTileOffset(dim));
@@ -747,6 +1006,8 @@ struct FuseMakeRangeIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
     }
     return failure();
   }
+
+  DataFlowSolver *solver;
 };
 
 struct FuseConstantIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
@@ -1632,13 +1893,30 @@ struct TritonCPUTileAndFusePass
 
     LDBG("Module before fusion " << m);
 
+    SymbolTableCollection symbolTable;
+    std::unique_ptr<DataFlowSolver> solver = mlir::createDataFlowSolver();
+    AxisKindBackwardPropagation *axisKindAnalysis =
+        solver->load<AxisKindBackwardPropagation>(symbolTable);
+    if (failed(solver->initializeAndRun(m)))
+      signalPassFailure();
+
+    LLVM_DEBUG(m.walk([&](triton::MakeRangeOp makeRange) {
+      if (auto *lattice =
+              solver->lookupState<AxisKindLattice>(makeRange.getResult()))
+        DBGS() << "make_range " << makeRange.getResult() << " -> "
+               << lattice->getValue() << "\n";
+      else
+        DBGS() << "make_range " << makeRange.getResult() << " -> <no state>\n";
+    }));
+
     // Step 2: Fuse ops into each generic
     RewritePatternSet fusePatterns(context);
 
     fusePatterns.add<FuseElementwiseIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseBroadcastIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseExpandDimsIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseMakeRangeIntoGeneric>(context, benefitDefault);
+    fusePatterns.add<FuseMakeRangeIntoGeneric>(context, solver.get(),
+                                               benefitDefault);
     fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseTransOpIntoGeneric>(context, benefitDefault);
     fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
