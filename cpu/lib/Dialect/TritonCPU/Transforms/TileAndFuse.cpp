@@ -28,6 +28,177 @@ namespace cpu {
 
 namespace {
 
+class AxisKind {
+public:
+  static constexpr int32_t kContracted = -1;
+
+  explicit AxisKind() = default;
+
+  AxisKind(ArrayRef<int32_t> axes) : state(State::Known), axes(axes) {}
+
+  static AxisKind getIdentity(unsigned rank) {
+    SmallVector<int32_t> a(rank);
+    std::iota(a.begin(), a.end(), 0);
+    return AxisKind(a);
+  }
+
+  static AxisKind getUninitialized() { return AxisKind{}; }
+  static AxisKind getUnknown() {
+    AxisKind a;
+    a.state = State::Unknown;
+    return a;
+  }
+
+  bool isKnown() const { return state == State::Known; }
+  bool isUninitialized() const { return state == State::Uninitialized; }
+  bool isUnknown() const { return state == State::Unknown; }
+
+  ArrayRef<int32_t> getAxes() const {
+    assert(isKnown() && "no axes on uninitialized/unknown AxisKind");
+    return axes;
+  }
+  unsigned getRank() const { return getAxes().size(); }
+
+  bool operator==(const AxisKind &rhs) const {
+    return state == rhs.state && (state != State::Known || axes == rhs.axes);
+  }
+
+  // Backward "meet": combine the demands two uses place on a value.
+  //   ⊥ ⊓ x = x,  x ⊓ x = x,  any disagreement -> ⊤ (Unknown).
+  static AxisKind meet(const AxisKind &a, const AxisKind &b) {
+    if (a.isUnknown() || b.isUnknown())
+      return getUnknown();
+    if (a.isUninitialized())
+      return b;
+    if (b.isUninitialized())
+      return a;
+    // both Known: must agree exactly (rank + every axis) or it's ambiguous.
+    if (a.axes.size() != b.axes.size())
+      return getUnknown();
+    return a.axes == b.axes ? a : getUnknown();
+  }
+
+  void print(llvm::raw_ostream &os) const {
+    if (isUninitialized()) {
+      os << "<UNINITIALIZED>";
+      return;
+    }
+    if (isUnknown()) {
+      os << "<UNKNOWN>";
+      return;
+    }
+    os << "[";
+    llvm::interleaveComma(axes, os, [&](int32_t e) {
+      if (e == kContracted)
+        os << "contracted";
+      else
+        os << "iter" << e;
+    });
+    os << "]";
+  }
+
+private:
+  enum class State : uint8_t { Uninitialized, Known, Unknown };
+  State state = State::Uninitialized;
+  SmallVector<int32_t> axes;
+};
+
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                     const AxisKind &kind) {
+  kind.print(os);
+  return os;
+}
+
+using BlockArgAxisMap = DenseMap<BlockArgument, AxisKind>;
+
+void seedGenericBlockArgAxisKind(cpu::GenericOp genericOp,
+                                 BlockArgAxisMap &blockArgAxisMap) {
+  auto tileShape = genericOp.getTileShape();
+  Block *body = &genericOp.getBody().front();
+  unsigned insOperandOffset = genericOp.getInsArgOffset();
+
+  auto transfer = [&](Value operand, AxisKind operandAxisKind) {
+    auto blockArg = dyn_cast<BlockArgument>(operand);
+    if (!blockArg || blockArg.getOwner() != body)
+      return;
+    unsigned idx = blockArg.getArgNumber();
+    if (idx < insOperandOffset)
+      return; // iter args unaffected by tiled axis
+    // if blockArg is not present in the map AxisKind will default construct
+    // uninitialized, and the operand axis kind will be chosen
+    blockArgAxisMap[blockArg] =
+        AxisKind::meet(blockArgAxisMap[blockArg], operandAxisKind);
+  };
+
+  AxisKind identity = AxisKind::getIdentity(tileShape.size());
+
+  Operation *root = &body->front();
+  TypeSwitch<Operation *>(root)
+      .Case<triton::DotOp>([&](triton::DotOp dot) {
+        transfer(dot.getA(),
+                 AxisKind({identity.getAxes()[0], AxisKind::kContracted}));
+        transfer(dot.getB(),
+                 AxisKind({AxisKind::kContracted, identity.getAxes()[1]}));
+        transfer(dot.getC(), identity);
+      })
+      .Case<triton::ReduceOp>([&](triton::ReduceOp reduce) {
+        for (Value src : reduce.getSrcs())
+          transfer(src, identity);
+      })
+      .Default([&](Operation *) {
+        for (Value operand : root->getOperands()) {
+          if (auto tensorTy = dyn_cast<RankedTensorType>(operand.getType())) {
+            if (tensorTy.getRank() == tileShape.size())
+              transfer(operand, identity);
+          }
+        }
+      });
+}
+
+AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
+  // cannot propagate an unknown
+  if (existing.isUninitialized() || existing.isUnknown())
+    return AxisKind::getUnknown();
+
+  ArrayRef<int32_t> resultAxes = existing.getAxes();
+
+  TypeSwitch<Operation *>(op)
+      .Case<triton::TransOp>([&](triton::TransOp trans) {
+        SmallVector<int32_t> localAxes(trans.getOrder().size(),
+                                       AxisKind::kContracted);
+        // permute result axes according to transpose
+        for (auto [i, d] : llvm::enumerate(trans.getOrder()))
+          localAxes[d] = resultAxes[i];
+        return AxisKind::meet(existing, AxisKind(localAxes));
+      })
+      .Case<triton::ExpandDimsOp>([&](triton::ExpandDimsOp expandDims) {
+        // drop the inserted axis as we traverse up the def-use chain
+        unsigned expansionAxis = expandDims.getAxis();
+        SmallVector<int32_t> localAxes(resultAxes.size() - 1);
+        for (unsigned d = 0; d < localAxes.size(); ++d)
+          localAxes[d] = resultAxes[d < expansionAxis ? d : d + 1];
+        return AxisKind::meet(existing, AxisKind(localAxes));
+      })
+      .Case<triton::BroadcastOp>([&](triton::BroadcastOp broadcast) {
+        auto sourceTensorTy =
+            cast<RankedTensorType>(broadcast.getSrc().getType());
+        auto sourceShape = sourceTensorTy.getShape();
+        SmallVector<int32_t> localAxes(sourceShape.size());
+        for (unsigned d = 0; d < sourceShape.size(); d++) {
+          // broadcasted dimension is contracted
+          localAxes[d] =
+              (sourceShape[d] == 1) ? AxisKind::kContracted : resultAxes[d];
+        }
+        return AxisKind::meet(existing, AxisKind(localAxes));
+      })
+      .Case<triton::MakeRangeOp>([&](triton::MakeRangeOp) {
+        // no propagation - but maybe we should debug print here?
+      });
+
+  // default unknown?
+  return existing;
+}
+
 // Replace the shape of a RankedTensorType with tileShape, preserving element
 // type and encoding. Non-tensor types are returned unchanged.
 static Type updateTensorType(Type t, ArrayRef<int32_t> tileShape) {
@@ -530,6 +701,12 @@ struct WrapConvertLayoutOp
 struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
   using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
 
+  GenericOperandFusionPattern(MLIRContext *context,
+                              BlockArgAxisMap *blockArgAxisMap,
+                              PatternBenefit benefit)
+      : OpRewritePattern<cpu::GenericOp>(context, benefit),
+        blockArgAxisMap(blockArgAxisMap) {}
+
   virtual bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
                            BlockArgument blockArg) const = 0;
 
@@ -545,6 +722,7 @@ struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
       BlockArgument blockArg = body->getArgument(insOffset + i);
+      unsigned firstAddedBlockArgIndex = body->getArguments().size();
 
       Operation *op = insVal.getDefiningOp();
       if (!isFusibleOp(op, genericOp, blockArg))
@@ -555,6 +733,14 @@ struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
           fuseOperand(body, blockArg, newIns, op, genericOp, rewriter);
 
       blockArg.replaceAllUsesWith(newResult);
+      AxisKind existingKind = (*blockArgAxisMap)[blockArg];
+      for (unsigned i = firstAddedBlockArgIndex;
+           i < body->getArguments().size(); i++) {
+        BlockArgument newBlockArg = body->getArgument(i);
+        (*blockArgAxisMap)[newBlockArg] = propagateAxisKind(op, existingKind);
+      }
+      blockArgAxisMap->erase(blockArg);
+
       body->eraseArgument(insOffset + i);
       newIns.erase(newIns.begin() + i);
       rewriter.modifyOpInPlace(
@@ -564,6 +750,8 @@ struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
     }
     return failure();
   }
+
+  BlockArgAxisMap *blockArgAxisMap;
 };
 
 struct FuseElementwiseIntoGeneric : GenericOperandFusionPattern {
@@ -661,6 +849,10 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
           auto [t, s] = pair;
           return t == s;
         });
+
+    auto axisKind = blockArgAxisMap->lookup(blockArg);
+    // llvm::errs() << "make range op: " << makeRangeOp << "\n";
+    // llvm::errs() << "make range axis kind: " << axisKind << "\n";
 
     IRMapping mapping;
     Operation *newOp;
@@ -1063,6 +1255,12 @@ struct FuseConvertLayoutOpIntoGeneric : public GenericOperandFusionPattern {
 struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
 
+  FuseParentForOpIntoGeneric(MLIRContext *context,
+                             BlockArgAxisMap *blockArgAxisMap,
+                             PatternBenefit benefit)
+      : OpRewritePattern<scf::ForOp>(context, benefit),
+        blockArgAxisMap(blockArgAxisMap) {}
+
   static std::optional<cpu::GenericOp> findTargetGenericOp(scf::ForOp forOp) {
     // (1) For loop must have iter args — excludes persistent block-dispatch
     // loops which have no iter args.
@@ -1330,10 +1528,17 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
 
     return success();
   }
+
+  BlockArgAxisMap *blockArgAxisMap;
 };
 
 struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
   using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  TileKLoop(MLIRContext *context, BlockArgAxisMap *blockArgAxisMap,
+            PatternBenefit benefit)
+      : OpRewritePattern<scf::ForOp>(context, benefit),
+        blockArgAxisMap(blockArgAxisMap) {}
 
   static std::optional<std::pair<cpu::GenericOp, triton::DotOp>>
   findTargetGenericOp(scf::ForOp forOp) {
@@ -1536,6 +1741,7 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     rewriter.replaceOp(forOp, newGeneric.getResults());
     return success();
   }
+  BlockArgAxisMap *blockArgAxisMap;
 };
 
 } // namespace
@@ -1562,19 +1768,34 @@ struct TritonCPUTileAndFusePass
 
     LDBG("Module before fusion " << m);
 
+    // stores the block argument -> tensor tile axis mapping per generic block
+    // arg
+    BlockArgAxisMap blockArgAxis;
+    m.walk([&](cpu::GenericOp genericOp) {
+      seedGenericBlockArgAxisKind(genericOp, blockArgAxis);
+    });
+
     // Step 2: Fuse ops into each generic
     RewritePatternSet fusePatterns(context);
 
-    fusePatterns.add<FuseElementwiseIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseBroadcastIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseExpandDimsIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseMakeRangeIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseConstantIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseTransOpIntoGeneric>(context, benefitDefault);
-    fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, benefitDefault);
+    fusePatterns.add<FuseElementwiseIntoGeneric>(context, &blockArgAxis,
+                                                 benefitDefault);
+    fusePatterns.add<FuseBroadcastIntoGeneric>(context, &blockArgAxis,
+                                               benefitDefault);
+    fusePatterns.add<FuseExpandDimsIntoGeneric>(context, &blockArgAxis,
+                                                benefitDefault);
+    fusePatterns.add<FuseMakeRangeIntoGeneric>(context, &blockArgAxis,
+                                               benefitDefault);
+    fusePatterns.add<FuseConstantIntoGeneric>(context, &blockArgAxis,
+                                              benefitDefault);
+    fusePatterns.add<FuseTransOpIntoGeneric>(context, &blockArgAxis,
+                                             benefitDefault);
+    fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, &blockArgAxis,
+                                                     benefitDefault);
 
-    fusePatterns.add<TileKLoop>(context, benefitDefault + 10);
-    fusePatterns.add<FuseParentForOpIntoGeneric>(context, benefitDefault);
+    fusePatterns.add<TileKLoop>(context, &blockArgAxis, benefitDefault + 10);
+    fusePatterns.add<FuseParentForOpIntoGeneric>(context, &blockArgAxis,
+                                                 benefitDefault);
 
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
       signalPassFailure();
