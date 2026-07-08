@@ -530,7 +530,8 @@ struct WrapConvertLayoutOp
 struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
   using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
 
-  virtual bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const = 0;
+  virtual bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                           BlockArgument blockArg) const = 0;
 
   virtual Value fuseOperand(Block *body, BlockArgument blockArg,
                             SmallVector<Value> &newIns, Operation *op,
@@ -543,11 +544,11 @@ struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
     unsigned insOffset = genericOp.getInsArgOffset();
 
     for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
-      Operation *op = insVal.getDefiningOp();
-      if (!isFusibleOp(op, genericOp))
-        continue;
-
       BlockArgument blockArg = body->getArgument(insOffset + i);
+
+      Operation *op = insVal.getDefiningOp();
+      if (!isFusibleOp(op, genericOp, blockArg))
+        continue;
 
       SmallVector<Value> newIns(genericOp.getIns());
       Value newResult =
@@ -588,7 +589,8 @@ struct FuseElementwiseIntoGeneric : GenericOperandFusionPattern {
     return false;
   }
 
-  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
     if (!isFusibleElementwise(op))
       return false;
 
@@ -633,7 +635,8 @@ struct FuseElementwiseIntoGeneric : GenericOperandFusionPattern {
 struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
   using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
     auto makeRange = dyn_cast_or_null<triton::MakeRangeOp>(op);
     if (!makeRange)
       return false;
@@ -747,7 +750,8 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
 struct FuseConstantIntoGeneric : GenericOperandFusionPattern {
   using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
     auto constantOp = dyn_cast_or_null<arith::ConstantOp>(op);
     if (!constantOp)
       return false;
@@ -788,7 +792,8 @@ struct FuseConstantIntoGeneric : GenericOperandFusionPattern {
 struct FuseBroadcastIntoGeneric : GenericOperandFusionPattern {
   using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
     auto broadcastOp = dyn_cast_or_null<triton::BroadcastOp>(op);
     if (!broadcastOp)
       return false;
@@ -833,7 +838,8 @@ struct FuseBroadcastIntoGeneric : GenericOperandFusionPattern {
 struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
   using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
     auto expandDims = dyn_cast_or_null<triton::ExpandDimsOp>(op);
     if (!expandDims)
       return false;
@@ -884,7 +890,8 @@ struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
 struct FuseTransOpIntoGeneric : public GenericOperandFusionPattern {
   using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp) const override {
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
     if (!op)
       return false;
 
@@ -971,94 +978,85 @@ struct FuseTransOpIntoGeneric : public GenericOperandFusionPattern {
   }
 };
 
-struct FuseConvertLayoutOpIntoGeneric : mlir::OpRewritePattern<cpu::GenericOp> {
-  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+struct FuseConvertLayoutOpIntoGeneric : public GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
-  LogicalResult
-  matchAndRewrite(cpu::GenericOp genericOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    Block *body = &genericOp.getBody().front();
-    unsigned numIV = genericOp.getInsArgOffset();
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockArg) const override {
+    auto cvtOp = dyn_cast_or_null<gpu::ConvertLayoutOp>(op);
+    if (!cvtOp)
+      return false;
 
-    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
-      Operation *op = insVal.getDefiningOp();
-      if (!op)
-        continue;
+    LDBG("Evaluate cvt for fusion: " << cvtOp);
+    auto srcTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
+    auto dstTy = cast<RankedTensorType>(cvtOp.getType());
 
-      auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
-      if (!cvtOp)
-        continue;
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
 
-      LDBG("Evaluate cvt for fusion: " << cvtOp);
-      auto srcTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
-      auto dstTy = cast<RankedTensorType>(cvtOp.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+    LDBG("Generic op tile shape: " << triton::join(tileShape));
 
-      // get the existing tile type
-      BlockArgument blockArg = body->getArgument(numIV + i);
-      auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    // determine if the register shuffle required fits inside our generic
+    // Note: the logic here is very similar to cvtReordersRegisters
+    auto layout = minimalCvtLayout(srcTy, dstTy);
+    auto outDims = to_vector(layout.getOutDimNames());
 
-      SmallVector<int32_t> tileShape(tiledType.getShape());
-      LDBG("Generic op tile shape: " << triton::join(tileShape));
+    if (!outDims.empty()) {
+      LDBG("Non-empty out dims, layout: " << layout);
+      MLIRContext *ctx = srcTy.getContext();
+      auto kRegister = StringAttr::get(ctx, "register");
 
-      // determine if the register shuffle required fits inside our generic
-      // Note: the logic here is very similar to cvtReordersRegisters
-      auto layout = minimalCvtLayout(srcTy, dstTy);
-      auto outDims = to_vector(layout.getOutDimNames());
+      // layout must only reorder registers
+      if (ArrayRef(outDims) != ArrayRef({kRegister}))
+        return false;
 
-      if (!outDims.empty()) {
-        LDBG("Non-empty out dims, layout: " << layout);
-        MLIRContext *ctx = srcTy.getContext();
-        auto kRegister = StringAttr::get(ctx, "register");
+      // must be able to determine the required tile shape and it must fit
+      // inside this generic
+      auto requiredTileShape =
+          getBlockedRegisterConversionTileShape(srcTy, dstTy);
+      if (!requiredTileShape)
+        return false;
 
-        // layout must only reorder registers
-        if (ArrayRef(outDims) != ArrayRef({kRegister}))
-          continue;
+      auto required = *requiredTileShape;
+      LDBG("Required tile shape for register shuffle: "
+           << triton::join(required));
+      bool fits = llvm::all_of(llvm::zip(tileShape, required), [](auto pair) {
+        auto [cur, req] = pair;
+        return cur % req == 0;
+      });
+      if (!fits)
+        return false;
 
-        // must be able to determine the required tile shape and it must fit
-        // inside this generic
-        auto requiredTileShape =
-            getBlockedRegisterConversionTileShape(srcTy, dstTy);
-        if (!requiredTileShape)
-          continue;
-
-        auto required = *requiredTileShape;
-        LDBG("Required tile shape for register shuffle: "
-             << triton::join(required));
-        bool fits = llvm::all_of(llvm::zip(tileShape, required), [](auto pair) {
-          auto [cur, req] = pair;
-          return cur % req == 0;
-        });
-        if (!fits)
-          continue;
-
-        LDBG("Cvt can be legally fused");
-      }
-
-      SmallVector<Value> newIns(genericOp.getIns());
-
-      IRMapping mapping;
-      // 1. Add new block args for source op inputs at body end
-      newIns.push_back(cvtOp.getSrc());
-      mapping.map(cvtOp.getSrc(),
-                  body->addArgument(updateTensorType(srcTy, tileShape),
-                                    cvtOp.getSrc().getLoc()));
-
-      // 2. clone
-      rewriter.setInsertionPointToStart(body);
-      Operation *newOp = rewriter.clone(*op, mapping);
-      newOp->getResult(0).setType(updateTensorType(dstTy, tileShape));
-
-      // 3. replace block arg and clean up
-      blockArg.replaceAllUsesWith(newOp->getResult(0));
-      body->eraseArgument(numIV + i);
-      newIns.erase(newIns.begin() + i);
-
-      rewriter.modifyOpInPlace(
-          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
-
-      return success();
+      LDBG("Cvt can be legally fused");
+      return true;
     }
-    return failure();
+    // trivial CVT, fusible
+    return true; 
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+
+    auto cvtOp = cast<gpu::ConvertLayoutOp>(op);
+    auto srcTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
+    auto dstTy = cast<RankedTensorType>(cvtOp.getType());
+
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+
+    IRMapping mapping;
+    // 1. Add new block args for source op inputs at body end
+    newIns.push_back(cvtOp.getSrc());
+    mapping.map(cvtOp.getSrc(),
+                body->addArgument(updateTensorType(srcTy, tileShape),
+                                  cvtOp.getSrc().getLoc()));
+    // 2. clone
+    rewriter.setInsertionPointToStart(body);
+    Operation *newOp = rewriter.clone(*op, mapping);
+    newOp->getResult(0).setType(updateTensorType(dstTy, tileShape));
+    return newOp->getResult(0);
   }
 };
 
