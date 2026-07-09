@@ -204,18 +204,10 @@ AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
             }
             return existing;
           })
-#if 1
       .Default([&](auto) {
         // propagate existing or unknown?
         return existing;
       });
-#else
-      .Case<triton::MakeRangeOp>([&](triton::MakeRangeOp) {
-        // no propagation - but maybe we should debug print here?
-      });
-  // default unknown?
-  return existing;
-#endif
 }
 
 // Replace the shape of a RankedTensorType with tileShape, preserving element
@@ -881,83 +873,11 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
       // just fuse the existing op
       newOp = rewriter.clone(*op, mapping);
     } else {
-#if 1
       auto newResultType =
           cast<RankedTensorType>(updateTensorType(resultType, tileShape));
       unsigned dim = axes.front();
       assert(newResultType.getShape()[0] == genericOp.getTileShape()[dim] &&
              "make_dynamic_range size disagrees with its induction-var axis");
-#else
-      auto rank = tileShape.size();
-      auto newResultType = updateTensorType(resultType, tileShape);
-      auto sliceEncodingAttr =
-          dyn_cast<triton::gpu::SliceEncodingAttr>(resultType.getEncoding());
-      if (!sliceEncodingAttr) {
-        // check to see if a slice encoding attr exists downstream from a cvt
-        // op that was previously rematerialized
-        ForwardSliceOptions fwdOpt;
-        fwdOpt.filter = [&](Operation *op) {
-          auto cvtInSlice = dyn_cast<gpu::ConvertLayoutOp>(op);
-          if (cvtInSlice) {
-            auto localSliceEncodingAttr = dyn_cast<gpu::SliceEncodingAttr>(
-                cast<RankedTensorType>(cvtInSlice.getType()).getEncoding());
-            if (localSliceEncodingAttr) {
-              sliceEncodingAttr = localSliceEncodingAttr;
-              return false;
-            }
-          }
-          return true;
-        };
-        SetVector<Operation *> slice;
-        getForwardSlice(blockArg, &slice, fwdOpt);
-      }
-      unsigned dim;
-      if (!sliceEncodingAttr) {
-        assert(rank == 1 && "make dynamic range op without slice encoding "
-                            "should be inside a 1D generic");
-        dim = 0;
-      } else {
-        SmallVector<unsigned> sliceDims;
-        Attribute enc = sliceEncodingAttr;
-        while (auto sliceEnc = dyn_cast<gpu::SliceEncodingAttr>(enc)) {
-          sliceDims.push_back(sliceEnc.getDim());
-          enc = sliceEnc.getParent();
-        }
-        // sliceDims is outermost-first; process innermost-first (reversed)
-        SmallVector<unsigned> survivingDims;
-        for (unsigned i = 0; i < genericOp.getBlockShape().size(); ++i)
-          survivingDims.push_back(i);
-        for (auto d : llvm::reverse(sliceDims))
-          survivingDims.erase(survivingDims.begin() + d);
-        assert(survivingDims.size() == 1 &&
-               "expected single surviving dim for make_dynamic_range");
-        dim = survivingDims.front();
-
-        // If a tt.trans is in the forward slice of this blockArg (e.g. K
-        // transposed to K^T inside the generic body by
-        // FuseTransOpIntoGeneric), K's local surviving dim maps to a
-        // different output dim after the transpose. Apply the inverse
-        // permutation to get the correct tile IV.
-        // TODO: consider re-factoring this chain into a visitor that can
-        // compute the dim for any op based on the def-use chain
-        {
-          SetVector<Operation *> fwdSlice;
-          getForwardSlice(blockArg, &fwdSlice);
-          for (Operation *fwdOp : fwdSlice) {
-            if (auto transOp = dyn_cast<triton::TransOp>(fwdOp)) {
-              ArrayRef<int32_t> order = transOp.getOrder();
-              for (unsigned j = 0; j < order.size(); ++j) {
-                if ((unsigned)order[j] == dim) {
-                  dim = j;
-                  break;
-                }
-              }
-              break;
-            }
-          }
-        }
-      }
-#endif
       newOp = triton::cpu::MakeDynamicRangeOp::create(
           rewriter, makeRangeOp.getLoc(), newResultType,
           genericOp.getTileOffset(dim));
@@ -1534,6 +1454,12 @@ struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
           operandsToDrop.insert(i);
       }
     }
+
+    // NOTE: We do not update AxisKind here since we expect all added block args
+    // to be scalar at this point in the fusion. AxisKind will default to
+    // uninitialized. If a check fails in MakeRangeOp fusion (or another
+    // location where AxisKind is reference), we can support re-seeding AxisKind
+    // here.
     SmallVector<unsigned> sortedToDrop(operandsToDrop.begin(),
                                        operandsToDrop.end());
     llvm::sort(sortedToDrop, std::greater<unsigned>());
