@@ -9,9 +9,6 @@ fi
 : "${LLVM_BUILD_DIR:?LLVM_BUILD_DIR must be set to the triton LLVM build root directory (typically in ~/.triton/llvm/llvm-OSDISTRO-ARCH)}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-# GitHub actions workflows pull triton into the triton-npu plugin directory root
-TRITON_HOME="${TRITON_HOME:-"${REPO_ROOT}/triton"}"
-
 TRITON_VENV_DIR="${TRITON_VENV_DIR:-"$REPO_ROOT/.venv"}"
 # override TTMLIR venv with triton venv
 export TTMLIR_VENV_DIR="$TRITON_VENV_DIR"

@@ -11,14 +11,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-TRITON_HOME="${TRITON_HOME:-"$REPO_ROOT/../triton"}"
+TRITON_SRC_DIR="${TRITON_SRC_DIR:-"$REPO_ROOT/../triton"}"
 
-if [ ! -f "$TRITON_HOME/cmake/llvm-hash.txt" ]; then
-    echo "Expected $TRITON_HOME/cmake/llvm-hash.txt; set TRITON_HOME to your triton checkout."
+if [ ! -f "$TRITON_SRC_DIR/cmake/llvm-hash.txt" ]; then
+    echo "Expected $TRITON_SRC_DIR/cmake/llvm-hash.txt; set TRITON_SRC_DIR to your triton checkout."
     exit 1
 fi
 
-LLVM_SHA="$(cat "$TRITON_HOME/cmake/llvm-hash.txt")"
+LLVM_SHA="$(cat "$TRITON_SRC_DIR/cmake/llvm-hash.txt")"
 SHORT_SHA="${LLVM_SHA:0:8}"
 
 LLVM_WORK_DIR="${LLVM_WORK_DIR:-"$HOME/.triton/llvm-with-python-bindings"}"
@@ -26,7 +26,7 @@ LLVM_SRC_DIR="${LLVM_SRC_DIR:-"$LLVM_WORK_DIR/llvm-project"}"
 LLVM_BUILD_TREE="${LLVM_BUILD_TREE:-"$LLVM_WORK_DIR/build"}"
 LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-"$LLVM_WORK_DIR/llvm-${SHORT_SHA}-ubuntu-x64"}"
 
-TRITON_VENV_DIR="${TRITON_VENV_DIR:-"$TRITON_HOME/.venv"}"
+TRITON_VENV_DIR="${TRITON_VENV_DIR:-"$TRITON_SRC_DIR/.venv"}"
 if [ ! -x "$TRITON_VENV_DIR/bin/python" ]; then
     echo "No python interpreter found at $TRITON_VENV_DIR/bin/python; create the venv first."
     exit 1
@@ -86,7 +86,7 @@ echo "To rebuild triton against this LLVM (tt-mlir and triton-npu will pick it u
 echo "transitively), per triton/README.md:"
 echo
 echo "  export LLVM_BUILD_DIR=\"$LLVM_INSTALL_DIR\""
-echo "  cd \"$TRITON_HOME\""
+echo "  cd \"$TRITON_SRC_DIR\""
 echo "  LLVM_INCLUDE_DIRS=\$LLVM_BUILD_DIR/include \\"
 echo "    LLVM_LIBRARY_DIR=\$LLVM_BUILD_DIR/lib \\"
 echo "    LLVM_SYSPATH=\$LLVM_BUILD_DIR \\"
