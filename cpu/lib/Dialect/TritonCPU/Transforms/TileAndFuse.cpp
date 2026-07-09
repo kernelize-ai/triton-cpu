@@ -855,13 +855,6 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
     // TODO: should this be in the generic pattern?
     rewriter.setInsertionPointToStart(body);
 
-    auto resultType = cast<RankedTensorType>(makeRangeOp.getResult().getType());
-    const bool isNotTiled = llvm::all_of(
-        llvm::zip(tileShape, resultType.getShape()), [](auto pair) {
-          auto [t, s] = pair;
-          return t == s;
-        });
-
     auto axisKind = blockArgAxisMap->lookup(blockArg);
     LDBG("MakeRangeOp: " << makeRangeOp << " axis kind " << axisKind << "\n");
     auto axes = axisKind.getAxes();
@@ -873,6 +866,8 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
       // just fuse the existing op
       newOp = rewriter.clone(*op, mapping);
     } else {
+      auto resultType =
+          cast<RankedTensorType>(makeRangeOp.getResult().getType());
       auto newResultType =
           cast<RankedTensorType>(updateTensorType(resultType, tileShape));
       unsigned dim = axes.front();
