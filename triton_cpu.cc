@@ -71,15 +71,12 @@ void init_triton_cpu_passes(py::module_ &m) {
 void init_triton_cpu_passes_ttgpuir(py::module_ &m) {
   m.def(
       "add_accelerate_matmul",
-      [](mlir::PassManager &pm, bool optimizeBlockLayout,
-         bool canonicalizeKLoop) {
+      [](mlir::PassManager &pm, bool canonicalizeKLoop) {
         mlir::triton::cpu::TritonCPUAccelerateMatmulOptions opts;
-        opts.optimizeBlockLayout = optimizeBlockLayout;
         opts.canonicalizeKLoop = canonicalizeKLoop;
         pm.addPass(mlir::triton::cpu::createTritonCPUAccelerateMatmul(opts));
       },
-      py::arg("pm"), py::arg("optimize_block_layout") = false,
-      py::arg("canonicalize_k_loop") = false);
+      py::arg("pm"), py::arg("canonicalize_k_loop") = false);
   m.def(
       "add_coalesce",
       [](mlir::PassManager &pm, int maxVectorWidth) {
