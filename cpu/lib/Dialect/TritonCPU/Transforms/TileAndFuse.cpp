@@ -859,13 +859,19 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
         });
 
     auto axisKind = blockArgAxisMap->lookup(blockArg);
+    auto axes = axisKind.getAxes();
+    assert(axes.size() == 1 && "expected only one axis kind for make range op");
 
     IRMapping mapping;
     Operation *newOp;
-    if (isNotTiled) {
+    if (axes.front() == AxisKind::kContracted) {
       // just fuse the existing op
       newOp = rewriter.clone(*op, mapping);
     } else {
+#if 1
+      auto newResultType = updateTensorType(resultType, tileShape);
+      unsigned dim = axes.front();
+#else
       auto rank = tileShape.size();
       auto newResultType = updateTensorType(resultType, tileShape);
       auto sliceEncodingAttr =
@@ -935,6 +941,7 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
           }
         }
       }
+#endif 
       newOp = triton::cpu::MakeDynamicRangeOp::create(
           rewriter, makeRangeOp.getLoc(), newResultType,
           genericOp.getTileOffset(dim));
