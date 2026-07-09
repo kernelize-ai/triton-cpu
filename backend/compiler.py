@@ -215,6 +215,8 @@ class CPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
+        cpu.passes.ttcpuir.add_outline_dot_microkernel(pm)
+
         passes.convert.add_scf_to_cf(pm)
         cpu.passes.ttcpuir.add_allocate_shared_memory(pm)
         passes.convert.add_index_to_llvmir(pm)
