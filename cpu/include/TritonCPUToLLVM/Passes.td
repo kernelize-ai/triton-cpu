@@ -54,4 +54,12 @@ def SharedMemoryGlobalConversionCPU : Pass<"shared-memory-global-conversion-cpu"
     }];
 }
 
+def OutlineDotMicrokernel : Pass<"outline-dot-microkernel", "mlir::ModuleOp"> {
+    let summary = "Outline a matmul-shaped region into a callable microkernel";
+
+    let description = [{
+        Outlines a matmul-shaped region within a TritonCPU::GenericOp into a callable microkernel. Lifts the GenericOp into a no-inline MLIR FuncOp for lowering to LLVM alongside existing Triton/TritonCPU -> LLVM passes.
+    }];
+}
+
 #endif
