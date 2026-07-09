@@ -1767,6 +1767,38 @@ struct TritonCPUTileAndFusePass
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
       signalPassFailure();
     }
+
+    // Verify all transpose def-use chains are fused to make range; otherwise
+    // the tile extraction lowering will fail to slice in the correct dimension
+    WalkResult r = m.walk([&](cpu::GenericOp g) {
+      Block *body = &g.getBody().front();
+      for (auto [i, in] : llvm::enumerate(g.getIns())) {
+        if (!isa<RankedTensorType>(in.getType()))
+          continue;
+
+        BlockArgument tile = body->getArgument(g.getInsArgOffset() + i);
+        SetVector<Operation *> fwd;
+        getForwardSlice(tile, &fwd);
+        for (Operation *op : fwd)
+          if (auto t = dyn_cast<triton::TransOp>(op)) {
+            auto inTy = cast<RankedTensorType>(t.getSrc().getType());
+            auto order = t.getOrder();
+            for (unsigned j = 0; j < order.size(); ++j)
+              if ((unsigned)order[j] != j && inTy.getShape()[order[j]] > 1) {
+                g.emitError()
+                    << "Ins operand #" << i
+                    << " is transposed in-body over "
+                       "a tiled axis but was not fused to make_range; "
+                       "positional tile extraction would use the wrong "
+                       "induction variable";
+                return WalkResult::interrupt();
+              }
+          }
+      }
+      return WalkResult::advance();
+    });
+    if (r.wasInterrupted())
+      return signalPassFailure();
   }
 };
 
