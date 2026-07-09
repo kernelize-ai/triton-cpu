@@ -42,6 +42,10 @@ public:
     // vector size that we can use for the blocked layout.
     auto getVectorSizeForOperand =
         [](Value operand) -> std::optional<unsigned> {
+#if 1
+      // for investigating ARM SME, just force 16
+      return 16;
+#else
       if (!operand.getDefiningOp())
         return std::nullopt;
       if (auto cvt = dyn_cast<gpu::ConvertLayoutOp>(operand.getDefiningOp()))
@@ -61,6 +65,7 @@ public:
         return sizePerThread.back();
       }
       return std::nullopt;
+#endif
     };
 
     std::optional<unsigned> vectorSizeA = getVectorSizeForOperand(dotOp.getA());
