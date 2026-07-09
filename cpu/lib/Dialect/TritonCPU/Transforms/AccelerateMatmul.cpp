@@ -70,7 +70,6 @@ public:
       return failure();
     }
 
-    // TODO: both A and B? or just B? don't want to blow up the register use
     SmallVector<unsigned> newSizePerThread = {*vectorSizeA, *vectorSizeB};
     auto oldSizePerThread = blockedEncoding.getSizePerThread();
     if (llvm::equal(oldSizePerThread, newSizePerThread))
@@ -299,9 +298,7 @@ public:
     ModuleOp m = getOperation();
     mlir::RewritePatternSet patterns(context);
     constexpr int benefitDefault = 1;
-    if (optimizeBlockLayout) {
-      patterns.add<OptimizeBlockedLayout>(context, benefitDefault);
-    }
+    patterns.add<OptimizeBlockedLayout>(context, benefitDefault);
     if (canonicalizeKLoop) {
       patterns.add<CanonicalizeKLoop>(context, benefitDefault + 1);
     }
