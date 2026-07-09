@@ -193,6 +193,17 @@ AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
         }
         return AxisKind(localAxes);
       })
+      .Case<triton::gpu::ConvertLayoutOp>(
+          [&](triton::gpu::ConvertLayoutOp cvt) {
+            // trans + cvt can be fused in one step - check for cvt embedded in
+            // the trans op and propagate from the parent transpose if one
+            // exists
+            if (auto transOp = dyn_cast_or_null<triton::TransOp>(
+                    cvt.getSrc().getDefiningOp())) {
+              return propagateAxisKind(transOp, existing);
+            }
+            return existing;
+          })
 #if 1
       .Default([&](auto) {
         // propagate existing or unknown?
@@ -745,7 +756,8 @@ struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
       for (unsigned i = firstAddedBlockArgIndex;
            i < body->getArguments().size(); i++) {
         BlockArgument newBlockArg = body->getArgument(i);
-        (*blockArgAxisMap)[newBlockArg] = propagateAxisKind(op, existingKind);
+        if (isa<RankedTensorType>(newBlockArg.getType()))
+          (*blockArgAxisMap)[newBlockArg] = propagateAxisKind(op, existingKind);
       }
       blockArgAxisMap->erase(blockArg);
 
@@ -859,6 +871,7 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
         });
 
     auto axisKind = blockArgAxisMap->lookup(blockArg);
+    LDBG("MakeRangeOp: " << makeRangeOp << " axis kind " << axisKind << "\n");
     auto axes = axisKind.getAxes();
     assert(axes.size() == 1 && "expected only one axis kind for make range op");
 
@@ -869,8 +882,11 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
       newOp = rewriter.clone(*op, mapping);
     } else {
 #if 1
-      auto newResultType = updateTensorType(resultType, tileShape);
+      auto newResultType =
+          cast<RankedTensorType>(updateTensorType(resultType, tileShape));
       unsigned dim = axes.front();
+      assert(newResultType.getShape()[0] == genericOp.getTileShape()[dim] &&
+             "make_dynamic_range size disagrees with its induction-var axis");
 #else
       auto rank = tileShape.size();
       auto newResultType = updateTensorType(resultType, tileShape);
@@ -941,7 +957,7 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
           }
         }
       }
-#endif 
+#endif
       newOp = triton::cpu::MakeDynamicRangeOp::create(
           rewriter, makeRangeOp.getLoc(), newResultType,
           genericOp.getTileOffset(dim));
@@ -1728,9 +1744,24 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     mapping.map(oldBody.getArgument(accBodyArgPos), newGeneric.getIterArg(0));
 
     // other kept body args -> new body args
-    for (auto [newPos, entry] : llvm::enumerate(keptIns))
-      mapping.map(oldBody.getArgument(entry.oldBodyArgPos),
-                  newBody->getArgument(newGeneric.getInsArgOffset() + newPos));
+    for (auto [newPos, entry] : llvm::enumerate(keptIns)) {
+      BlockArgument oldBlockArg = oldBody.getArgument(entry.oldBodyArgPos);
+      BlockArgument newBlockArg =
+          newBody->getArgument(newGeneric.getInsArgOffset() + newPos);
+      mapping.map(oldBlockArg, newBlockArg);
+      // The K loop is only fused into the GenericOp when the GenericOp is the
+      // only non-terminator operation in the K loop body. If the GenericOp is
+      // the only operation, then other ops (loads, addptr, etc) should be fully
+      // fused, and in all example kernels the GenericOp only has scalar inputs.
+      // Any known axis kind op would need to have the axis map updated to add
+      // the newly added K tile induction var. Assert all block args are unknown
+      // for now, but lifting this assertion would not be difficult in the
+      // future if required.
+      assert(!(*blockArgAxisMap)[oldBlockArg].isKnown() &&
+             "expected all remapped block args to have unknown axis kind when "
+             "fusing tiled K loop");
+      (*blockArgAxisMap)[newBlockArg] = (*blockArgAxisMap)[oldBlockArg];
+    }
 
     // 6. clone body ops
     rewriter.setInsertionPointToStart(newBody);
@@ -1746,6 +1777,7 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
 
     for (Operation &op : oldBody.without_terminator())
       rewriter.clone(op, mapping);
+
     auto oldYield = cast<cpu::YieldOp>(oldBody.getTerminator());
     cpu::YieldOp::create(rewriter, oldYield.getLoc(),
                          mapping.lookup(oldYield.getValues()[0]));
@@ -1754,6 +1786,7 @@ struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
     rewriter.replaceOp(forOp, newGeneric.getResults());
     return success();
   }
+
   BlockArgAxisMap *blockArgAxisMap;
 };
 
