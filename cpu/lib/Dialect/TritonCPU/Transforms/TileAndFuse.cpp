@@ -162,14 +162,14 @@ AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
 
   ArrayRef<int32_t> resultAxes = existing.getAxes();
 
-  TypeSwitch<Operation *>(op)
+  return TypeSwitch<Operation *, AxisKind>(op)
       .Case<triton::TransOp>([&](triton::TransOp trans) {
         SmallVector<int32_t> localAxes(trans.getOrder().size(),
                                        AxisKind::kContracted);
         // permute result axes according to transpose
         for (auto [i, d] : llvm::enumerate(trans.getOrder()))
           localAxes[d] = resultAxes[i];
-        return AxisKind::meet(existing, AxisKind(localAxes));
+        return AxisKind(localAxes);
       })
       .Case<triton::ExpandDimsOp>([&](triton::ExpandDimsOp expandDims) {
         // drop the inserted axis as we traverse up the def-use chain
@@ -177,7 +177,9 @@ AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
         SmallVector<int32_t> localAxes(resultAxes.size() - 1);
         for (unsigned d = 0; d < localAxes.size(); ++d)
           localAxes[d] = resultAxes[d < expansionAxis ? d : d + 1];
-        return AxisKind::meet(existing, AxisKind(localAxes));
+        // expand dims adds an axis - drop the added axis completely, do not
+        // join w/ the existing AxisKind
+        return AxisKind(localAxes);
       })
       .Case<triton::BroadcastOp>([&](triton::BroadcastOp broadcast) {
         auto sourceTensorTy =
@@ -189,14 +191,20 @@ AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
           localAxes[d] =
               (sourceShape[d] == 1) ? AxisKind::kContracted : resultAxes[d];
         }
-        return AxisKind::meet(existing, AxisKind(localAxes));
+        return AxisKind(localAxes);
       })
+#if 1
+      .Default([&](auto) {
+        // propagate existing or unknown?
+        return existing;
+      });
+#else
       .Case<triton::MakeRangeOp>([&](triton::MakeRangeOp) {
         // no propagation - but maybe we should debug print here?
       });
-
   // default unknown?
   return existing;
+#endif
 }
 
 // Replace the shape of a RankedTensorType with tileShape, preserving element
@@ -851,8 +859,6 @@ struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
         });
 
     auto axisKind = blockArgAxisMap->lookup(blockArg);
-    // llvm::errs() << "make range op: " << makeRangeOp << "\n";
-    // llvm::errs() << "make range axis kind: " << axisKind << "\n";
 
     IRMapping mapping;
     Operation *newOp;
