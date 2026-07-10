@@ -672,28 +672,13 @@ struct WrapConvertLayoutOp
     if (ArrayRef(*requiredTileShape) == ArrayRef(defaultTileShape))
       return failure();
 
-    // default to the conservative choice
-    SmallVector<int32_t> tileShape = blockShape;
-
-    auto srcBlockedEnc =
-        dyn_cast<gpu::BlockedEncodingAttr>(srcTy.getEncoding());
-    auto dstBlockedEnc =
-        dyn_cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding());
-    if (srcBlockedEnc && dstBlockedEnc &&
-        srcBlockedEnc.getOrder() == dstBlockedEnc.getOrder()) {
-      // if both src and dst have blocked encoding and order matches we can
-      // compute the tile size using max(srcSizePerThread, dstSizePerThread).
-      // Note that this assumes other layout parameters are held to 1, which is
-      // true for CPU. Maybe we should assert it?
-
-      tileShape.clear();
-      for (auto [srcSPT, dstSPT] :
-           llvm::zip(srcBlockedEnc.getSizePerThread(),
-                     dstBlockedEnc.getSizePerThread())) {
-        tileShape.push_back(std::max((int32_t)srcSPT, (int32_t)dstSPT));
-      }
-    }
+    SmallVector<int32_t> tileShape = *requiredTileShape;
     assert(tileShape.size() == blockShape.size());
+    // clamp the max tile shape size to the block shape (tensor shape)
+    for (auto [i, t] : llvm::enumerate(tileShape)) {
+      if (t > blockShape[i])
+        tileShape[i] = blockShape[i];
+    }
 
     SmallVector<TiledInput> ins;
     for (auto value : cvtOp->getOperands()) {
