@@ -324,7 +324,7 @@ if __name__ == "__main__":
 
         validate(32, 32, 32, dtype)
         validate(64, 32, 32, dtype)
-        validate(64, 64, 32, dtype)
+        validate(1024, 1024, 256, dtype)
         
         """
         validate(8192, 8192, args.K_range[0], dtype)
