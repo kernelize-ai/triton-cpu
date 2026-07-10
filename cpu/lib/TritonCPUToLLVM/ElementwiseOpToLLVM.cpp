@@ -154,5 +154,8 @@ void mlir::triton::cpu::populateElementwiseOpToLLVMPatterns(
   POPULATE_OP(arith::ExtFOp, LLVM::FPExtOp);
   POPULATE_OP(arith::TruncFOp, LLVM::FPTruncOp);
 
+  POPULATE_OP(triton::PreciseDivFOp, LLVM::FDivOp);
+  POPULATE_OP(triton::PreciseSqrtOp, LLVM::SqrtOp);
+
 #undef POPULATE_OP
 }
