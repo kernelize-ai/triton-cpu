@@ -181,6 +181,17 @@ AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
         // join w/ the existing AxisKind
         return AxisKind(localAxes);
       })
+      .Case<triton::ReshapeOp>([&](triton::ReshapeOp reshape) {
+        // only propagate if the reshape op is expanding tensor dims
+        if (!reshape.getExpandDimsAxis().has_value())
+          return existing;
+
+        unsigned expansionAxis = *reshape.getExpandDimsAxis();
+        SmallVector<int32_t> localAxes(resultAxes.size() - 1);
+        for (unsigned d = 0; d < localAxes.size(); ++d)
+          localAxes[d] = resultAxes[d < expansionAxis ? d : d + 1];
+        return AxisKind(localAxes);
+      })
       .Case<triton::BroadcastOp>([&](triton::BroadcastOp broadcast) {
         auto sourceTensorTy =
             cast<RankedTensorType>(broadcast.getSrc().getType());
@@ -971,15 +982,19 @@ struct FuseBroadcastIntoGeneric : GenericOperandFusionPattern {
   }
 };
 
+// fuses dimension expansion via expand dims or reshape
 struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
   using GenericOperandFusionPattern::GenericOperandFusionPattern;
 
   bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
                    BlockArgument blockarg) const override {
     auto expandDims = dyn_cast_or_null<triton::ExpandDimsOp>(op);
-    if (!expandDims)
-      return false;
-    return true;
+    if (expandDims)
+      return true;
+    auto reshape = dyn_cast_or_null<triton::ReshapeOp>(op);
+    if (reshape && reshape.getExpandDimsAxis().has_value())
+      return true;
+    return false;
   }
 
   Value fuseOperand(Block *body, BlockArgument blockArg,
@@ -989,8 +1004,17 @@ struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
     auto tiledType = cast<RankedTensorType>(blockArg.getType());
     SmallVector<int32_t> tileShape(tiledType.getShape());
 
-    auto expandDimsOp = cast<triton::ExpandDimsOp>(op);
-    unsigned axis = expandDimsOp.getAxis();
+    auto getAxis = [](Operation *op) -> unsigned {
+      if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+        return expandDimsOp.getAxis();
+      } else {
+        auto reshapeOp = cast<triton::ReshapeOp>(op);
+        auto expandDimsAxis = reshapeOp.getExpandDimsAxis();
+        assert(expandDimsAxis.has_value());
+        return *expandDimsAxis;
+      }
+    };
+    unsigned axis = getAxis(op);
     assert(tileShape[axis] == 1 &&
            "expected expand dims axis tile shape to be 1");
 
@@ -1001,21 +1025,29 @@ struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
       sourceTileShape.push_back(t);
     }
 
-    RankedTensorType sourceTensorType =
-        cast<RankedTensorType>(expandDimsOp.getSrc().getType());
+    auto getSrc = [](Operation *op) {
+      if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+        return expandDimsOp.getSrc();
+      } else {
+        auto reshapeOp = cast<triton::ReshapeOp>(op);
+        return reshapeOp.getSrc();
+      }
+    };
+    Value src = getSrc(op);
+
+    RankedTensorType sourceTensorType = cast<RankedTensorType>(src.getType());
 
     IRMapping mapping;
     // 1. map src operand to block args
-    newIns.push_back(expandDimsOp.getSrc());
-    mapping.map(
-        expandDimsOp.getSrc(),
-        body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
-                          expandDimsOp.getSrc().getLoc()));
+    newIns.push_back(src);
+    mapping.map(src, body->addArgument(
+                         updateTensorType(sourceTensorType, sourceTileShape),
+                         src.getLoc()));
 
     // 2. clone expand dims
     rewriter.setInsertionPointToStart(body);
     Operation *newExpandDims = rewriter.clone(*op, mapping);
-    Type origResultType = expandDimsOp.getResult().getType();
+    Type origResultType = newExpandDims->getResult(0).getType();
     newExpandDims->getResult(0).setType(
         updateTensorType(origResultType, tileShape));
 
@@ -1767,6 +1799,38 @@ struct TritonCPUTileAndFusePass
     if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
       signalPassFailure();
     }
+
+    // Verify all transpose def-use chains are fused to make range; otherwise
+    // the tile extraction lowering will fail to slice in the correct dimension
+    WalkResult r = m.walk([&](cpu::GenericOp g) {
+      Block *body = &g.getBody().front();
+      for (auto [i, in] : llvm::enumerate(g.getIns())) {
+        if (!isa<RankedTensorType>(in.getType()))
+          continue;
+
+        BlockArgument tile = body->getArgument(g.getInsArgOffset() + i);
+        SetVector<Operation *> fwd;
+        getForwardSlice(tile, &fwd);
+        for (Operation *op : fwd)
+          if (auto t = dyn_cast<triton::TransOp>(op)) {
+            auto inTy = cast<RankedTensorType>(t.getSrc().getType());
+            auto order = t.getOrder();
+            for (unsigned j = 0; j < order.size(); ++j)
+              if ((unsigned)order[j] != j && inTy.getShape()[order[j]] > 1) {
+                g.emitError()
+                    << "Ins operand #" << i
+                    << " is transposed in-body over "
+                       "a tiled axis but was not fused to make_range; "
+                       "positional tile extraction would use the wrong "
+                       "induction variable";
+                return WalkResult::interrupt();
+              }
+          }
+      }
+      return WalkResult::advance();
+    });
+    if (r.wasInterrupted())
+      return signalPassFailure();
   }
 };
 
