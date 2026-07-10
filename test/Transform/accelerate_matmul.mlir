@@ -12,7 +12,8 @@
 // CHECK:           tt.splat [[IV]]
 // CHECK:           arith.muli
 // CHECK:           tt.addptr
-// CHECK:           tt.dot {{.*}}[[ACC]]
+// CHECK:           [[C:%[^ ]+]] = ttg.convert_layout [[ACC]]
+// CHECK:           tt.dot {{.*}}[[C]]
 // CHECK:           scf.yield
 
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 1], warpsPerCTA = [1, 1], order = [1, 0]}>
