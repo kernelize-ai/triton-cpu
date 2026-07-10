@@ -47,7 +47,6 @@ test_scaled_dot
 test_dot3d
 test_dot_max_num_imprecise_acc
 test_permute
-test_reshape
 test_clamp
 test_propagate_nan
 test_if_return
