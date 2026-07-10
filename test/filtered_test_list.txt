@@ -26,12 +26,10 @@ test_pointer_arguments
 test_trans_reshape
 test_nested_if_else_return
 test_constexpr_if_return
-test_constexpr_assignment
 test_gather
 test_poison_return
 test_unroll_attr
 test_zero_strided_tensors
-test_dtype_tensor
 test_libdevice_rint
 test_tensor_member
 test_short_circuiting

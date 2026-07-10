@@ -234,7 +234,7 @@ def make_launcher(constants, signature, shared_mem_size, warp_size):
 
     # add launch size, launch id, shared memory ptr, and cpu barrier
     kernel_params.extend(["launch_sz", "launch_id", "shared_mem_ptr", "cpu_barrier"])
-    arg_types += ', '
+    arg_types += ' ' if len(arg_types) == 0 else ', '
     arg_types += ', '.join(["int32_t*", "int32_t*", "int8_t*", "void*"])
 
     src = f"""
@@ -244,6 +244,7 @@ def make_launcher(constants, signature, shared_mem_size, warp_size):
 #include <boost/fiber/all.hpp>
 
 #include <stdalign.h>
+#include <stdint.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
 
