@@ -110,6 +110,8 @@ struct ConvertTritonCPUToLLVM
 
     cpu::populateElementwiseOpToLLVMPatterns(
         typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
+    mlir::triton::populateClampFOpToLLVMPattern(
+        typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
 
     cpu::populateLoadStoreOpToLLVMPatterns(typeConverter, targetInfo, patterns,
                                            axisInfoAnalysis, benefit);
