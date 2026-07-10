@@ -63,6 +63,15 @@ static Value convertFp32ToBf16(Location loc,
   return b.bitcast(truncated, bf16_ty);
 }
 
+Value convertBf16ToFp32(Location loc, ConversionPatternRewriter &rewriter,
+                        const Value &v) {
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto as_int16 = b.bitcast(v, i16_ty);
+  auto as_int32 = b.zext(i32_ty, as_int16);
+  auto shifted = b.shl(i32_ty, as_int32, b.i32_val(16));
+  return b.bitcast(shifted, f32_ty);
+}
+
 static SmallVector<Value> S8_to_Bf16(Location loc,
                                      ConversionPatternRewriter &rewriter,
                                      const SmallVector<Value> &v) {
@@ -102,6 +111,24 @@ struct SIToFPOpConversion
   }
 };
 
+struct FPToSIOpConversion
+    : ElementwiseOpConversionBase<arith::FPToSIOp, FPToSIOpConversion> {
+  using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
+
+  SmallVector<Value> createDestOps(arith::FPToSIOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    auto inElemTy = getElementTypeOrSelf(op.getIn());
+    if (inElemTy.isBF16()) {
+      auto value = convertBf16ToFp32(loc, rewriter, operands[0][0]);
+      return {LLVM::FPToSIOp::create(rewriter, loc, elemTy, value)};
+    } else {
+      return {LLVM::FPToSIOp::create(rewriter, loc, elemTy, operands[0][0])};
+    }
+  }
+};
+
 } // namespace
 
 void mlir::triton::cpu::populateElementwiseOpToLLVMPatterns(
@@ -111,6 +138,7 @@ void mlir::triton::cpu::populateElementwiseOpToLLVMPatterns(
 
   patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
 
   mlir::triton::populateElementwiseOpToLLVMPatterns(
       typeConverter, patterns, axisInfoAnalysis, targetInfo, benefit);
