@@ -29,6 +29,11 @@ public:
            "operands to `tt.dot` have mismatched sizes");
     Value accum = c;
     Type tgtTy = accum.getType();
+
+    auto fastMathFlag = LLVM::FastmathFlagsAttr::get(
+        builder.getContext(),
+        LLVM::FastmathFlags::reassoc | LLVM::FastmathFlags::contract);
+
     for (auto it = llvm::zip(a, b).begin(); it != llvm::zip(a, b).end(); ++it) {
       Value aElem = std::get<0>(*it);
       Value bElem = std::get<1>(*it);
@@ -49,7 +54,8 @@ public:
       }
 
       // Multiply and accumulate.
-      accum = LLVM::FMAOp::create(builder, loc, tgtTy, aElem, bElem, accum);
+      accum = LLVM::FMAOp::create(builder, loc, tgtTy, aElem, bElem, accum,
+                                  fastMathFlag);
     }
     return accum;
   }
