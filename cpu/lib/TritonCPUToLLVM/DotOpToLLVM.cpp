@@ -49,8 +49,7 @@ public:
       }
 
       // Multiply and accumulate.
-      auto mul = LLVM::FMulOp::create(builder, loc, tgtTy, aElem, bElem);
-      accum = LLVM::FAddOp::create(builder, loc, tgtTy, accum, mul);
+      accum = LLVM::FMAOp::create(builder, loc, tgtTy, aElem, bElem, accum);
     }
     return accum;
   }
