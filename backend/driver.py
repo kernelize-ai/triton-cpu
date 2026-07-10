@@ -5,19 +5,21 @@ import subprocess
 import tempfile
 import time
 import platform
-import importlib
+import importlib.resources
 from pathlib import Path
 
+import triton.backends.cpu.knobs as cpu_knobs
 from triton.runtime.build import compile_module_from_src
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 
 # for locating libTritonCPURuntime
-try:
-    _triton_C_dir = importlib.resources.files(triton).joinpath("_C")
-except AttributeError:
-    # resources.files() doesn't exist for Python < 3.9
-    _triton_C_dir = importlib.resources.path(triton, "_C").__enter__()
+_triton_C_dir = str(importlib.resources.files(triton).joinpath("_C"))
+
+
+def _driver_use_nexus() -> bool:
+    """Match compiler.py Nexus gating."""
+    return cpu_knobs.cpu.use_nexus
 
 
 @functools.lru_cache()
@@ -27,19 +29,24 @@ def is_macos():
 
 @functools.lru_cache()
 def external_openmp_path():
-    return os.environ.get("TRITON_LOCAL_LIBOMP_PATH", "/opt/homebrew/opt/libomp/")
+    return cpu_knobs.cpu.libomp_path
 
 
 @functools.lru_cache()
 def external_boost_path():
-    return os.environ.get("TRITON_LOCAL_BOOST_PATH", "/opt/homebrew")
+    return cpu_knobs.cpu.boost_path
 
 
-dirname = os.path.dirname(os.path.realpath(__file__))
-include_dirs = [os.path.join(dirname, "include")] + [
-    os.path.join(external_openmp_path(), "include") if is_macos() else []
-] + [os.path.join(external_boost_path(), "include")]
-libdevice_dir = os.path.join(dirname, "lib")
+@functools.lru_cache()
+def include_dirs():
+    dirname = os.path.dirname(os.path.realpath(__file__))
+
+    include_dirs = [os.path.join(dirname, "include")] + [os.path.join(external_boost_path(), "include")]
+    if is_macos():
+        include_dirs.append(os.path.join(external_openmp_path(), "include"))
+    return include_dirs
+
+
 libraries = ["boost_fiber", "boost_context"]
 
 
@@ -56,8 +63,8 @@ def system_ccflags():
 def library_dirs():
     lib_dirs = [_triton_C_dir]
     if is_macos():
-        lib_dirs.extend([os.path.join(external_openmp_path(), "lib")])
-        lib_dirs.extend([os.path.join(external_boost_path(), "lib")])
+        lib_dirs.extend([os.fspath(os.path.join(external_openmp_path(), "lib"))])
+        lib_dirs.extend([os.fspath(os.path.join(external_boost_path(), "lib"))])
     return lib_dirs
 
 
@@ -69,6 +76,9 @@ class CpuUtils(object):
         return cls.instance
 
     def __init__(self):
+        pass
+
+    def unload_module(self, lib):
         pass
 
     def load_binary(self, name, kernel, shared_mem, device):
@@ -88,6 +98,43 @@ class CpuUtils(object):
         return {
             "max_num_regs": os.cpu_count() * 4, "max_shared_mem": 1024 * 1024 * 1024, "multiprocessor_count":
             os.cpu_count(), "warpSize": 1
+        }
+
+
+class NexusCpuUtils:
+    """
+    Load Triton CPU kernel shared libraries through Nexus (``Device.load_library``).
+    Returns ``(library, kernel, n_regs, n_spills, n_max_threads)`` so ``CompiledKernel``
+    can treat ``function`` as a Nexus ``Kernel`` handle for the Nexus launcher.
+    """
+
+    def unload_module(self, lib):
+        # Nexus libraries are reference-counted; nothing to dlclose from Python.
+        pass
+
+    def load_binary(self, name, kernel, shared_mem, device):
+        import knexus
+        device_idx = cpu_knobs.cpu.nexus_device_id
+        rt = knexus.get_runtime("cpu")
+        dev = rt.get_device(device_idx)
+        # Keep temp file persistent: library may be JIT-compiled lazily on first run.
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".so", delete=False) as f:
+            f.write(kernel)
+            f.flush()
+            os.fsync(f.fileno())
+            os.stat(f.name)
+            library = dev.load_library(f.name)
+        if not library:
+            raise RuntimeError("Nexus: load_library failed (empty library handle)")
+        kern = library.get_kernel(name)
+        return (library, kern, 1, 0, 2**12)
+
+    def get_device_properties(self, *args):
+        return {
+            "max_num_regs": os.cpu_count() * 4,
+            "max_shared_mem": 1024 * 1024 * 1024,
+            "multiprocessor_count": os.cpu_count(),
+            "warpSize": cpu_knobs.cpu.warp_size,
         }
 
 
@@ -113,7 +160,7 @@ def ty_to_cpp(ty):
     }[ty]
 
 
-def make_launcher(constants, signature, shared_mem_size):
+def make_launcher(constants, signature, shared_mem_size, warp_size):
 
     def _flatten_signature(sig, output):
         # Flatten tuples
@@ -187,7 +234,7 @@ def make_launcher(constants, signature, shared_mem_size):
 
     # add launch size, launch id, shared memory ptr, and cpu barrier
     kernel_params.extend(["launch_sz", "launch_id", "shared_mem_ptr", "cpu_barrier"])
-    arg_types += ', '
+    arg_types += ' ' if len(arg_types) == 0 else ', '
     arg_types += ', '.join(["int32_t*", "int32_t*", "int8_t*", "void*"])
 
     src = f"""
@@ -197,10 +244,14 @@ def make_launcher(constants, signature, shared_mem_size):
 #include <boost/fiber/all.hpp>
 
 #include <stdalign.h>
+#include <stdint.h>
 
 typedef void(*kernel_ptr_t)({arg_types});
 
 static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int gridZ, kernel_ptr_t kernel_ptr{', ' + arg_decls if len(arg_decls) > 0 else ''}) {{
+    assert(num_warps == 1); // only one warp supported per block, currently
+
+    const int32_t warp_size = {warp_size};
     unsigned N = gridX * gridY * gridZ;
     const int ompMaxThreads = omp_get_max_threads();
     const int max_threads = N < ompMaxThreads ? N : ompMaxThreads;
@@ -211,7 +262,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
     if (shared_memory > 0) {{
         shared_memory_aligned_per_team = (shared_memory + 63) & ~63u;
         // allocate scratch for reductions
-        shared_memory_aligned_per_team += 64 * num_warps;
+        shared_memory_aligned_per_team += 64 * warp_size;
         unsigned shared_memory_aligned_total = shared_memory_aligned_per_team * max_threads;
         global_smem = (unsigned char*)aligned_alloc(64, shared_memory_aligned_total);
         assert(global_smem);
@@ -220,7 +271,7 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
     unsigned consecutive_blocks = (N + max_threads - 1) / max_threads;
 
-    int32_t launch_sz[] = {{gridX, gridY, gridZ, num_warps, 1, 1}};
+    int32_t launch_sz[] = {{gridX, gridY, gridZ, warp_size, 1, 1}};
 
     boost::fibers::use_scheduling_algorithm<boost::fibers::algo::shared_work>();
 
@@ -232,15 +283,15 @@ static void _launch(int num_warps, int shared_memory, int gridX, int gridY, int 
 
         const unsigned run_end = (block_start + consecutive_blocks < N) ? (block_start + consecutive_blocks) : N;
         std::vector<boost::fibers::fiber> fibers;
-        fibers.reserve(num_warps);
+        fibers.reserve(warp_size);
 
-        boost::fibers::barrier barrier(num_warps);
+        boost::fibers::barrier barrier(warp_size);
         void *cpu_barrier = &barrier;
 
-        for (int warp_id = 0; warp_id < num_warps; warp_id++) {{
-            fibers.emplace_back([&, block_start, run_end, warp_id]() {{
+        for (int lane_id = 0; lane_id < warp_size; lane_id++) {{
+            fibers.emplace_back(std::allocator_arg, boost::fibers::fixedsize_stack(8 * 1024 * 1024), [&, block_start, run_end, lane_id]() {{
                 int32_t launch_id[] = {{
-                    (int32_t)block_start, (int32_t)run_end, warp_id, 0, 0
+                    (int32_t)block_start, (int32_t)run_end, lane_id, 0, 0
                 }};
                 (*kernel_ptr)({', '.join(kernel_params) if len(kernel_params) > 0 else ''});
             }});
@@ -387,15 +438,63 @@ class CPULauncher(object):
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
-        src = make_launcher(constants, signature, metadata.shared)
-        os.environ["CC"] = "g++"
+        src = make_launcher(constants, signature, metadata.shared, metadata.warp_size)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
-                                      include_dirs=include_dirs, libraries=libraries, ccflags=system_ccflags())
-        os.environ.pop("CC")
+                                      include_dirs=include_dirs(), libraries=libraries, ccflags=system_ccflags(),
+                                      language="c++")
         self.launch = mod.launch
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
         self.launch(gridX, gridY, gridZ, stream, function, *args)
+
+
+class NexusCPULauncher:
+    """
+    Python launcher for Nexus CPU: no generated C++ extension; uses ``Schedule`` /
+    ``Command`` (Core API: ``Device`` → ``Library`` → ``Kernel`` → ``Schedule`` → ``Command``).
+    ``function`` is the Nexus ``Kernel`` object returned from :meth:`NexusCpuUtils.load_binary`.
+    """
+
+    def __init__(self, src, metadata):
+        self.src = src
+        self.metadata = metadata
+
+    def __call__(self, gridX, gridY, gridZ, stream, kernel_handle, *args):
+        import knexus
+
+        packed_metadata = args[0]
+        launch_metadata = args[1]
+        enter_hook = args[2]
+        exit_hook = args[3]
+        kernel_args = args[4:]
+
+        num_warps = getattr(self.metadata, "num_warps", 1)
+        warp_size = getattr(self.metadata, "warp_size", cpu_knobs.cpu.warp_size)
+        shared_mem = packed_metadata[2] if packed_metadata is not None else self.metadata.shared
+
+        device_idx = cpu_knobs.cpu.nexus_device_id
+
+        if enter_hook is not None:
+            enter_hook(launch_metadata)
+
+        rt = knexus.get_runtime("cpu")
+        dev = rt.get_device(device_idx)
+        if not hasattr(self, "sched"):
+            self.sched = dev.create_schedule()
+        if not hasattr(self, "cmd"):
+            self.cmd = self.sched.create_command(kernel_handle)
+        runtime_arg_idx = 0
+        for (_, ty), val in zip(self.src.signature.items(), kernel_args):
+            if ty == "constexpr":
+                continue
+            st = self.cmd.set_arg(runtime_arg_idx, val)
+            runtime_arg_idx += 1
+
+        block_x = max(1, int(warp_size) * int(num_warps))
+        st = self.cmd.finalize([int(gridX), int(gridY), int(gridZ)], [block_x, 1, 1], int(shared_mem))
+        self.sched.run()
+        if exit_hook is not None:
+            exit_hook(launch_metadata)
 
 
 class CPUDeviceInterface:
@@ -463,10 +562,17 @@ class CPUDriver(DriverBase):
             return False
 
     def __init__(self):
-        self.utils = CpuUtils()
         import torch
-        self.get_current_stream = lambda idx: torch.cpu.Stream()
-        self.launcher_cls = CPULauncher
+
+        if _driver_use_nexus():
+            self.utils = NexusCpuUtils()
+            self.launcher_cls = NexusCPULauncher
+            # Nexus launch path creates its own stream inside ``Schedule.run``; stream handle from Torch is unused.
+            self.get_current_stream = lambda idx: None
+        else:
+            self.utils = CpuUtils()
+            self.launcher_cls = CPULauncher
+            self.get_current_stream = lambda idx: torch.cpu.Stream()
 
     def get_device_interface(self):
         return CPUDeviceInterface()
@@ -479,7 +585,7 @@ class CPUDriver(DriverBase):
 
     def get_current_target(self):
         capability = "cpu"
-        warp_size = 1
+        warp_size = cpu_knobs.cpu.warp_size
         return GPUTarget("cpu", capability, warp_size)
 
     def get_active_torch_device(self):

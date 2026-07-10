@@ -24,6 +24,11 @@ void populateFuncOpConversionPattern(LLVMTypeConverter &typeConverter,
                                      const TargetInfo &targetInfo,
                                      PatternBenefit benefit);
 
+void populateGenericOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                     RewritePatternSet &patterns,
+                                     const TargetInfo &targetInfo,
+                                     PatternBenefit benefit);
+
 void populateGPUtoLLVMConversionPatterns(LLVMTypeConverter &converter,
                                          const TargetInfo &targetInfo,
                                          RewritePatternSet &patterns,
@@ -34,6 +39,11 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        RewritePatternSet &patterns,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit);
+
+void populateMakeDynamicRangeOpToLLVMPattern(LLVMTypeConverter &typeConverter,
+                                             const TargetInfoBase &targetInfo,
+                                             RewritePatternSet &patterns,
+                                             PatternBenefit benefit);
 
 } // namespace cpu
 } // namespace triton

@@ -57,8 +57,8 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
 
 // -----
 
-#blocked4 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [1], warpsPerCTA = [8], order = [0]}>
-module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 1 : i32} {
+#blocked4 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [8], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 8 : i32} {
   // MASKED-OP-LABEL: reduce_xor_max
   tt.func @reduce_xor_max(%arg0: tensor<8xf32, #blocked4>) {
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({

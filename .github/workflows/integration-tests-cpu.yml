@@ -13,7 +13,7 @@ permissions:
 jobs:
   integration-tests-cpu:
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       matrix:
         runner: ${{ fromJson(inputs.matrix) }}
@@ -30,7 +30,7 @@ jobs:
       - name: Install ccache and boost
         run: sudo apt-get update && sudo apt-get install -y ccache libboost-fiber-dev
       - name: Checkout CPU Plugin
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Fetch Triton upstream Commit Hash
         shell: bash
         run: |
@@ -38,7 +38,7 @@ jobs:
           echo "Found Triton commit hash: ${TRITON_COMMIT_HASH}"
           echo "triton_commit_hash=${TRITON_COMMIT_HASH}" >> ${GITHUB_ENV}
       - name: Checkout Triton upstream repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: triton-lang/triton
           path: triton
@@ -63,7 +63,7 @@ jobs:
           echo "triton=$(cat $triton_file | cut -c 1-8)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache build dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # Note that we cannot use environment variables here given there is
           # no shell to interpret them in the paths.
@@ -86,7 +86,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install torch==2.9.0 --index-url https://download.pytorch.org/whl/test/cpu
+          python -m pip install knexus
           pip freeze
+      - name: Print CPU information
+        run: |
+          python -m pip install py-cpuinfo
+          cpuinfo
       - name: Install Triton
         working-directory: ./triton
         run: |
@@ -96,6 +101,20 @@ jobs:
           MAX_JOBS=8 TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
       - name: CCache Stats
         run: ccache --print-stats
+
+      - name: Run local tests
+        working-directory: ./triton
+        run: python -m pytest ../python/test --ignore=../python/test/nexus
+
+      - name: Run CPU-specific tutorial clones
+        working-directory: ./triton
+        env:
+          TRITON_DEFAULT_BACKEND: "cpu"
+        run: |
+            TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python ../python/tutorials/02-fused-softmax.py
+            TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python ../python/tutorials/03-matrix-multiplication.py
+
+      # Triton tests.
       - name: Run lit tests
         working-directory: ./triton
         run: |
@@ -105,22 +124,29 @@ jobs:
       - name: Run python tests on CPU
         working-directory: ./triton
         run: |
-          TRITON_CPU_NUM_WARPS=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr or test_dot[) and not test_reduce1d[1-sum-float16-512]"
+          pip install -r python/test-requirements.txt
+
+          skip_expr=$(python3 -c "tests = [l.strip() for l in open('../test/filtered_test_list.txt') if l.strip()]; print(' or '.join(tests))")
+
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest -n 4 --device "cpu" python/test/unit/language/test_core.py -k "not (${skip_expr})"
+
+          TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr) and not test_reduce1d[1-sum-float16-512]"
+
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
-        run: |
-          python python/tutorials/01-vector-add.py
-      - name: Run tutorial 03 on CPU
-        working-directory: .
+        run: python python/tutorials/01-vector-add.py
+      - name: Run fused-attention tests
+        working-directory: ./triton
         env:
           TRITON_DEFAULT_BACKEND: "cpu"
         run: |
-          python python/tutorials/03-matrix-multiplication.py
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python -m pytest ../python/tutorials/06-fused-attention.py
+
       - name: Run gluon tests
         working-directory: ./triton
         run: |
-          TRITON_CPU_NUM_WARPS=4 python -m pytest --device "cpu" python/test/gluon/test_core.py -k "test_copy_kernel"
+          TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/gluon/test_core.py -k "test_copy_kernel"
       - name: Run interpreter tests
         working-directory: ./triton
         if: false
@@ -128,11 +154,18 @@ jobs:
       - name: Run regression tests
         working-directory: ./triton
         if: false
-        run: |
-          make test-regression
+        run: make test-regression
       - name: Run C++ unittests
         working-directory: ./triton
         run: make test-cpp
+
+      # Nexus-backed CPU path (separate process from local tests above)
+      - name: Run Nexus tests
+        working-directory: ./triton
+        env:
+          NEXUS_LOG_ENABLE: "1"
+        run: python -m pytest ../python/test/nexus
+
       - name: Inspect cache directories
         run: |
           mkdir -p ~/.triton
@@ -140,3 +173,11 @@ jobs:
 
           mkdir -p ~/.ccache
           du -h -d 1 ~/.ccache
+
+      - name: Upload kernel artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernels
+          path: ~/.triton/cache
+          retention-days: 14

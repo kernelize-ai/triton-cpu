@@ -156,9 +156,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     LDBG("Lower LoadOp for " << ptr);
 
     // adaptor values
-    assert(!isTensorPointerType(ptr.getType()) &&
-           "Cannot convert load with a tensor pointer into LLVM; "
-           "this case should be transformed to normal load before lowering");
     Value llPtr = adaptor.getPtr();
     Value llMask = adaptor.getMask();
     Value llOther = adaptor.getOther();
@@ -184,13 +181,13 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
                        << "\n";
     }
     // Get the LLVM values for pointers
-    auto ptrElems = unpackLLElements(loc, llPtr, rewriter);
+    auto ptrElems = unpackTensorElements(loc, llPtr, rewriter, ptr.getType());
     assert(ptrElems.size() == numElems);
 
     // Get the LLVM values for mask
     SmallVector<Value> maskElems;
     if (llMask) {
-      maskElems = unpackLLElements(loc, llMask, rewriter);
+      maskElems = unpackTensorElements(loc, llMask, rewriter, mask.getType());
       assert(maskElems.size() == numElems);
     }
 
@@ -208,7 +205,8 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     }
     SmallVector<Value> otherElems;
     if (other) {
-      otherElems = unpackLLElements(loc, llOther, rewriter);
+      otherElems =
+          unpackTensorElements(loc, llOther, rewriter, other.getType());
     }
 
     // vectorized iteration through all the pointer/mask/other elements
@@ -262,10 +260,9 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       }
     }
 
-    Type llvmResultStructTy = getTypeConverter()->convertType(op.getType());
     LDBG("loadedVals Size = " << loadedVals.size());
-    Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
-                                        rewriter, llvmResultStructTy);
+    Value resultStruct = packTensorElements(loc, getTypeConverter(), loadedVals,
+                                            rewriter, op.getType());
 
     rewriter.replaceOp(op, {resultStruct});
     return success();
@@ -296,9 +293,6 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
     LDBG("Lower StoreOp for " << ptr);
 
     // adaptor values
-    assert(!isTensorPointerType(ptr.getType()) &&
-           "Cannot convert store with a tensor pointer into LLVM; "
-           "this case should be transformed to normal store before lowering");
     Value llPtr = adaptor.getPtr();
     Value llValue = adaptor.getValue();
     Value llMask = adaptor.getMask();
@@ -311,15 +305,16 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
     unsigned vec = getVectorSize(ptr);
     unsigned elemsPerThread = getTotalElemsPerThread(ptr.getType());
 
-    auto ptrElems = unpackLLElements(loc, llPtr, rewriter);
-    auto valueElems = unpackLLElements(loc, llValue, rewriter);
+    auto ptrElems = unpackTensorElements(loc, llPtr, rewriter, ptr.getType());
+    auto valueElems =
+        unpackTensorElements(loc, llValue, rewriter, value.getType());
     assert(ptrElems.size() == valueElems.size());
 
     unsigned vecOrig = vec;
     SmallVector<Value> maskElems;
     if (llMask) {
       Value mask = op.getMask();
-      maskElems = unpackLLElements(loc, llMask, rewriter);
+      maskElems = unpackTensorElements(loc, llMask, rewriter, mask.getType());
       assert(valueElems.size() == maskElems.size());
 
       unsigned maskAlign = getMaskAlignment(mask);

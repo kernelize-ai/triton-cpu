@@ -77,7 +77,8 @@ static void pickDescriptorLoadStoreLayout(
 namespace impl {
 
 static unsigned
-getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
+getNumElementsPerThread(Operation *op, unsigned maxVectorWidth,
+                        SmallVector<unsigned> order,
                         ModuleAxisInfoAnalysis &axisInfoAnalysis) {
   Value val = getMemAccessPtr(op);
   auto ty = cast<RankedTensorType>(val.getType());
@@ -87,10 +88,10 @@ getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
   unsigned elemNumBytes = std::max(elemNumBits / 8, 1u);
   unsigned maxMultipleBytes = valInfo.getDivisibility(order[0]);
   unsigned maxMultiple = std::max(maxMultipleBytes / elemNumBytes, 1u);
-  unsigned maxContig =
-      std::min(valInfo.getContiguity(order[0]), shapePerCTA[order[0]]);
-  unsigned alignment = maxContig;     // std::min(maxMultiple, maxContig);
-  unsigned currPerThread = alignment; // std::min(alignment, 512 / elemNumBits);
+  unsigned maxContig = valInfo.getContiguity(
+      order[0]); // drops the shape per cta consideration from upstream
+  unsigned alignment = std::min(maxMultiple, maxContig);
+  unsigned currPerThread = std::min(alignment, maxVectorWidth / elemNumBits);
   LDBG("elemNumBytes: " << elemNumBytes
                         << ", divisibility: " << maxMultipleBytes
                         << ", contig: " << valInfo.getContiguity(order[0])
@@ -101,6 +102,7 @@ getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
 } // namespace impl
 
 struct CoalescePass : public impl::TritonCPUCoalesceBase<CoalescePass> {
+  using impl::TritonCPUCoalesceBase<CoalescePass>::TritonCPUCoalesceBase;
 
   // TODO: the upstream pass now uses "CoalesceUtils::buildCoalescedEncoding".
   // We can either specialize Coalesce pass to take a custom
@@ -155,15 +157,15 @@ struct CoalescePass : public impl::TritonCPUCoalesceBase<CoalescePass> {
     int numElems = product<int64_t>(shapePerCTA);
     int numThreads = numWarps * threadsPerWarp;
 
-    unsigned perThread =
-        impl::getNumElementsPerThread(op, order, axisInfoAnalysis);
+    unsigned perThread = impl::getNumElementsPerThread(op, MaxVectorWidth,
+                                                       order, axisInfoAnalysis);
     LDBG("perThread for op: " << perThread);
 
     for (Operation *opSameOrder : memAccessesSameOrder) {
       if (opSameOrder == op)
         continue;
-      unsigned currPerThread =
-          impl::getNumElementsPerThread(opSameOrder, order, axisInfoAnalysis);
+      unsigned currPerThread = impl::getNumElementsPerThread(
+          opSameOrder, MaxVectorWidth, order, axisInfoAnalysis);
       LDBG("perThread for opSameOrder: " << currPerThread);
       perThread = std::max(perThread, currPerThread);
     }
@@ -178,8 +180,9 @@ struct CoalescePass : public impl::TritonCPUCoalesceBase<CoalescePass> {
       // in the memory write at the warp level, resulting in worse performance.
       // For loads, we can expect that the gaps won't matter due to the L1
       // cache.
-      perThread = std::min<int>(perThread, impl::getNumElementsPerThread(
-                                               op, order, axisInfoAnalysis));
+      perThread = std::min<int>(
+          perThread, impl::getNumElementsPerThread(op, MaxVectorWidth, order,
+                                                   axisInfoAnalysis));
     }
     SmallVector<unsigned> sizePerThread(refTensorType.getRank(), 1);
     sizePerThread[order[0]] = perThread;

@@ -8,10 +8,23 @@ def TritonCPUAccelerateMatmul : Pass<"tritoncpu-accelerate-matmul", "mlir::Modul
 
   let description = [{
     Optimize the input/output layout of `dot` instruction to make them compatible hardware accelerators
-    (e.g., Nvidia tensor cores)
+    (e.g., Nvidia tensor cores).
+
+    Optionally rewrites block layout for improved memory access patterns
+    (`optimize-block-layout`), and canonicalizes K-loop pointer iter args into
+    direct per-iteration computations to enable K-loop fusion (`canonicalize-k-loop`).
   }];
 
-  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+  let options = [
+    Option<"canonicalizeKLoop", "canonicalize-k-loop", "bool",
+           /*default=*/"true",
+           "Canonicalize K-loop pointer iter args to direct per-iteration "
+           "addptr(init, iv * step) computations, enabling K-loop fusion">,
+  ];
+
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect",
+                           "mlir::triton::gpu::TritonGPUDialect",
                            "mlir::triton::TritonDialect"];
 }
 
@@ -25,6 +38,12 @@ def TritonCPUCoalesce: Pass<"tritoncpu-coalesce", "mlir::ModuleOp"> {
     Layout conversions are inserted before and after the load/store op
     to maintain consistency with the rest of the program.
   }];
+
+  let options = [
+    Option<"MaxVectorWidth", "max-vector-width", "int",
+           /*default=*/"128",
+           "Maximum vector width for coalesced memory accesses (in bits)." >,
+  ];
 
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
 }
@@ -47,6 +66,39 @@ def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> 
       "mlir::scf::SCFDialect",
       "mlir::triton::cpu::TritonCPUDialect"
     ];
+}
+
+def TritonCPUTileAndFuse : Pass<"tritoncpu-tile-and-fuse", "mlir::ModuleOp"> {
+  let summary = "Wrap elementwise op chains in ttc.generic for tiled lowering";
+
+  let description = [{
+    Identifies closed chains of tensor operations ending in a `tt.store` and
+    wraps them in `ttc.generic` regions to enable tiled, iterative lowering.
+
+    A chain is a set of ops reachable by walking the def-use graph back from a
+    `tt.store` through `tt.load` and elementwise `arith` ops. The chain must be
+    "closed": every result produced within the chain must be consumed within it
+    (i.e. no values escape to users outside the chain).
+
+    When a valid chain is found, a `ttc.generic` op is created whose:
+    - `ins` operands are the pointer, mask, and other arguments of any `tt.load`
+      and `tt.store` ops in the chain.
+    - `blockShape` is taken from the tensor shape of the common tensor type.
+    - `tileShape` is taken from the `sizePerThread` field of the
+      `BlockedEncodingAttr` on the common tensor type.
+
+    The ops in the chain are cloned into the generic region with tensor types
+    updated to the tile shape, and load/store pointer arguments replaced with
+    tiled block arguments. The original ops are erased.
+
+    The resulting `ttc.generic` is later lowered to LLVM by unrolling the region
+    body once per tile (blockShape / tileShape iterations), extracting and
+    inserting sub-vectors from the operands for each tile.
+  }];
+
+  let dependentDialects = [
+    "mlir::triton::cpu::TritonCPUDialect"
+  ];
 }
 
 #endif

@@ -21,18 +21,25 @@ public:
   Value ballot(RewriterBase &rewriter, Location loc, Type type,
                Value cmp) const override;
 
+  Value getGlobalTimer(RewriterBase &rewriter, Location loc) const override;
+
+  StringRef getAtomicSyncScope(MemSyncScope scope) const override;
+
   // Emit a block level barrier
   void barrier(Location loc, RewriterBase &rewriter,
                triton::gpu::AddrSpace targets) const override;
+
+  // Emit a cluster-level barrier (not supported on CPU)
+  void clusterBarrier(Location loc, RewriterBase &rewriter,
+                      Operation *sourceOp) const override;
 
   // Emit a block level barrier with lowest level memory operation visibility
   void warpSync(Location loc, RewriterBase &rewriter) const override;
 
   void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                    std::optional<Value> ctaId, Value val,
-                    Value pred) const override;
+                    Value ctaId, Value val, Value pred) const override;
   Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
-                    std::optional<Value> ctaId, Type elemTy, Value pred,
+                    Value ctaId, Type elemTy, Value pred,
                     Operation *localLoadOp = nullptr) const override;
 
   bool supportLdMatrix() const override { return false; }
@@ -54,8 +61,8 @@ public:
                   ProgramIDDim axis) const override;
 
   bool warpReduce(RewriterBase &rewriter, Location loc, SmallVector<Value> &acc,
-                  triton::ReduceOp op, unsigned numLaneToReduce,
-                  unsigned interleave) const override;
+                  triton::ReduceOp op,
+                  unsigned reduceLaneIdMask) const override;
 
   std::string getMulhiFuncName(Type resultElementTy) const override;
 

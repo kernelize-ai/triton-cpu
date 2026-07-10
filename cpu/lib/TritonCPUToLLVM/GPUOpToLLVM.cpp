@@ -71,8 +71,12 @@ public:
       return success();
     }
 
-    warpIdOp.emitError("unsupported number threads per warp");
-    return failure();
+    auto numWarps = triton::gpu::lookupNumWarps(warpIdOp);
+    assert(numWarps == 1 && "triton cpu does not yet support multiple warps w/ "
+                            "multiple threads per warp");
+    rewriter.replaceOp(
+        warpIdOp, LLVM::createConstantI32(warpIdOp->getLoc(), rewriter, 0));
+    return success();
   }
 };
 
@@ -145,7 +149,8 @@ public:
       auto currentBlockIdOps =
           llvm::to_vector(llvmFunc.getOps<cpu::CurrentBlockOp>());
       if (currentBlockIdOps.empty()) {
-        // grab the block start argument and assume block end is 1
+        // Grab the block start argument and assume there is only one block--a
+        // non-persistent kernel.
         auto b = TritonLLVMOpBuilder(blockIdOp.getLoc(), rewriter);
         auto idxTy = this->getTypeConverter()->convertType(blockIdOp.getType());
         auto gep = b.gep(ptr_ty(rewriter.getContext()), idxTy, arg,

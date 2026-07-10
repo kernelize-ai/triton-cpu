@@ -12,7 +12,7 @@ on:
 jobs:
   integration-tests-macos:
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       matrix:
         runner: ${{ fromJson(inputs.matrix) }}
@@ -21,7 +21,7 @@ jobs:
       TRITON_BUILD_WITH_CLANG_LLD: "TRUE"
     steps:
       - name: Checkout CPU Plugin
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set up Python 3.12
         uses: actions/setup-python@v6
         with:
@@ -33,7 +33,7 @@ jobs:
           echo "Found Triton commit hash: ${TRITON_COMMIT_HASH}"
           echo "triton_commit_hash=${TRITON_COMMIT_HASH}" >> ${GITHUB_ENV}
       - name: Checkout Triton upstream repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: triton-lang/triton
           path: triton
@@ -43,6 +43,10 @@ jobs:
         run: |
           brew update
           brew install ccache llvm@20 lld coreutils libomp boost
+      - name: Apply Triton patches
+        working-directory: ./triton
+        run: |
+          git apply -v ${GITHUB_WORKSPACE}/.github/patches/*.patch
       - name: Compute cache keys
         id: cache-key
         run: |
@@ -58,7 +62,7 @@ jobs:
           echo "triton=$(cat $triton_file | cut -c 1-8)" >> $GITHUB_OUTPUT
         shell: bash
       - name: Cache build dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # Note that we cannot use environment variables here given there is
           # no shell to interpret them in the paths.
@@ -111,12 +115,18 @@ jobs:
           which clang++
           clang++ --version
           TRITON_PLUGIN_DIRS=${GITHUB_WORKSPACE} make dev-install
-      - name: Apply Triton patches
-        working-directory: ./triton
-        run: |
-          git apply -v ${GITHUB_WORKSPACE}/.github/patches/*.patch
       - name: CCache Stats
         run: ccache --print-stats
+
+      - name: Run CPU-specific tutorial clones
+        working-directory: ./triton
+        env:
+          TRITON_DEFAULT_BACKEND: "cpu"
+        run: |
+            source ~/.venv/bin/activate
+            TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python ../python/tutorials/02-fused-softmax.py
+            TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python ../python/tutorials/03-matrix-multiplication.py
+
       - name: Run lit tests
         working-directory: ./triton
         run: |-
@@ -128,7 +138,13 @@ jobs:
         working-directory: ./triton
         run: |
           source ~/.venv/bin/activate
-          TRITON_CPU_NUM_WARPS=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr) and not test_reduce1d[1-sum-float16-512]"
+
+          pip install -r python/test-requirements.txt
+
+          skip_expr=$(python3 -c "tests = [l.strip() for l in open('../test/filtered_test_list.txt') if l.strip()]; print(' or '.join(tests))")
+
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 python -m pytest -n 4 --device "cpu" python/test/unit/language/test_core.py -k "not (${skip_expr})"
+
           python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
@@ -136,11 +152,16 @@ jobs:
           source ~/.venv/bin/activate
           # MPLBackend disables matplotlib from popping up the graph and hanging
           MPLBACKEND=Agg python python/tutorials/01-vector-add.py
+      - name: Run fused-attention tests
+        working-directory: ./triton
+        run: |
+          source ~/.venv/bin/activate
+          TRITON_CPU_ENABLE_TILE_AND_FUSE=1 TRITON_ALWAYS_COMPILE=1 python -m pytest ../python/tutorials/06-fused-attention.py
       - name: Run gluon tests
         working-directory: ./triton
         run: |
           source ~/.venv/bin/activate
-          TRITON_CPU_NUM_WARPS=4 python -m pytest --device "cpu" python/test/gluon/test_core.py -k "test_copy_kernel"
+          TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/gluon/test_core.py -k "test_copy_kernel"
       - name: Run C++ unittests
         working-directory: ./triton
         run: |

@@ -1,0 +1,1824 @@
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h"
+
+#include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/Support/Debug.h"
+
+#include "triton/Analysis/Utility.h"
+#include "triton/Tools/StrUtil.h"
+
+#include <numeric>
+
+#include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
+
+#define DEBUG_TYPE "tritoncpu-tile-and-fuse"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
+
+namespace mlir {
+namespace triton {
+namespace cpu {
+
+#define GEN_PASS_DEF_TRITONCPUTILEANDFUSE
+#include "cpu/include/Dialect/TritonCPU/Transforms/Passes.h.inc"
+
+namespace {
+
+class AxisKind {
+public:
+  static constexpr int32_t kContracted = -1;
+
+  explicit AxisKind() = default;
+
+  AxisKind(ArrayRef<int32_t> axes) : state(State::Known), axes(axes) {}
+
+  static AxisKind getIdentity(unsigned rank) {
+    SmallVector<int32_t> a(rank);
+    std::iota(a.begin(), a.end(), 0);
+    return AxisKind(a);
+  }
+
+  static AxisKind getUninitialized() { return AxisKind{}; }
+  static AxisKind getUnknown() {
+    AxisKind a;
+    a.state = State::Unknown;
+    return a;
+  }
+
+  bool isKnown() const { return state == State::Known; }
+  bool isUninitialized() const { return state == State::Uninitialized; }
+  bool isUnknown() const { return state == State::Unknown; }
+
+  ArrayRef<int32_t> getAxes() const {
+    assert(isKnown() && "no axes on uninitialized/unknown AxisKind");
+    return axes;
+  }
+  unsigned getRank() const { return getAxes().size(); }
+
+  bool operator==(const AxisKind &rhs) const {
+    return state == rhs.state && (state != State::Known || axes == rhs.axes);
+  }
+
+  // Backward "meet": combine the demands two uses place on a value.
+  //   ⊥ ⊓ x = x,  x ⊓ x = x,  any disagreement -> ⊤ (Unknown).
+  static AxisKind meet(const AxisKind &a, const AxisKind &b) {
+    if (a.isUnknown() || b.isUnknown())
+      return getUnknown();
+    if (a.isUninitialized())
+      return b;
+    if (b.isUninitialized())
+      return a;
+    // both Known: must agree exactly (rank + every axis) or it's ambiguous.
+    if (a.axes.size() != b.axes.size())
+      return getUnknown();
+    return a.axes == b.axes ? a : getUnknown();
+  }
+
+  void print(llvm::raw_ostream &os) const {
+    if (isUninitialized()) {
+      os << "<UNINITIALIZED>";
+      return;
+    }
+    if (isUnknown()) {
+      os << "<UNKNOWN>";
+      return;
+    }
+    os << "[";
+    llvm::interleaveComma(axes, os, [&](int32_t e) {
+      if (e == kContracted)
+        os << "contracted";
+      else
+        os << "iter" << e;
+    });
+    os << "]";
+  }
+
+private:
+  enum class State : uint8_t { Uninitialized, Known, Unknown };
+  State state = State::Uninitialized;
+  SmallVector<int32_t> axes;
+};
+
+inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                                     const AxisKind &kind) {
+  kind.print(os);
+  return os;
+}
+
+using BlockArgAxisMap = DenseMap<BlockArgument, AxisKind>;
+
+void seedGenericBlockArgAxisKind(cpu::GenericOp genericOp,
+                                 BlockArgAxisMap &blockArgAxisMap) {
+  auto tileShape = genericOp.getTileShape();
+  Block *body = &genericOp.getBody().front();
+  unsigned insOperandOffset = genericOp.getInsArgOffset();
+
+  auto transfer = [&](Value operand, AxisKind operandAxisKind) {
+    auto blockArg = dyn_cast<BlockArgument>(operand);
+    if (!blockArg || blockArg.getOwner() != body)
+      return;
+    unsigned idx = blockArg.getArgNumber();
+    if (idx < insOperandOffset)
+      return; // iter args unaffected by tiled axis
+    // if blockArg is not present in the map AxisKind will default construct
+    // uninitialized, and the operand axis kind will be chosen
+    blockArgAxisMap[blockArg] =
+        AxisKind::meet(blockArgAxisMap[blockArg], operandAxisKind);
+  };
+
+  AxisKind identity = AxisKind::getIdentity(tileShape.size());
+
+  Operation *root = &body->front();
+  TypeSwitch<Operation *>(root)
+      .Case<triton::DotOp>([&](triton::DotOp dot) {
+        transfer(dot.getA(),
+                 AxisKind({identity.getAxes()[0], AxisKind::kContracted}));
+        transfer(dot.getB(),
+                 AxisKind({AxisKind::kContracted, identity.getAxes()[1]}));
+        transfer(dot.getC(), identity);
+      })
+      .Case<triton::ReduceOp>([&](triton::ReduceOp reduce) {
+        for (Value src : reduce.getSrcs())
+          transfer(src, identity);
+      })
+      .Default([&](Operation *) {
+        for (Value operand : root->getOperands()) {
+          if (auto tensorTy = dyn_cast<RankedTensorType>(operand.getType())) {
+            if (tensorTy.getRank() == tileShape.size())
+              transfer(operand, identity);
+          }
+        }
+      });
+}
+
+AxisKind propagateAxisKind(Operation *op, AxisKind existing) {
+  // cannot propagate an unknown
+  if (existing.isUninitialized() || existing.isUnknown())
+    return AxisKind::getUnknown();
+
+  ArrayRef<int32_t> resultAxes = existing.getAxes();
+
+  return TypeSwitch<Operation *, AxisKind>(op)
+      .Case<triton::TransOp>([&](triton::TransOp trans) {
+        SmallVector<int32_t> localAxes(trans.getOrder().size(),
+                                       AxisKind::kContracted);
+        // permute result axes according to transpose
+        for (auto [i, d] : llvm::enumerate(trans.getOrder()))
+          localAxes[d] = resultAxes[i];
+        return AxisKind(localAxes);
+      })
+      .Case<triton::ExpandDimsOp>([&](triton::ExpandDimsOp expandDims) {
+        // drop the inserted axis as we traverse up the def-use chain
+        unsigned expansionAxis = expandDims.getAxis();
+        SmallVector<int32_t> localAxes(resultAxes.size() - 1);
+        for (unsigned d = 0; d < localAxes.size(); ++d)
+          localAxes[d] = resultAxes[d < expansionAxis ? d : d + 1];
+        // expand dims adds an axis - drop the added axis completely, do not
+        // join w/ the existing AxisKind
+        return AxisKind(localAxes);
+      })
+      .Case<triton::ReshapeOp>([&](triton::ReshapeOp reshape) {
+        // only propagate if the reshape op is expanding tensor dims
+        if (!reshape.getExpandDimsAxis().has_value())
+          return existing;
+
+        unsigned expansionAxis = *reshape.getExpandDimsAxis();
+        SmallVector<int32_t> localAxes(resultAxes.size() - 1);
+        for (unsigned d = 0; d < localAxes.size(); ++d)
+          localAxes[d] = resultAxes[d < expansionAxis ? d : d + 1];
+        return AxisKind(localAxes);
+      })
+      .Case<triton::BroadcastOp>([&](triton::BroadcastOp broadcast) {
+        auto sourceTensorTy =
+            cast<RankedTensorType>(broadcast.getSrc().getType());
+        auto sourceShape = sourceTensorTy.getShape();
+        SmallVector<int32_t> localAxes(sourceShape.size());
+        for (unsigned d = 0; d < sourceShape.size(); d++) {
+          // broadcasted dimension is contracted
+          localAxes[d] =
+              (sourceShape[d] == 1) ? AxisKind::kContracted : resultAxes[d];
+        }
+        return AxisKind(localAxes);
+      })
+      .Case<triton::gpu::ConvertLayoutOp>(
+          [&](triton::gpu::ConvertLayoutOp cvt) {
+            // trans + cvt can be fused in one step - check for cvt embedded in
+            // the trans op and propagate from the parent transpose if one
+            // exists
+            if (auto transOp = dyn_cast_or_null<triton::TransOp>(
+                    cvt.getSrc().getDefiningOp())) {
+              return propagateAxisKind(transOp, existing);
+            }
+            return existing;
+          })
+      .Default([&](auto) {
+        // propagate existing or unknown?
+        return existing;
+      });
+}
+
+// Replace the shape of a RankedTensorType with tileShape, preserving element
+// type and encoding. Non-tensor types are returned unchanged.
+static Type updateTensorType(Type t, ArrayRef<int32_t> tileShape) {
+  auto tensorType = dyn_cast<RankedTensorType>(t);
+  if (!tensorType)
+    return t;
+  assert(tensorType.getRank() == tileShape.size() &&
+         "expected tensor type and tile shape to have same rank");
+  SmallVector<int64_t> newShape;
+  // for broadcast/expanded dims (size 1) do not use the tile shape
+  for (auto [s, tile] : llvm::zip(tensorType.getShape(), tileShape))
+    newShape.push_back(std::min(s, (int64_t)tile));
+
+  return RankedTensorType::get(newShape, tensorType.getElementType(),
+                               tensorType.getEncoding());
+}
+
+// Extract blockShape (full tensor shape) and tileShape (sizePerThread) from
+// a tensor type with BlockedEncoding.
+static std::pair<SmallVector<int32_t>, SmallVector<int32_t>>
+getBlockAndTileShapes(RankedTensorType tensorTy,
+                      gpu::BlockedEncodingAttr encoding) {
+  auto shape = tensorTy.getShape();
+  SmallVector<int32_t> blockShape(shape.begin(), shape.end());
+  auto sizePerThread = encoding.getSizePerThread();
+  SmallVector<int32_t> tileShape(sizePerThread.begin(), sizePerThread.end());
+  for (auto [i, t] : llvm::enumerate(tileShape)) {
+    if (t > blockShape[i])
+      tileShape[i] = blockShape[i];
+  }
+  return {blockShape, tileShape};
+}
+
+static SmallVector<Value>
+buildBlockShapeValues(Location loc, ArrayRef<int32_t> blockShape,
+                      mlir::PatternRewriter &rewriter) {
+  return llvm::map_to_vector(blockShape, [&](int32_t s) {
+    return arith::ConstantOp::create(rewriter, loc,
+                                     rewriter.getI32IntegerAttr(s))
+        .getResult();
+  });
+}
+
+// Note: this helper assumes the conversion only involves reordering of
+// registers
+static std::optional<SmallVector<int32_t>>
+getBlockedRegisterConversionTileShape(RankedTensorType srcTy,
+                                      RankedTensorType dstTy) {
+  // only support blocked -> blocked conversions
+  auto srcEnc = dyn_cast<gpu::BlockedEncodingAttr>(srcTy.getEncoding());
+  if (!srcEnc)
+    return std::nullopt;
+
+  auto srcSPT = srcEnc.getSizePerThread();
+
+  SmallVector<unsigned> dstOrder;
+  auto dstEnc = dyn_cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding());
+  if (!dstEnc) {
+    auto dstDotEncoding =
+        dyn_cast<gpu::DotOperandEncodingAttr>(dstTy.getEncoding());
+    if (dstDotEncoding) {
+      dstEnc = dyn_cast<gpu::BlockedEncodingAttr>(dstDotEncoding.getParent());
+      dstOrder = gpu::getOrderForDotOperand(dstDotEncoding.getOpIdx(),
+                                            dstTy.getRank(), /*kContig*/ false);
+    }
+  }
+  if (!dstEnc)
+    return std::nullopt;
+
+  if (dstOrder.empty())
+    dstOrder = llvm::to_vector(dstEnc.getOrder());
+
+  // Both getSizePerThread() arrays are tensor-dimension indexed, so the LCM
+  // per tensor dimension is computed by direct positional comparison.
+  auto dstSPT = dstEnc.getSizePerThread();
+  assert(srcSPT.size() == dstSPT.size());
+
+  auto shape = srcTy.getShape();
+  unsigned rank = shape.size();
+
+  // Compute LCM of src and dst sizePerThread per tensor dimension.
+  SmallVector<int32_t> tileNaive(rank);
+  for (unsigned dim = 0; dim < rank; dim++) {
+    int32_t tile = std::lcm((int32_t)srcSPT[dim], (int32_t)dstSPT[dim]);
+    if (shape[dim] % tile != 0)
+      return std::nullopt;
+    tileNaive[dim] = tile;
+  }
+
+  LDBG("Tile shape without order: " << triton::join(tileNaive));
+
+  // Permute tileNaive by dstOrder to produce a tile shape in the dst
+  // encoding's storage-order space. Callers compare this result positionally
+  // against the outer generic's tileShape (which is also order-indexed via
+  // sizePerThread), so the permutation is required for the fits check to be
+  // correct. Returning tileNaive directly would misalign the dimensions.
+  SmallVector<int32_t> tileShape(rank);
+  for (unsigned i = 0; i < rank; i++)
+    tileShape[i] = tileNaive[dstOrder[i]];
+
+  LDBG("Tile shape after applying dst order: " << triton::join(tileShape));
+
+  return tileShape;
+}
+
+// Get the neutral (identity) element for a reduction op. Handles
+// MaxNumFOp/MinNumFOp which are missing from mlir::arith::getNeutralElement,
+// and delegates everything else to it.
+// note: copied from optimizethreadlocality.cpp
+static std::optional<TypedAttr> getNeutralElement(Operation *op) {
+  if (isa<arith::MaxNumFOp>(op)) {
+    Type ty = op->getResult(0).getType();
+    const llvm::fltSemantics &sem = cast<FloatType>(ty).getFloatSemantics();
+    return FloatAttr::get(ty, APFloat::getInf(sem, /*Negative=*/true));
+  }
+  if (isa<arith::MinNumFOp>(op)) {
+    Type ty = op->getResult(0).getType();
+    const llvm::fltSemantics &sem = cast<FloatType>(ty).getFloatSemantics();
+    return FloatAttr::get(ty, APFloat::getInf(sem, /*Negative=*/false));
+  }
+  return mlir::arith::getNeutralElement(op);
+}
+
+struct TiledInput {
+  Value value;
+  SmallVector<int32_t> shape;
+};
+
+// Create the body block of a GenericOp, adding one block arg per ins value
+// with tensor types replaced to the vector (chunk) shape. Populates `mapping`
+// with ins value → block arg entries and sets the insertion point to the start
+// of the block. Init values for iter args come first, then ins args. Returns
+// the new block.
+static Block *initGenericBody(OpBuilder &rewriter, cpu::GenericOp generic,
+                              ArrayRef<TiledInput> ins, ArrayRef<Type> iterArgs,
+                              ArrayRef<int32_t> tileShape, IRMapping &mapping) {
+  Block *body = rewriter.createBlock(&generic.getBody());
+  for (unsigned i = 0; i < tileShape.size(); i++)
+    body->addArgument(rewriter.getI32Type(),
+                      generic.getLoc()); // tile offset per vector shape dim
+
+  // Iter args before ins args — one block arg per reduction dim init val.
+  assert(iterArgs.size() == generic.getInitVals().size());
+  for (auto [i, iterArgType] : llvm::enumerate(iterArgs))
+    body->addArgument(iterArgType, generic.getInitVals()[i].getLoc());
+
+  for (auto pair : ins) {
+    auto [v, inputTileShape] = pair;
+    Type argTy = updateTensorType(v.getType(), inputTileShape);
+    mapping.map(v, body->addArgument(argTy, v.getLoc()));
+  }
+
+  rewriter.setInsertionPointToStart(body);
+  return body;
+}
+
+struct WrapStores : public mlir::OpRewritePattern<triton::StoreOp> {
+  using OpRewritePattern<triton::StoreOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::StoreOp storeOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Location loc = storeOp.getLoc();
+
+    if (storeOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    auto value = storeOp.getValue();
+    auto tensorTy = dyn_cast<RankedTensorType>(value.getType());
+    if (!tensorTy)
+      return failure();
+    auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy.getEncoding());
+    if (!encoding)
+      return failure();
+
+    auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
+
+    SmallVector<TiledInput> ins;
+    for (auto value : storeOp->getOperands()) {
+      ins.push_back(TiledInput{value, tileShape});
+    }
+
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+    SmallVector<Value> blockShapeValues =
+        buildBlockShapeValues(loc, blockShape, rewriter);
+
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, /*resultTypes=*/TypeRange{},
+                               insValues, blockShapeValues, tileShape);
+
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
+
+    rewriter.clone(*storeOp, bodyMapping);
+    cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
+
+    rewriter.replaceOp(storeOp, generic.getResults());
+    return success();
+  }
+};
+
+struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
+  using OpRewritePattern<triton::ReduceOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(triton::ReduceOp reduceOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Location loc = reduceOp.getLoc();
+
+    // Don't re-wrap reductions already inside a ttc.generic.
+    if (reduceOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    auto reduceResult = reduceOp.getResult();
+    if (reduceResult.size() != 1)
+      return failure();
+
+    auto srcs = reduceOp.getSrcs();
+    if (srcs.size() != 1)
+      return failure();
+
+    auto tensorTy = dyn_cast<RankedTensorType>(srcs[0].getType());
+    if (!tensorTy)
+      return failure();
+    auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy.getEncoding());
+    if (!encoding)
+      return failure();
+
+    // if the value being reduced is used elsewhere ttc.generic can materialize
+    // the tensor
+    // TODO: parametrize?
+    const bool allowTensorMaterializationFlag = true;
+    const bool srcIsLoad =
+        srcs[0].getDefiningOp() && isa<LoadOp>(srcs[0].getDefiningOp());
+    const bool allowTensorMaterialization =
+        allowTensorMaterializationFlag && !srcIsLoad;
+    const bool srcUsedElsewhere =
+        allowTensorMaterialization &&
+        llvm::any_of(srcs[0].getUsers(), [&](Operation *user) {
+          return user != reduceOp.getOperation(); // or just != reduceOp?
+        });
+
+    Operation *combiner = reduceOp.getSingleCombiner();
+    if (!combiner)
+      return failure();
+    LDBG("Wrap reduction with combiner " << *combiner);
+
+    auto neutralVal = getNeutralElement(combiner);
+    if (!neutralVal)
+      return failure();
+    LDBG("Created neutral element for reduce: " << neutralVal);
+
+    auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
+
+    SmallVector<TiledInput> ins = {TiledInput{srcs[0], tileShape}};
+    SmallVector<Type> resultTypes(reduceOp.getResultTypes().begin(),
+                                  reduceOp.getResultTypes().end());
+    if (srcUsedElsewhere)
+      resultTypes.push_back(tensorTy);
+
+    LDBG("Creating reduction generic op, number of results: "
+         << resultTypes.size());
+
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+    SmallVector<Value> blockShapeValues =
+        buildBlockShapeValues(loc, blockShape, rewriter);
+
+    SmallVector<int32_t> slicedTileShape;
+    for (auto [i, t] : llvm::enumerate(tileShape)) {
+      if (i == reduceOp.getAxis())
+        continue;
+      slicedTileShape.push_back(t);
+    }
+
+    arith::ConstantOp newAccum;
+    if (auto accumTensorType =
+            dyn_cast<RankedTensorType>(resultTypes.front())) {
+      auto denseAttr =
+          DenseElementsAttr::get(accumTensorType, neutralVal.value());
+      newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
+                                           accumTensorType, denseAttr);
+    } else {
+      newAccum = arith::ConstantOp::create(rewriter, reduceOp.getLoc(),
+                                           neutralVal.value());
+    }
+
+    SmallVector<Value> initVals = {newAccum.getResult()};
+
+    auto generic = cpu::GenericOp::create(
+        rewriter, loc, resultTypes, initVals, insValues, blockShapeValues,
+        tileShape,
+        /*reductionDims=*/{static_cast<int32_t>(reduceOp.getAxis())});
+
+    IRMapping bodyMapping;
+    initGenericBody(
+        rewriter, generic, ins,
+        {updateTensorType(newAccum.getResult().getType(), slicedTileShape)},
+        tileShape, bodyMapping);
+
+    // Clone the reduce — it now operates on the tile-sized tensor.
+    auto *newReduce = rewriter.clone(*reduceOp, bodyMapping);
+    newReduce->getResult(0).setType(
+        updateTensorType(reduceOp->getResult(0).getType(), slicedTileShape));
+    Value partial = newReduce->getResult(0);
+
+    // manually combine with the iter args source
+    auto acc = generic.getIterArg(0);
+
+    Region &reduceCombiner = reduceOp.getCombineOp();
+    Block &srcBlock = reduceCombiner.front();
+
+    IRMapping combMapping;
+    // The reduce combiner block has args [lhs..., rhs...] interleaved per
+    // src. With a single src the layout is simply [lhs, rhs].
+    combMapping.map(srcBlock.getArgument(0), acc);
+    combMapping.map(srcBlock.getArgument(1), partial);
+    auto newCombiner = rewriter.clone(*combiner, combMapping);
+    newCombiner->getResult(0).setType(acc.getType());
+
+    SmallVector<Value> partials(newCombiner->getResults().begin(),
+                                newCombiner->getResults().end());
+
+    // TODO: we should really handle this during fusion...
+    if (srcUsedElsewhere)
+      partials.push_back(bodyMapping.lookup(srcs[0]));
+    cpu::YieldOp::create(rewriter, loc, partials);
+
+    // Replace uses of srcs[0] outside the generic with the materialized tensor
+    // result. Must go through the rewriter and exclude the generic's own
+    // operand so the generic still receives the original value as its ins.
+    if (srcUsedElsewhere)
+      rewriter.replaceUsesWithIf(
+          srcs[0], generic.getResult(1), [&](OpOperand &use) {
+            return use.getOwner() != generic.getOperation();
+          });
+
+    // Replace reduceOp with the scalar reduction result (generic result 0).
+    rewriter.replaceOp(reduceOp, generic.getResult(0));
+
+    return success();
+  }
+};
+
+struct WrapDotOp : public mlir::OpRewritePattern<triton::DotOp> {
+  using OpRewritePattern<triton::DotOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(triton::DotOp dotOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    Location loc = dotOp.getLoc();
+
+    if (dotOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    // Dot result must have BlockedEncoding so we can derive
+    // blockShape/vectorShape.
+    auto resultTy = dyn_cast<RankedTensorType>(dotOp.getType());
+    if (!resultTy || !isa<gpu::BlockedEncodingAttr>(resultTy.getEncoding()))
+      return failure();
+
+    auto encoding = cast<gpu::BlockedEncodingAttr>(resultTy.getEncoding());
+
+    // use the MxN (result) shape for block/tile shapes. The K loop is not
+    // currently tiled.
+    auto [blockShape, tileShape] = getBlockAndTileShapes(resultTy, encoding);
+
+    auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
+    assert(aTy.getRank() == 2 && "only 2D dot op supported");
+    int32_t kSize = (int32_t)aTy.getShape()[1];
+
+    SmallVector<int32_t> aTileShape = {tileShape[0], kSize};
+    SmallVector<int32_t> bTileShape = {kSize, tileShape[1]};
+
+    SmallVector<TiledInput> ins;
+    ins.push_back(TiledInput{dotOp.getA(), aTileShape});
+    ins.push_back(TiledInput{dotOp.getB(), bTileShape});
+    ins.push_back(TiledInput{dotOp.getC(), tileShape});
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+
+    SmallVector<Value> blockShapeValues =
+        buildBlockShapeValues(loc, blockShape, rewriter);
+
+    auto generic = cpu::GenericOp::create(rewriter, loc, {resultTy}, insValues,
+                                          blockShapeValues, tileShape);
+
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
+
+    // clone the dot op
+    auto *newDot = rewriter.clone(*dotOp, bodyMapping);
+    newDot->getResult(0).setType(updateTensorType(resultTy, tileShape));
+    cpu::YieldOp::create(rewriter, loc, newDot->getResults());
+
+    rewriter.replaceOp(dotOp, generic.getResults());
+    return success();
+  }
+};
+
+struct WrapConvertLayoutOp
+    : mlir::OpRewritePattern<triton::gpu::ConvertLayoutOp> {
+  using OpRewritePattern<triton::gpu::ConvertLayoutOp>::OpRewritePattern;
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::ConvertLayoutOp cvtOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto loc = cvtOp.getLoc();
+
+    if (cvtOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    auto src = cvtOp.getSrc();
+    auto srcTy = cast<RankedTensorType>(src.getType());
+    auto dstTy = cast<RankedTensorType>(cvtOp.getType());
+
+    // src encodings are validated in getBlockedRegisterConversionTileShape, but
+    // dst encodings other than blocked are allowed. Disable those in standalone
+    // generics as we can usually fuse blocked -> non-blocked cvts (i.e. blocked
+    // -> dot_op)
+    if (!isa<gpu::BlockedEncodingAttr>(dstTy.getEncoding()))
+      return failure();
+
+    auto layout = minimalCvtLayout(srcTy, dstTy);
+    auto outDims = to_vector(layout.getOutDimNames());
+    MLIRContext *ctx = srcTy.getContext();
+    auto kRegister = StringAttr::get(ctx, "register");
+    // only wrap cvts that reorder registers. if the cvt does nothing (empty out
+    // dims), return failure as we should be able to fuse it
+    if (outDims.empty() || (ArrayRef(outDims) != ArrayRef({kRegister})))
+      return failure();
+
+    LDBG("Getting required tile shape for " << cvtOp);
+
+    //  get blocked register conversion tile shape
+    auto requiredTileShape =
+        getBlockedRegisterConversionTileShape(srcTy, dstTy);
+    if (!requiredTileShape)
+      return failure();
+
+    // Use the destination ty to get the tile shape. the destination ty will be
+    // tiled in any cvt evaluated for fusion, so we want to use the same
+    // criteria for "fits" to avoid wrapping fusible cvts
+    auto [blockShape, defaultTileShape] = getBlockAndTileShapes(
+        dstTy, cast<gpu::BlockedEncodingAttr>(dstTy.getEncoding()));
+
+    // return failure as we should be able to fuse this cvt op
+    if (ArrayRef(*requiredTileShape) == ArrayRef(defaultTileShape))
+      return failure();
+
+    SmallVector<int32_t> tileShape = *requiredTileShape;
+    assert(tileShape.size() == blockShape.size());
+    // clamp the max tile shape size to the block shape (tensor shape)
+    for (auto [i, t] : llvm::enumerate(tileShape)) {
+      if (t > blockShape[i])
+        tileShape[i] = blockShape[i];
+    }
+
+    SmallVector<TiledInput> ins;
+    for (auto value : cvtOp->getOperands()) {
+      ins.push_back(TiledInput{value, tileShape});
+    }
+
+    SmallVector<Value> insValues =
+        llvm::map_to_vector(ins, [](const TiledInput &ti) { return ti.value; });
+    SmallVector<Value> blockShapeValues =
+        buildBlockShapeValues(loc, blockShape, rewriter);
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, /*resultTypes=*/TypeRange{dstTy},
+                               insValues, blockShapeValues, tileShape);
+
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, {}, tileShape, bodyMapping);
+
+    auto newCvt = rewriter.clone(*cvtOp, bodyMapping);
+    newCvt->getResult(0).setType(updateTensorType(dstTy, tileShape));
+    cpu::YieldOp::create(rewriter, loc, newCvt->getResults());
+
+    rewriter.replaceOp(cvtOp, generic.getResults());
+    return success();
+  }
+};
+
+struct GenericOperandFusionPattern : mlir::OpRewritePattern<cpu::GenericOp> {
+  using OpRewritePattern<cpu::GenericOp>::OpRewritePattern;
+
+  GenericOperandFusionPattern(MLIRContext *context,
+                              BlockArgAxisMap *blockArgAxisMap,
+                              PatternBenefit benefit)
+      : OpRewritePattern<cpu::GenericOp>(context, benefit),
+        blockArgAxisMap(blockArgAxisMap) {}
+
+  virtual bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                           BlockArgument blockArg) const = 0;
+
+  virtual Value fuseOperand(Block *body, BlockArgument blockArg,
+                            SmallVector<Value> &newIns, Operation *op,
+                            GenericOp genericOp,
+                            mlir::PatternRewriter &rewriter) const = 0;
+
+  LogicalResult matchAndRewrite(cpu::GenericOp genericOp,
+                                mlir::PatternRewriter &rewriter) const final {
+    Block *body = &genericOp.getBody().front();
+    unsigned insOffset = genericOp.getInsArgOffset();
+
+    for (auto [i, insVal] : llvm::enumerate(genericOp.getIns())) {
+      BlockArgument blockArg = body->getArgument(insOffset + i);
+      unsigned firstAddedBlockArgIndex = body->getArguments().size();
+
+      Operation *op = insVal.getDefiningOp();
+      if (!isFusibleOp(op, genericOp, blockArg))
+        continue;
+
+      SmallVector<Value> newIns(genericOp.getIns());
+      Value newResult =
+          fuseOperand(body, blockArg, newIns, op, genericOp, rewriter);
+
+      blockArg.replaceAllUsesWith(newResult);
+      AxisKind existingKind = (*blockArgAxisMap)[blockArg];
+      for (unsigned i = firstAddedBlockArgIndex;
+           i < body->getArguments().size(); i++) {
+        BlockArgument newBlockArg = body->getArgument(i);
+        if (isa<RankedTensorType>(newBlockArg.getType()))
+          (*blockArgAxisMap)[newBlockArg] = propagateAxisKind(op, existingKind);
+      }
+      blockArgAxisMap->erase(blockArg);
+
+      body->eraseArgument(insOffset + i);
+      newIns.erase(newIns.begin() + i);
+      rewriter.modifyOpInPlace(
+          genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
+
+      return success();
+    }
+    return failure();
+  }
+
+  BlockArgAxisMap *blockArgAxisMap;
+};
+
+struct FuseElementwiseIntoGeneric : GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
+
+  static bool isFusibleElementwise(Operation *op) {
+    if (!op)
+      return false;
+    if (op->getNumResults() != 1)
+      return false;
+    if ((isa<arith::ArithDialect, math::MathDialect>(op->getDialect())) &&
+        op->hasTrait<OpTrait::Elementwise>())
+      return true;
+    if (isa<triton::AddPtrOp>(op))
+      return true;
+    if (isa<triton::SplatOp>(op))
+      return true;
+    // note: load isn't really "elementwise", but the tensor of ptrs can be
+    // indexed elementwise and the output truncated based on the input size, so
+    // we treat it as elementwise
+    if (isa<triton::LoadOp>(op))
+      return true;
+    return false;
+  }
+
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
+    if (!isFusibleElementwise(op))
+      return false;
+
+    if (!mlir::isMemoryEffectFree(op) &&
+        op->getBlock() != genericOp->getBlock())
+      return false;
+
+    return true;
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto tiledType = dyn_cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape;
+    if (tiledType) {
+      tileShape = llvm::map_to_vector(tiledType.getShape(), [](int64_t dim) {
+        return static_cast<int32_t>(dim);
+      });
+    }
+
+    IRMapping mapping;
+    // 1. Add new block args for source op inputs at body end
+    for (Value operand : op->getOperands()) {
+      newIns.push_back(operand);
+      mapping.map(operand, body->addArgument(
+                               updateTensorType(operand.getType(), tileShape),
+                               operand.getLoc()));
+    }
+
+    // 2. clone
+    rewriter.setInsertionPointToStart(body);
+    Operation *newOp = rewriter.clone(*op, mapping);
+    Type origResultType = newOp->getResult(0).getType();
+    newOp->getResult(0).setType(updateTensorType(origResultType, tileShape));
+
+    return newOp->getResult(0);
+  }
+};
+
+struct FuseMakeRangeIntoGeneric : GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
+
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
+    auto makeRange = dyn_cast_or_null<triton::MakeRangeOp>(op);
+    if (!makeRange)
+      return false;
+    return true;
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    triton::MakeRangeOp makeRangeOp = cast<triton::MakeRangeOp>(op);
+
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+
+    // TODO: should this be in the generic pattern?
+    rewriter.setInsertionPointToStart(body);
+
+    auto axisKind = blockArgAxisMap->lookup(blockArg);
+    LDBG("MakeRangeOp: " << makeRangeOp << " axis kind " << axisKind << "\n");
+    auto axes = axisKind.getAxes();
+    assert(axes.size() == 1 && "expected only one axis kind for make range op");
+
+    IRMapping mapping;
+    Operation *newOp;
+    if (axes.front() == AxisKind::kContracted) {
+      // just fuse the existing op
+      newOp = rewriter.clone(*op, mapping);
+    } else {
+      auto resultType =
+          cast<RankedTensorType>(makeRangeOp.getResult().getType());
+      auto newResultType =
+          cast<RankedTensorType>(updateTensorType(resultType, tileShape));
+      unsigned dim = axes.front();
+      assert(newResultType.getShape()[0] == genericOp.getTileShape()[dim] &&
+             "make_dynamic_range size disagrees with its induction-var axis");
+      newOp = triton::cpu::MakeDynamicRangeOp::create(
+          rewriter, makeRangeOp.getLoc(), newResultType,
+          genericOp.getTileOffset(dim));
+    }
+    assert(newOp && "expected make range op to be replaced or fused");
+
+    return newOp->getResult(0);
+  }
+};
+
+struct FuseConstantIntoGeneric : GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
+
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
+    auto constantOp = dyn_cast_or_null<arith::ConstantOp>(op);
+    if (!constantOp)
+      return false;
+
+    if (!isa<RankedTensorType>(constantOp.getResult().getType()))
+      return false;
+
+    return true;
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+
+    // checked in isFusibleOp
+    auto constantOp = cast<arith::ConstantOp>(op);
+    auto resultTensorType =
+        cast<RankedTensorType>(constantOp.getResult().getType());
+
+    // 1. clone. constants have no operands to update
+    rewriter.setInsertionPointToStart(body);
+    auto newTensorType =
+        cast<RankedTensorType>(updateTensorType(resultTensorType, tileShape));
+    auto denseAttr = cast<DenseElementsAttr>(constantOp.getValue());
+    assert(denseAttr.isSplat() &&
+           "non-splat tensor constants not yet supported in fuseInputs");
+    auto newAttr = DenseElementsAttr::get(
+        newTensorType, *denseAttr.getValues<Attribute>().begin());
+    auto newConstant =
+        arith::ConstantOp::create(rewriter, constantOp.getLoc(), newAttr);
+    return newConstant.getResult();
+  }
+};
+
+struct FuseBroadcastIntoGeneric : GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
+
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
+    auto broadcastOp = dyn_cast_or_null<triton::BroadcastOp>(op);
+    if (!broadcastOp)
+      return false;
+    return true;
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+
+    auto broadcastOp = cast<triton::BroadcastOp>(op);
+    RankedTensorType sourceTensorType =
+        cast<RankedTensorType>(broadcastOp.getSrc().getType());
+    SmallVector<int32_t> sourceTileShape = llvm::to_vector(
+        llvm::map_range(llvm::zip(sourceTensorType.getShape(), tileShape),
+                        [](auto pair) -> int32_t {
+                          auto [s, t] = pair;
+                          return s == 1 ? s : t;
+                        }));
+
+    IRMapping mapping;
+    // 1. map src operand to block args
+    newIns.push_back(broadcastOp.getSrc());
+    mapping.map(
+        broadcastOp.getSrc(),
+        body->addArgument(updateTensorType(sourceTensorType, sourceTileShape),
+                          broadcastOp.getSrc().getLoc()));
+
+    // 2. clone the broadcast
+    rewriter.setInsertionPointToStart(body);
+    Operation *newBroadcast = rewriter.clone(*op, mapping);
+    Type origResultType = broadcastOp.getResult().getType();
+    newBroadcast->getResult(0).setType(
+        updateTensorType(origResultType, tileShape));
+    return newBroadcast->getResult(0);
+  }
+};
+
+// fuses dimension expansion via expand dims or reshape
+struct FuseExpandDimsIntoGeneric : public GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
+
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
+    auto expandDims = dyn_cast_or_null<triton::ExpandDimsOp>(op);
+    if (expandDims)
+      return true;
+    auto reshape = dyn_cast_or_null<triton::ReshapeOp>(op);
+    if (reshape && reshape.getExpandDimsAxis().has_value())
+      return true;
+    return false;
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+
+    auto getAxis = [](Operation *op) -> unsigned {
+      if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+        return expandDimsOp.getAxis();
+      } else {
+        auto reshapeOp = cast<triton::ReshapeOp>(op);
+        auto expandDimsAxis = reshapeOp.getExpandDimsAxis();
+        assert(expandDimsAxis.has_value());
+        return *expandDimsAxis;
+      }
+    };
+    unsigned axis = getAxis(op);
+    assert(tileShape[axis] == 1 &&
+           "expected expand dims axis tile shape to be 1");
+
+    SmallVector<int32_t> sourceTileShape;
+    for (auto [j, t] : llvm::enumerate(tileShape)) {
+      if (j == axis)
+        continue;
+      sourceTileShape.push_back(t);
+    }
+
+    auto getSrc = [](Operation *op) {
+      if (auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(op)) {
+        return expandDimsOp.getSrc();
+      } else {
+        auto reshapeOp = cast<triton::ReshapeOp>(op);
+        return reshapeOp.getSrc();
+      }
+    };
+    Value src = getSrc(op);
+
+    RankedTensorType sourceTensorType = cast<RankedTensorType>(src.getType());
+
+    IRMapping mapping;
+    // 1. map src operand to block args
+    newIns.push_back(src);
+    mapping.map(src, body->addArgument(
+                         updateTensorType(sourceTensorType, sourceTileShape),
+                         src.getLoc()));
+
+    // 2. clone expand dims
+    rewriter.setInsertionPointToStart(body);
+    Operation *newExpandDims = rewriter.clone(*op, mapping);
+    Type origResultType = newExpandDims->getResult(0).getType();
+    newExpandDims->getResult(0).setType(
+        updateTensorType(origResultType, tileShape));
+
+    return newExpandDims->getResult(0);
+  }
+};
+
+struct FuseTransOpIntoGeneric : public GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
+
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockarg) const override {
+    if (!op)
+      return false;
+
+    auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
+    if (cvtOp)
+      op = cvtOp.getSrc().getDefiningOp();
+
+    if (!op || !isa<triton::TransOp>(op))
+      return false;
+    return true;
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+    auto cvtOp = dyn_cast<gpu::ConvertLayoutOp>(op);
+    if (cvtOp)
+      op = cvtOp.getSrc().getDefiningOp();
+
+    auto transOp = cast<triton::TransOp>(op);
+    auto dstTy = cast<RankedTensorType>(transOp.getResult().getType());
+
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<bool> tiledIndices(tiledType.getRank());
+    for (auto [idx, dim] : llvm::enumerate(tiledType.getShape()))
+      tiledIndices[idx] = dstTy.getShape()[idx] != dim;
+
+    ArrayRef<int32_t> order = transOp.getOrder();
+
+    SmallVector<int32_t> inverseOrder(order.size());
+    for (auto [d, e] : llvm::enumerate(order))
+      inverseOrder[e] = d;
+
+    auto srcTy = cast<RankedTensorType>(transOp.getSrc().getType());
+    SmallVector<int32_t> preTransposeTileShape;
+    // for each dimension in the source, check if the transposed dimension is
+    // tiled
+    for (auto [srcDim, srcSize] : llvm::enumerate(srcTy.getShape())) {
+      auto transposeDim = inverseOrder[srcDim];
+      preTransposeTileShape.push_back(tiledIndices[transposeDim]
+                                          ? tiledType.getShape()[transposeDim]
+                                          : srcSize);
+    }
+
+    LDBG("Fusing transpose with order "
+         << triton::join(order) << " into generic, replacing input "
+         << tiledType << " with pre-transpose tile shape: "
+         << triton::join(preTransposeTileShape));
+
+    IRMapping mapping;
+    // 1. Add new block args for source op inputs at body end
+    Value operand = transOp.getSrc();
+    newIns.push_back(operand);
+    mapping.map(operand,
+                body->addArgument(
+                    updateTensorType(operand.getType(), preTransposeTileShape),
+                    operand.getLoc()));
+
+    // 2. clone
+    rewriter.setInsertionPointToStart(body);
+
+    auto tileShape = llvm::map_to_vector(tiledType.getShape(), [](int64_t dim) {
+      return static_cast<int32_t>(dim);
+    });
+
+    Operation *newTrans = rewriter.clone(*transOp, mapping);
+    Type origResultType = newTrans->getResult(0).getType();
+    // the cloned transpose maintains the original tiled shape
+    newTrans->getResult(0).setType(updateTensorType(origResultType, tileShape));
+
+    if (cvtOp) {
+      Operation *newCvt = rewriter.clone(*cvtOp, mapping);
+      // cvt op uses tile shape of the transpose result, which is the same as
+      // the generic block arg tile shape
+      newCvt->getResult(0).setType(updateTensorType(
+          cast<RankedTensorType>(newCvt->getResult(0).getType()), tileShape));
+      cvtOp = cast<triton::gpu::ConvertLayoutOp>(
+          newCvt); // overwrite the cvtOp with the new one so we can properly
+                   // update block argument uses, as the Cvt was the previous
+                   // input to the block arg
+    }
+    return cvtOp ? cvtOp->getResult(0) : newTrans->getResult(0);
+  }
+};
+
+struct FuseConvertLayoutOpIntoGeneric : public GenericOperandFusionPattern {
+  using GenericOperandFusionPattern::GenericOperandFusionPattern;
+
+  bool isFusibleOp(Operation *op, cpu::GenericOp genericOp,
+                   BlockArgument blockArg) const override {
+    auto cvtOp = dyn_cast_or_null<gpu::ConvertLayoutOp>(op);
+    if (!cvtOp)
+      return false;
+
+    LDBG("Evaluate cvt for fusion: " << cvtOp);
+    auto srcTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
+    auto dstTy = cast<RankedTensorType>(cvtOp.getType());
+
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+    LDBG("Generic op tile shape: " << triton::join(tileShape));
+
+    // determine if the register shuffle required fits inside our generic
+    // Note: the logic here is very similar to cvtReordersRegisters
+    auto layout = minimalCvtLayout(srcTy, dstTy);
+    auto outDims = to_vector(layout.getOutDimNames());
+
+    if (!outDims.empty()) {
+      LDBG("Non-empty out dims, layout: " << layout);
+      MLIRContext *ctx = srcTy.getContext();
+      auto kRegister = StringAttr::get(ctx, "register");
+
+      // layout must only reorder registers
+      if (ArrayRef(outDims) != ArrayRef({kRegister}))
+        return false;
+
+      // must be able to determine the required tile shape and it must fit
+      // inside this generic
+      auto requiredTileShape =
+          getBlockedRegisterConversionTileShape(srcTy, dstTy);
+      if (!requiredTileShape)
+        return false;
+
+      auto required = *requiredTileShape;
+      LDBG("Required tile shape for register shuffle: "
+           << triton::join(required));
+      bool fits = llvm::all_of(llvm::zip(tileShape, required), [](auto pair) {
+        auto [cur, req] = pair;
+        return cur % req == 0;
+      });
+      if (!fits)
+        return false;
+
+      LDBG("Cvt can be legally fused");
+      return true;
+    }
+    // trivial CVT, fusible
+    return true;
+  }
+
+  Value fuseOperand(Block *body, BlockArgument blockArg,
+                    SmallVector<Value> &newIns, Operation *op,
+                    GenericOp genericOp,
+                    mlir::PatternRewriter &rewriter) const override {
+
+    auto cvtOp = cast<gpu::ConvertLayoutOp>(op);
+    auto srcTy = cast<RankedTensorType>(cvtOp.getSrc().getType());
+    auto dstTy = cast<RankedTensorType>(cvtOp.getType());
+
+    auto tiledType = cast<RankedTensorType>(blockArg.getType());
+    SmallVector<int32_t> tileShape(tiledType.getShape());
+
+    IRMapping mapping;
+    // 1. Add new block args for source op inputs at body end
+    newIns.push_back(cvtOp.getSrc());
+    mapping.map(cvtOp.getSrc(),
+                body->addArgument(updateTensorType(srcTy, tileShape),
+                                  cvtOp.getSrc().getLoc()));
+    // 2. clone
+    rewriter.setInsertionPointToStart(body);
+    Operation *newOp = rewriter.clone(*op, mapping);
+    newOp->getResult(0).setType(updateTensorType(dstTy, tileShape));
+    return newOp->getResult(0);
+  }
+};
+
+struct FuseParentForOpIntoGeneric : mlir::OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  FuseParentForOpIntoGeneric(MLIRContext *context,
+                             BlockArgAxisMap *blockArgAxisMap,
+                             PatternBenefit benefit)
+      : OpRewritePattern<scf::ForOp>(context, benefit),
+        blockArgAxisMap(blockArgAxisMap) {}
+
+  static std::optional<cpu::GenericOp> findTargetGenericOp(scf::ForOp forOp) {
+    // (1) For loop must have iter args — excludes persistent block-dispatch
+    // loops which have no iter args.
+    if (forOp.getNumRegionIterArgs() == 0)
+      return std::nullopt;
+
+    // (2) For step must be the constant 1 (can probably relax this later)
+    auto stepCst = forOp.getStep().getDefiningOp<arith::ConstantOp>();
+    if (!stepCst || cast<IntegerAttr>(stepCst.getValue()).getInt() != 1)
+      return std::nullopt;
+
+    Block *forBody = forOp.getBody();
+
+    // (3) Match a very specific genericOp/addPtr pattern. Again, this can
+    // probably be relaxed as we see more examples that are good candidates
+    // for fusion
+    cpu::GenericOp genericOp;
+    bool bodyValid = true;
+    for (Operation &bodyOp : forBody->without_terminator()) {
+      if (auto bodyGenericOp = dyn_cast<cpu::GenericOp>(bodyOp)) {
+        if (genericOp) {
+          bodyValid = false; // >1 generic
+          break;
+        }
+        genericOp = bodyGenericOp;
+      } else if (auto addptr = dyn_cast<triton::AddPtrOp>(bodyOp)) {
+        if (!llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr())) {
+          bodyValid = false;
+          break;
+        }
+      } else {
+        bodyValid = false;
+        break;
+      }
+    }
+    if (!bodyValid)
+      return std::nullopt;
+    if (!genericOp)
+      return std::nullopt;
+
+    // (4) Every scf.yield operand must come from either the inner generic
+    // or an addptr that advances a for iter arg.
+    auto yieldOp = cast<scf::YieldOp>(forBody->getTerminator());
+    bool yieldValid = llvm::all_of(yieldOp.getOperands(), [&](Value v) {
+      Operation *def = v.getDefiningOp();
+      if (!def)
+        return false;
+      if (def == genericOp.getOperation())
+        return true;
+      if (auto addptr = dyn_cast<triton::AddPtrOp>(def))
+        return llvm::is_contained(forOp.getRegionIterArgs(), addptr.getPtr());
+      return false;
+    });
+    if (!yieldValid)
+      return std::nullopt;
+
+    return genericOp;
+  }
+
+  LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+    // check fusion criteria
+    auto targetGenericOp = findTargetGenericOp(forOp);
+    if (!targetGenericOp)
+      return failure();
+
+    cpu::GenericOp genericOp = *targetGenericOp;
+
+    // TODO: this assumes no iter args for dot cases where we want to fuse the
+    // for loop. when we fuse the for loop and expand the generic to handle the
+    // K dimension, this code will be wrong.
+    unsigned numIV = genericOp.getNumInductionVars();
+    Block &genericBody = genericOp.getBody().front();
+
+    // 1. forward forOp upper/lower/step args and init args through the generic
+    // op so the cloned forOp can re-use them
+
+    SmallVector<Value> newIns(genericOp.getIns());
+    SmallVector<Value> newForControlOperands;
+    SmallVector<Value>
+        newForInitVals; // tiled init values for the fused for loop
+
+    IRMapping mapping;
+    for (auto [i, forOpOperand] : llvm::enumerate(forOp.getOperands())) {
+      if (i > forOp.getNumControlOperands() + forOp.getNumRegionIterArgs())
+        break; // only consider control operands args and init args
+
+      if (i < forOp.getNumControlOperands()) {
+        BlockArgument bodyArg = genericBody.addArgument(forOpOperand.getType(),
+                                                        forOpOperand.getLoc());
+        newIns.push_back(forOpOperand); // forward control operands to generic
+                                        // op directly, no need to update types
+        newForControlOperands.push_back(bodyArg);
+      } else {
+        auto forOpIterArg =
+            forOp.getRegionIterArg(i - forOp.getNumControlOperands());
+        // use the for op iter arg to lookup the tiling for this operand
+        for (auto [j, operand] : llvm::enumerate(genericOp.getIns())) {
+          if (operand == forOpIterArg) {
+
+            auto existingGenericBodyArg = genericBody.getArgument(numIV + j);
+            SmallVector<int32_t> tileShape;
+            if (auto rankedTensorType = dyn_cast<RankedTensorType>(
+                    existingGenericBodyArg.getType()))
+              tileShape = llvm::map_to_vector(
+                  rankedTensorType.getShape(),
+                  [](int64_t dim) { return static_cast<int32_t>(dim); });
+
+            BlockArgument bodyArg = genericBody.addArgument(
+                updateTensorType(forOpOperand.getType(), tileShape),
+                forOpOperand.getLoc());
+            mapping.map(forOpIterArg, bodyArg);
+            newIns.push_back(forOpOperand);
+            newForInitVals.push_back(bodyArg);
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. clone the for op into the generic body
+
+    // Snapshot old body ops before inserting newFor
+    SmallVector<Operation *> oldBodyOps;
+    for (Operation &op : genericBody.without_terminator())
+      oldBodyOps.push_back(&op);
+
+    // TODO: let's make sure we check to see that the generic op is the first op
+    // in the for op body
+    rewriter.setInsertionPointToStart(&genericBody);
+    assert(newForControlOperands.size() == forOp.getNumControlOperands() &&
+           "expected to forward all for op control operands to generic");
+    auto newFor = scf::ForOp::create(
+        rewriter, forOp.getLoc(), newForControlOperands[0],
+        newForControlOperands[1], newForControlOperands[2], newForInitVals);
+
+    // 3. map old for-arg body args to new iter args / induction vars
+
+    // Map all generic body args that received the for IV → new for IV.
+    // The IV may appear multiple times in the generic's ins (no break).
+    mapping.map(forOp.getInductionVar(), newFor.getInductionVar());
+    for (auto [j, operand] : llvm::enumerate(genericOp.getIns()))
+      if (operand == forOp.getInductionVar())
+        mapping.map(genericBody.getArgument(numIV + j),
+                    newFor.getInductionVar());
+
+    // Map generic body args at iter-arg positions → new for iter args.
+    // Also map the for iter args themselves → new for iter args so that ops
+    // cloned from the old for body (e.g. addptr advancing pointers) resolve
+    // to the current-iteration value rather than the initial value.
+    for (auto [i, forOpIterArg] : llvm::enumerate(forOp.getRegionIterArgs())) {
+      for (auto [j, operand] : llvm::enumerate(genericOp.getIns())) {
+        if (operand == forOpIterArg) {
+          mapping.map(genericBody.getArgument(numIV + j),
+                      newFor.getRegionIterArgs()[i]);
+        }
+      }
+      mapping.map(forOpIterArg, newFor.getRegionIterArgs()[i]);
+    }
+
+    // 4. clone body ops
+    rewriter.setInsertionPointToStart(newFor.getBody());
+    // Clone old generic body ops (without yield)
+    for (Operation *op : oldBodyOps)
+      rewriter.clone(*op, mapping);
+
+    // map generics results to cloned values so the other for body ops can
+    // reference them
+    auto genericYield = cast<cpu::YieldOp>(genericBody.getTerminator());
+    for (auto [genericResult, yieldOperand] :
+         llvm::zip(genericOp.getResults(), genericYield.getValues()))
+      mapping.map(genericResult, mapping.lookup(yieldOperand));
+
+    // Clone addptr ops from the old for body
+    for (Operation &op : forOp.getBody()->without_terminator()) {
+      if (!isa<cpu::GenericOp>(op)) {
+        SmallVector<int32_t> tileShape;
+        for (auto operand : op.getOperands()) {
+          if (mapping.contains(operand)) {
+            auto mapped = mapping.lookup(operand);
+            if (auto mappedTensorTy =
+                    dyn_cast<RankedTensorType>(mapped.getType())) {
+              // assuming all tensor operands have the same shape
+              tileShape = llvm::map_to_vector(
+                  mappedTensorTy.getShape(),
+                  [](int64_t dim) { return static_cast<int32_t>(dim); });
+              break;
+            }
+          }
+        }
+        if (!tileShape.empty()) {
+          for (auto operand : op.getOperands()) {
+            if (mapping.contains(operand))
+              continue; // already mapped (e.g. for iter arg) — don't re-add
+            newIns.push_back(operand);
+            mapping.map(operand,
+                        genericBody.addArgument(
+                            updateTensorType(operand.getType(), tileShape),
+                            operand.getLoc()));
+          }
+        }
+        Operation *newOp = rewriter.clone(op, mapping);
+        assert(newOp->getNumResults() == 1 &&
+               "expected cloned for op body ops to have only 1 result");
+        if (!tileShape.empty())
+          newOp->getResult(0).setType(
+              updateTensorType(newOp->getResult(0).getType(), tileShape));
+      }
+    }
+
+    // clone the for op yield
+    Block *forBody = forOp.getBody();
+    rewriter.clone(*forBody->getTerminator(), mapping);
+
+    // 5. build the generic ttc.yield op
+    scf::YieldOp oldForYield = cast<scf::YieldOp>(forBody->getTerminator());
+    auto oldGenericYield = cast<cpu::YieldOp>(genericBody.getTerminator());
+    SmallVector<Value> newGenericYieldVals;
+    for (auto [j, oldResult] : llvm::enumerate(genericOp.getResults())) {
+      for (auto [i, operand] : llvm::enumerate(oldForYield.getOperands())) {
+        if (operand == oldResult) {
+          newGenericYieldVals.push_back(newFor.getResult(i));
+          break;
+        }
+      }
+    }
+    rewriter.setInsertionPoint(oldGenericYield);
+    rewriter.replaceOpWithNewOp<cpu::YieldOp>(oldGenericYield,
+                                              newGenericYieldVals);
+
+    // 6. clean up
+    // erase old body ops
+    for (Operation *op : llvm::reverse(oldBodyOps))
+      rewriter.eraseOp(op);
+
+    // drop generic ins operands that come from the old for op
+    SetVector<unsigned> operandsToDrop;
+    for (auto arg : forOp.getBody()->getArguments()) {
+      for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+        if (operand == arg)
+          operandsToDrop.insert(i);
+      }
+    }
+
+    // NOTE: We do not update AxisKind here since we expect all added block args
+    // to be scalar at this point in the fusion. AxisKind will default to
+    // uninitialized. If a check fails in MakeRangeOp fusion (or another
+    // location where AxisKind is reference), we can support re-seeding AxisKind
+    // here.
+    SmallVector<unsigned> sortedToDrop(operandsToDrop.begin(),
+                                       operandsToDrop.end());
+    llvm::sort(sortedToDrop, std::greater<unsigned>());
+    for (auto idx : sortedToDrop) {
+      genericBody.eraseArgument(numIV + idx);
+      newIns.erase(newIns.begin() + idx);
+    }
+
+    rewriter.modifyOpInPlace(
+        genericOp, [&]() { genericOp.getInsMutable().assign(newIns); });
+
+    rewriter.moveOpBefore(genericOp, forOp);
+
+    // update for op users to use the generic op results. if the pattern match
+    // is correct, this should result in the existing for op being unused
+    for (auto [j, newForResult] : llvm::enumerate(newGenericYieldVals)) {
+      unsigned i = cast<OpResult>(newForResult).getResultNumber();
+      rewriter.replaceAllUsesWith(forOp.getResult(i), genericOp.getResult(j));
+    }
+    rewriter.eraseOp(forOp);
+
+    return success();
+  }
+
+  BlockArgAxisMap *blockArgAxisMap;
+};
+
+struct TileKLoop : mlir::OpRewritePattern<scf::ForOp> {
+  using OpRewritePattern<scf::ForOp>::OpRewritePattern;
+
+  TileKLoop(MLIRContext *context, BlockArgAxisMap *blockArgAxisMap,
+            PatternBenefit benefit)
+      : OpRewritePattern<scf::ForOp>(context, benefit),
+        blockArgAxisMap(blockArgAxisMap) {}
+
+  static std::optional<std::pair<cpu::GenericOp, triton::DotOp>>
+  findTargetGenericOp(scf::ForOp forOp) {
+
+    // step must be 1
+    if (!matchPattern(forOp.getStep(), m_One()))
+      return std::nullopt;
+    // loop must be from 0 to numKTiles
+    if (!matchPattern(forOp.getLowerBound(), m_Zero()))
+      return std::nullopt;
+
+    auto numIterArgs = forOp.getNumRegionIterArgs();
+    if (numIterArgs != 1)
+      return std::nullopt;
+
+    // body must contain exactly 1 generic op and a scf.yield
+    cpu::GenericOp genericOp;
+    for (auto &op : forOp.getBody()->without_terminator()) {
+      if (auto bodyGenericOp = dyn_cast<cpu::GenericOp>(op)) {
+        if (genericOp) {
+          return std::nullopt; // >1 generic
+        }
+        genericOp = bodyGenericOp;
+      } else {
+        return std::nullopt; // unexpected op in for body
+      }
+    }
+    if (!genericOp)
+      return std::nullopt;
+
+    // for safety, we can relax these later
+    if (!genericOp.getBody().hasOneBlock())
+      return std::nullopt;
+    if (genericOp.getNumResults() != 1)
+      return std::nullopt; // generic must have exactly 1 result (the dot op
+                           // result - should we verify that?)
+    // the generic cannot have existing iter args (this will break the pattern
+    // matching below but we should adjust the pattern matcher to handle this
+    // generically)
+    if (genericOp.getNumIterArgs() != 0)
+      return std::nullopt;
+
+    // ensure the sole loop carried iter arg is the dot op accumulator
+    triton::DotOp dotOp;
+    BlockArgument accArg = forOp.getRegionIterArg(0);
+    for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+      if (operand == accArg) {
+        BlockArgument genericBodyArg = genericOp.getIterArg(i);
+        for (auto user : genericBodyArg.getUsers()) {
+          if (auto crtDotOp = dyn_cast<triton::DotOp>(user)) {
+            dotOp = crtDotOp;
+            if (genericBodyArg != dotOp.getC())
+              return std::nullopt; // loop carried iter arg is not the
+                                   // accumulator
+          }
+        }
+      }
+    }
+    if (!dotOp)
+      return std::nullopt;
+
+    return std::make_pair(genericOp, dotOp);
+  }
+
+  LogicalResult
+  matchAndRewrite(scf::ForOp forOp,
+                  mlir::PatternRewriter &rewriter) const override {
+
+    auto targetGenericOp = findTargetGenericOp(forOp);
+    if (!targetGenericOp)
+      return failure();
+
+    auto [genericOp, dotOp] = *targetGenericOp;
+
+    // 1. partition inputs, drop existing for loop inputs
+    Value kIV = forOp.getInductionVar();
+    Value acc = forOp.getRegionIterArg(0);
+    Block &oldBody = genericOp.getBody().front();
+    // insArgOffset is the index of the first ins body arg: skips the tile IV
+    // args (one per tileShape dim) and any initVal args.
+    unsigned insArgOffset = genericOp.getInsArgOffset();
+
+    SmallVector<unsigned> kIVBodyArgPositions;
+    unsigned accBodyArgPos = 0;
+    bool foundAcc = false;
+
+    struct KeptInsEntry {
+      unsigned oldBodyArgPos;
+      Value value;
+      SmallVector<int32_t>
+          tileShape; // tiled shape of the body arg; {} for scalars
+    };
+    SmallVector<KeptInsEntry> keptIns;
+
+    for (auto [i, operand] : llvm::enumerate(genericOp.getIns())) {
+      unsigned bodyArgPos = insArgOffset + i;
+      if (operand == kIV) {
+        kIVBodyArgPositions.push_back(bodyArgPos);
+      } else if (operand == acc) {
+        accBodyArgPos = bodyArgPos;
+        foundAcc = true;
+      } else {
+        SmallVector<int32_t> shape;
+        if (auto tensorTy = dyn_cast<RankedTensorType>(
+                oldBody.getArgument(bodyArgPos).getType()))
+          shape = SmallVector<int32_t>(tensorTy.getShape().begin(),
+                                       tensorTy.getShape().end());
+        keptIns.push_back({bodyArgPos, operand, shape});
+      }
+    }
+
+    // sanity: we must have found both the acc and at least one kIV entry
+    if (!foundAcc || kIVBodyArgPositions.empty())
+      return failure();
+
+    // 2. Build new blockShape and tileShape using the A operand to get the K
+    // block size
+    auto aOperandType = cast<RankedTensorType>(dotOp.getA().getType());
+    gpu::BlockedEncodingAttr aOperandEncoding =
+        dyn_cast<gpu::BlockedEncodingAttr>(aOperandType.getEncoding());
+    if (!aOperandEncoding) {
+      auto aDotOperandEncoding =
+          cast<gpu::DotOperandEncodingAttr>(aOperandType.getEncoding());
+      aOperandEncoding =
+          cast<gpu::BlockedEncodingAttr>(aDotOperandEncoding.getParent());
+    }
+
+    auto [blockShape, tileShape] =
+        getBlockAndTileShapes(aOperandType, aOperandEncoding);
+    int32_t kTileShape =
+        blockShape[1]; // use the block shape as the kTile shape. The k block
+                       // shape is the runtime value of K (the for loop upper
+                       // bound)
+
+    rewriter.setInsertionPoint(forOp);
+    auto kSizeLoc = forOp.getUpperBound().getLoc();
+    Value kTileConst = arith::ConstantOp::create(
+        rewriter, kSizeLoc, rewriter.getI32IntegerAttr(kTileShape));
+    Value kSize = arith::MulIOp::create(rewriter, kSizeLoc,
+                                        forOp.getUpperBound(), kTileConst);
+
+    SmallVector<Value> newBlockShapes = {kSize, genericOp.getBlockShape()[0],
+                                         genericOp.getBlockShape()[1]};
+    SmallVector<int32_t> newTileShapes = {
+        kTileShape, genericOp.getTileShape()[0], genericOp.getTileShape()[1]};
+    Type accIterArgType =
+        updateTensorType(dotOp.getC().getType(), {genericOp.getTileShape()[0],
+                                                  genericOp.getTileShape()[1]});
+
+    // 3. Build new TiledInput list
+    SmallVector<TiledInput> newTiledIns;
+    for (auto &entry : keptIns)
+      newTiledIns.push_back({entry.value, entry.tileShape});
+    auto newInsValues = llvm::map_to_vector(
+        newTiledIns, [](const TiledInput &ti) { return ti.value; });
+
+    // 4. create the new generic op and generic body
+    auto newGeneric = cpu::GenericOp::create(
+        rewriter, genericOp.getLoc(), forOp.getResultTypes(),
+        /*initVals=*/ValueRange{forOp.getInitArgs()[0]}, newInsValues,
+        newBlockShapes, newTileShapes,
+        /*reductionDims=*/{0});
+
+    IRMapping mapping;
+    Block *newBody = initGenericBody(rewriter, newGeneric, newTiledIns,
+                                     {accIterArgType}, newTileShapes, mapping);
+
+    // 5. wire up body arg mappings
+    // Generic tile loop IVs
+    for (unsigned i = 0; i < genericOp.getNumInductionVars(); i++)
+      mapping.map(oldBody.getArgument(i), newBody->getArgument(i + 1));
+
+    // old acc body arg -> new acc tile iter arg
+    mapping.map(oldBody.getArgument(accBodyArgPos), newGeneric.getIterArg(0));
+
+    // other kept body args -> new body args
+    for (auto [newPos, entry] : llvm::enumerate(keptIns)) {
+      BlockArgument oldBlockArg = oldBody.getArgument(entry.oldBodyArgPos);
+      BlockArgument newBlockArg =
+          newBody->getArgument(newGeneric.getInsArgOffset() + newPos);
+      mapping.map(oldBlockArg, newBlockArg);
+      // The K loop is only fused into the GenericOp when the GenericOp is the
+      // only non-terminator operation in the K loop body. If the GenericOp is
+      // the only operation, then other ops (loads, addptr, etc) should be fully
+      // fused, and in all example kernels the GenericOp only has scalar inputs.
+      // Any known axis kind op would need to have the axis map updated to add
+      // the newly added K tile induction var. Assert all block args are unknown
+      // for now, but lifting this assertion would not be difficult in the
+      // future if required.
+      assert(!(*blockArgAxisMap)[oldBlockArg].isKnown() &&
+             "expected all remapped block args to have unknown axis kind when "
+             "fusing tiled K loop");
+      (*blockArgAxisMap)[newBlockArg] = (*blockArgAxisMap)[oldBlockArg];
+    }
+
+    // 6. clone body ops
+    rewriter.setInsertionPointToStart(newBody);
+
+    // convert loop kIV from global idx to tile idx
+    Value kElemOffset = newBody->getArgument(0);
+    Value kTileIdxConst = arith::ConstantOp::create(
+        rewriter, forOp.getLoc(), rewriter.getI32IntegerAttr(kTileShape));
+    Value kTileIdx = arith::DivSIOp::create(rewriter, forOp.getLoc(),
+                                            kElemOffset, kTileIdxConst);
+    for (auto pos : kIVBodyArgPositions)
+      mapping.map(oldBody.getArgument(pos), kTileIdx);
+
+    for (Operation &op : oldBody.without_terminator())
+      rewriter.clone(op, mapping);
+
+    auto oldYield = cast<cpu::YieldOp>(oldBody.getTerminator());
+    cpu::YieldOp::create(rewriter, oldYield.getLoc(),
+                         mapping.lookup(oldYield.getValues()[0]));
+
+    // 7. replace old op
+    rewriter.replaceOp(forOp, newGeneric.getResults());
+    return success();
+  }
+
+  BlockArgAxisMap *blockArgAxisMap;
+};
+
+} // namespace
+
+struct TritonCPUTileAndFusePass
+    : public impl::TritonCPUTileAndFuseBase<TritonCPUTileAndFusePass> {
+  using TritonCPUTileAndFuseBase::TritonCPUTileAndFuseBase;
+
+  void runOnOperation() override {
+    MLIRContext *context = &getContext();
+    ModuleOp m = getOperation();
+    mlir::RewritePatternSet patterns(context);
+    constexpr int benefitDefault = 1;
+
+    // Step 1: Create the generic ops
+    patterns.add<WrapStores>(context, benefitDefault + 1);
+    patterns.add<WrapReduceOp>(context, benefitDefault + 1);
+    patterns.add<WrapDotOp>(context, benefitDefault + 1);
+    patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
+
+    if (applyPatternsGreedily(m, std::move(patterns)).failed()) {
+      signalPassFailure();
+    }
+
+    LDBG("Module before fusion " << m);
+
+    // stores the block argument -> tensor tile axis mapping per generic block
+    // arg
+    BlockArgAxisMap blockArgAxis;
+    m.walk([&](cpu::GenericOp genericOp) {
+      seedGenericBlockArgAxisKind(genericOp, blockArgAxis);
+    });
+
+    // Step 2: Fuse ops into each generic
+    RewritePatternSet fusePatterns(context);
+
+    fusePatterns.add<FuseElementwiseIntoGeneric>(context, &blockArgAxis,
+                                                 benefitDefault);
+    fusePatterns.add<FuseBroadcastIntoGeneric>(context, &blockArgAxis,
+                                               benefitDefault);
+    fusePatterns.add<FuseExpandDimsIntoGeneric>(context, &blockArgAxis,
+                                                benefitDefault);
+    fusePatterns.add<FuseMakeRangeIntoGeneric>(context, &blockArgAxis,
+                                               benefitDefault);
+    fusePatterns.add<FuseConstantIntoGeneric>(context, &blockArgAxis,
+                                              benefitDefault);
+    fusePatterns.add<FuseTransOpIntoGeneric>(context, &blockArgAxis,
+                                             benefitDefault);
+    fusePatterns.add<FuseConvertLayoutOpIntoGeneric>(context, &blockArgAxis,
+                                                     benefitDefault);
+
+    fusePatterns.add<TileKLoop>(context, &blockArgAxis, benefitDefault + 10);
+    fusePatterns.add<FuseParentForOpIntoGeneric>(context, &blockArgAxis,
+                                                 benefitDefault);
+
+    if (applyPatternsGreedily(m, std::move(fusePatterns)).failed()) {
+      signalPassFailure();
+    }
+
+    // Verify all transpose def-use chains are fused to make range; otherwise
+    // the tile extraction lowering will fail to slice in the correct dimension
+    WalkResult r = m.walk([&](cpu::GenericOp g) {
+      Block *body = &g.getBody().front();
+      for (auto [i, in] : llvm::enumerate(g.getIns())) {
+        if (!isa<RankedTensorType>(in.getType()))
+          continue;
+
+        BlockArgument tile = body->getArgument(g.getInsArgOffset() + i);
+        SetVector<Operation *> fwd;
+        getForwardSlice(tile, &fwd);
+        for (Operation *op : fwd)
+          if (auto t = dyn_cast<triton::TransOp>(op)) {
+            auto inTy = cast<RankedTensorType>(t.getSrc().getType());
+            auto order = t.getOrder();
+            for (unsigned j = 0; j < order.size(); ++j)
+              if ((unsigned)order[j] != j && inTy.getShape()[order[j]] > 1) {
+                g.emitError()
+                    << "Ins operand #" << i
+                    << " is transposed in-body over "
+                       "a tiled axis but was not fused to make_range; "
+                       "positional tile extraction would use the wrong "
+                       "induction variable";
+                return WalkResult::interrupt();
+              }
+          }
+      }
+      return WalkResult::advance();
+    });
+    if (r.wasInterrupted())
+      return signalPassFailure();
+  }
+};
+
+} // namespace cpu
+} // namespace triton
+} // namespace mlir
