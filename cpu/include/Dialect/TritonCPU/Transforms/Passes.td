@@ -16,9 +16,6 @@ def TritonCPUAccelerateMatmul : Pass<"tritoncpu-accelerate-matmul", "mlir::Modul
   }];
 
   let options = [
-    Option<"optimizeBlockLayout", "optimize-block-layout", "bool",
-           /*default=*/"false",
-           "Rewrite tensor block layouts for improved memory access patterns">,
     Option<"canonicalizeKLoop", "canonicalize-k-loop", "bool",
            /*default=*/"true",
            "Canonicalize K-loop pointer iter args to direct per-iteration "
