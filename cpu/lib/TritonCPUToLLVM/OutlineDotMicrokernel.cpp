@@ -87,7 +87,8 @@ noinline.
           auto blockArg = dyn_cast<BlockArgument>(operand);
           if (blockArg) {
             // get the divisibility from the parent func
-            divisibilityMap[i] = parentFunc.getArgAttr(i, "tt.divisibility");
+            divisibilityMap[argumentTypes.size()] =
+                parentFunc.getArgAttr(i, "tt.divisibility");
           } else {
             genericOp->emitWarning("Outlining pointer operand without known "
                                    "divisibility, performance may suffer");
@@ -114,13 +115,16 @@ noinline.
 
       IRMapping mapping;
       // map generic arguments and clone constants first
-      unsigned crtFuncArgIndex = 0;
+      unsigned numConstantsSeen = 0;
       for (auto [i, operand] : llvm::enumerate(genericOp->getOperands())) {
         if (auto constantOp =
                 dyn_cast_or_null<arith::ConstantOp>(operand.getDefiningOp())) {
           bodyBuilder.clone(*constantOp, mapping);
+          numConstantsSeen++;
         } else {
-          mapping.map(operand, entryBlock->getArgument(crtFuncArgIndex++));
+          // subtract the number of cloned constants seen so far when converting
+          // generic operand index to func arg index
+          mapping.map(operand, entryBlock->getArgument(i - numConstantsSeen));
         }
       }
 
