@@ -41,29 +41,6 @@ struct OutlineDotMicrokernelPass
   using OutlineDotMicrokernelBase::OutlineDotMicrokernelBase;
 
   void runOnOperation() override {
-    // TODO:
-    /**
-     *
-     *
-
-Compute the live-in set as every SSA operand of the generic op — its init, all
-its ins, and its blocks sizes. Do this by walking the op's operands, not by
-reading a known ins order. This is the genericity point made concrete: a naive
-"read the ins list" would miss two live-ins here — %cst (the init) and %24 (the
-padded-K block extent in blocks[%24, %c64, %c64]). Live-in-of-the-op analysis
-catches all three categories uniformly, and it's the same analysis whether the
-kernel passes (ptr, stride) pairs, a tensor descriptor, or a group index. Build
-the function signature from the types of those live-ins; the result type is the
-generic's result type, tensor<64x64xf32, #blocked>. Move the generic op into the
-new function body, remapping its operands to the corresponding block arguments,
-then func.return its result. The generic's interior — tile loop, addressing,
-masks, loads, tt.dot — moves wholesale, unchanged. At the original site, replace
-the generic with a func.call passing the live-ins, and RAUW the generic's result
-(%25) with the call result so %26 consumes it transparently. Mark the function
-noinline.
-     *
-     */
-
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
 
