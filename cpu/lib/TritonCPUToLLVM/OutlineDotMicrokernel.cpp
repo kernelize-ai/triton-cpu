@@ -132,6 +132,20 @@ noinline.
 
       triton::ReturnOp::create(bodyBuilder, uKernelFunc.getLoc(),
                                newGeneric->getResults());
+
+      // now replace the existing generic op with a call to the outlined uKernel
+      OpBuilder cBuilder(genericOp);
+      SmallVector<Value> operandsWithoutConstants = llvm::to_vector(
+          llvm::make_filter_range(genericOp->getOperands(), [&](Value operand) {
+            auto constantOp =
+                dyn_cast_or_null<arith::ConstantOp>(operand.getDefiningOp());
+            return !constantOp;
+          }));
+      auto call = triton::CallOp::create(
+          cBuilder, genericOp.getLoc(), uKernelFunc.getName(),
+          genericOp.getResultTypes(), operandsWithoutConstants);
+      genericOp->replaceAllUsesWith(call.getResults());
+      genericOp->erase();
     });
   }
 };
