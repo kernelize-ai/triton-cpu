@@ -62,4 +62,16 @@ def OutlineDotMicrokernel : Pass<"outline-dot-microkernel", "mlir::ModuleOp"> {
     }];
 }
 
+def LowerDotMicrokernelToSME : Pass<"lower-dot-microkernel-to-sme", "mlir::ModuleOp"> {
+    let summary = "Lower a dot op microkernel to Arm SME dialect representation";
+
+    let description = [{
+        TODO
+    }];
+
+    let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                             "mlir::triton::TritonDialect"
+                            ];
+}
+
 #endif

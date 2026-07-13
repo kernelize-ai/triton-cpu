@@ -216,6 +216,7 @@ class CPUBackend(BaseBackend):
         pm.enable_debug()
 
         cpu.passes.ttcpuir.add_outline_dot_microkernel(pm)
+        cpu.passes.ttcpuir.add_lower_dot_microkernel_to_sme(pm)
 
         passes.convert.add_scf_to_cf(pm)
         cpu.passes.ttcpuir.add_allocate_shared_memory(pm)

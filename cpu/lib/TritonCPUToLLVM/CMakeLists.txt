@@ -6,6 +6,7 @@ add_triton_library(TritonCPUToLLVM
     GenericOpToLLVM.cpp
     GPUOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
+    LowerDotMicrokernelToSME.cpp
     MakeDynamicRangeOpToLLVM.cpp
     MaskedOpsToLLVM.cpp
     OutlineDotMicrokernel.cpp

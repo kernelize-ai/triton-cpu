@@ -60,6 +60,9 @@ void init_triton_cpu_passes(py::module_ &m) {
   m.def("add_outline_dot_microkernel", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createOutlineDotMicrokernelPass());
   });
+  m.def("add_lower_dot_microkernel_to_sme", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createLowerDotMicrokernelToSMEPass());
+  });
   m.def("add_allocate_shared_memory", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createAllocateSharedMemoryPass());
   });
