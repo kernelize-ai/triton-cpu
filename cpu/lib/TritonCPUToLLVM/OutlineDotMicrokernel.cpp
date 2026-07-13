@@ -87,8 +87,8 @@ noinline.
           auto blockArg = dyn_cast<BlockArgument>(operand);
           if (blockArg) {
             // get the divisibility from the parent func
-            divisibilityMap[argumentTypes.size()] =
-                parentFunc.getArgAttr(i, "tt.divisibility");
+            divisibilityMap[argumentTypes.size()] = parentFunc.getArgAttr(
+                blockArg.getArgNumber(), "tt.divisibility");
           } else {
             genericOp->emitWarning("Outlining pointer operand without known "
                                    "divisibility, performance may suffer");
