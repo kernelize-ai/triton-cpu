@@ -96,14 +96,14 @@ noinline.
         argumentTypes.push_back(operand.getType());
       }
 
-      auto uKernelFuncTy = moduleBuilder.getFunctionType(argumentTypes, {});
-      llvm::errs() << "micro kernel function type: " << uKernelFuncTy << "\n";
+      auto uKernelFuncTy = moduleBuilder.getFunctionType(
+          argumentTypes, genericOp.getResultTypes());
 
       auto uKernelFunc = triton::FuncOp::create(
           moduleBuilder, genericOp.getLoc(),
           getMicrokernelFuncName(mod, genericOp), uKernelFuncTy);
       uKernelFunc.setVisibility(SymbolTable::Visibility::Private);
-      // TODO: no-inline?
+      uKernelFunc->setAttr("noinline", moduleBuilder.getBoolAttr(true));
 
       for (auto [index, attr] : divisibilityMap) {
         uKernelFunc.setArgAttr(index, "tt.divisibility", attr);
@@ -113,19 +113,21 @@ noinline.
       OpBuilder bodyBuilder = OpBuilder::atBlockBegin(entryBlock);
 
       IRMapping mapping;
-      // TODO: clone ops
-
-      triton::ReturnOp::create(bodyBuilder, uKernelFunc.getLoc());
-#if 0
-      // DenseMap<unsigned, arith::ConstantOp> hoistedConstants; // original operand index -> constant to hoist
+      // map generic arguments and clone constants first
+      unsigned crtFuncArgIndex = 0;
       for (auto [i, operand] : llvm::enumerate(genericOp->getOperands())) {
-        if (auto constantOp = dyn_cast_or_null<arith::ConstantOp>(operand.getDefiningOp())) {
-
+        if (auto constantOp =
+                dyn_cast_or_null<arith::ConstantOp>(operand.getDefiningOp())) {
+          bodyBuilder.clone(*constantOp, mapping);
+        } else {
+          mapping.map(operand, entryBlock->getArgument(crtFuncArgIndex++));
         }
-        llvm::errs() << i << " : " << operand << "\n";
       }
-#endif
-      // assert(false && "todo");
+
+      auto newGeneric = bodyBuilder.clone(*genericOp, mapping);
+
+      triton::ReturnOp::create(bodyBuilder, uKernelFunc.getLoc(),
+                               newGeneric->getResults());
     });
   }
 };
