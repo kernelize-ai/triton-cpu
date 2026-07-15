@@ -70,7 +70,10 @@ def LowerDotMicrokernelToSME : Pass<"lower-dot-microkernel-to-sme", "mlir::Modul
     }];
 
     let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
-                             "mlir::triton::TritonDialect"
+                             "mlir::triton::TritonDialect",
+                             "mlir::memref::MemRefDialect",
+                             "mlir::arm_sme::ArmSMEDialect",
+                             "mlir::arith::ArithDialect"
                             ];
 }
 
