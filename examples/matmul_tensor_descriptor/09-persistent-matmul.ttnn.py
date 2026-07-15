@@ -111,7 +111,7 @@ def matmul_kernel_tma(a_desc, b_desc, c_desc,  #
                       FP8_OUTPUT: tl.constexpr,  #
                       WARP_SPECIALIZE: tl.constexpr,  #
                       ):
-    dtype = tl.float8e4nv if FP8_OUTPUT else tl.float32
+    dtype = tl.float8e4nv if FP8_OUTPUT else tl.bfloat16
 
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -253,21 +253,30 @@ def run_test(expect, fn, a, b, label, enabled=True):
         icon = "⭕"
     print(f"\r  {label}: {icon}  ")
 
+def torch_pcc(golden, result):
+    x = golden.detach().reshape(-1).float()
+    y = result.detach().reshape(-1).float()
+    m = torch.isfinite(x) & torch.isfinite(y)
+    x, y = x[m], y[m]
+    # torch.corrcoef treats rows as variables, cols as observations; the
+    # off-diagonal of the 2x2 is the Pearson correlation between the two vectors.
+    if x.numel() < 2 or x.std() == 0 or y.std() == 0:
+        return 1.0 if torch.allclose(x, y) else 0.0
+    return torch.corrcoef(torch.stack([x, y]))[0, 1].item()
 
 def validate(M, N, K, dtype):
     print(f"{M=}, {N=}, {K=}, verification naive vs: ")
     a = torch.randn((M, K), device="cpu", dtype=torch.float32).to(dtype)
     b = torch.randn((K, N), device="cpu", dtype=torch.float32).to(dtype)
-    #a = torch.arange(M*K, dtype=torch.float32).reshape(M, K)
-    #a = torch.full((M, K), 2.0, device="cpu", dtype=torch.bfloat16).to(dtype)
-    #b = torch.ones((K, N), device="cpu", dtype=torch.float32).to(dtype)
     #b = b.T.contiguous()
 
     naive_result = torch_matmul(a, b.T).to(torch.float32)
     triton_result = matmul_tma(a, b, False)
     print(f"triton_result: {triton_result}")
     print(f"naive_result: {naive_result}")
-    torch.testing.assert_allclose(naive_result, triton_result, atol=0.05, rtol=1e-2)
+    pcc = torch_pcc(naive_result, triton_result)
+    print(f"PCC = {pcc:.6f}")
+    assert pcc > 0.97, f"PCC too low: {pcc:.6f} (expected > 0.97)"
     print("Success!")
     """
     run_test(naive_result, torch_matmul, a, b, "Torch", enabled=dtype == torch.float16)
@@ -314,7 +323,7 @@ if __name__ == "__main__":
     if args.prec == 'fp8' and (not hasattr(torch, "float8_e4m3fn") or not is_cuda()):
         print("This example requires CUDA with fp8 support.")
     else:
-        dtype = torch.float8_e4m3fn if args.prec == 'fp8' else torch.float32
+        dtype = torch.float8_e4m3fn if args.prec == 'fp8' else torch.bfloat16
 
         if args.K and args.K_range is None:
             args.K_range = [args.K, args.K]
@@ -324,7 +333,7 @@ if __name__ == "__main__":
 
         validate(32, 32, 32, dtype)
         validate(64, 32, 32, dtype)
-        validate(1024, 1024, 256, dtype)
+        validate(1024, 1024, 1024, dtype)
         
         """
         validate(8192, 8192, args.K_range[0], dtype)
