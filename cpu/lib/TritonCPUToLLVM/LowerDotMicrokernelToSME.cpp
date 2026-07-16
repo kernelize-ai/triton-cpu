@@ -264,6 +264,70 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   return smeFunc;
 }
 
+// Build a 2D `tensor<rows x cols x !tt.ptr<elemTy>, enc>` addressing a
+// contiguous, row-major buffer based at the scalar pointer `basePtr`
+// (!tt.ptr<elemTy>). offset[r, c] = r * cols + c. Shape/encoding are taken from
+// `likeTy` so the result can feed a `tt.store` whose value has type `likeTy`.
+//
+// `rowStride` is the leading dimension of the underlying buffer (elements per
+// row), which may exceed `cols` when the tile is a window into a larger buffer.
+// `rowOffset`/`colOffset` are absolute i32 positions of this tile's top-left
+// element within that buffer. offset[r, c] = (rowOffset + r) * rowStride +
+// (colOffset + c).
+static Value buildContiguousPtrTensor(OpBuilder &rewriter, Location loc,
+                                      Value basePtr, Value rowOffset,
+                                      Value colOffset, int64_t rowStride,
+                                      RankedTensorType likeTy) {
+  MLIRContext *context = rewriter.getContext();
+  assert(likeTy.getRank() == 2 && "expected a 2D value tensor");
+  int64_t rows = likeTy.getShape()[0];
+  int64_t cols = likeTy.getShape()[1];
+  auto enc = cast<triton::gpu::DistributedEncodingTrait>(likeTy.getEncoding());
+  Type i32Ty = rewriter.getI32Type();
+
+  // Row indices: tensor<rows x i32, slice<dim=1, enc>> spanning
+  //   [rowOffset, rowOffset + rows) --expand axis=1--> tensor<rows x 1 x i32,
+  //   enc>
+  auto rowSlice = triton::gpu::SliceEncodingAttr::get(context, /*dim=*/1, enc);
+  Value rowRange = cpu::MakeDynamicRangeOp::create(
+      rewriter, loc, RankedTensorType::get({rows}, i32Ty, rowSlice), rowOffset);
+  Value rows2d = triton::ExpandDimsOp::create(
+      rewriter, loc, RankedTensorType::get({rows, 1}, i32Ty, enc), rowRange,
+      /*axis=*/1);
+
+  // Col indices: tensor<cols x i32, slice<dim=0, enc>> spanning
+  //   [colOffset, colOffset + cols) --expand axis=0--> tensor<1 x cols x i32,
+  //   enc>
+  auto colSlice = triton::gpu::SliceEncodingAttr::get(context, /*dim=*/0, enc);
+  Value colRange = cpu::MakeDynamicRangeOp::create(
+      rewriter, loc, RankedTensorType::get({cols}, i32Ty, colSlice), colOffset);
+  Value cols2d = triton::ExpandDimsOp::create(
+      rewriter, loc, RankedTensorType::get({1, cols}, i32Ty, enc), colRange,
+      /*axis=*/0);
+
+  // rowOff = (rowOffset + rowIdx) * rowStride, using the buffer's leading
+  // dimension (not the tile width).
+  Value strideSplat = triton::SplatOp::create(
+      rewriter, loc, cast<RankedTensorType>(rows2d.getType()),
+      arith::ConstantOp::create(rewriter, loc,
+                                rewriter.getI32IntegerAttr(rowStride)));
+  Value rowOff = arith::MulIOp::create(rewriter, loc, rows2d, strideSplat);
+
+  // Broadcast both to rows x cols and add -> full offset tensor.
+  auto offTy = RankedTensorType::get({rows, cols}, i32Ty, enc);
+  Value rowOffB = triton::BroadcastOp::create(rewriter, loc, offTy, rowOff);
+  Value colOffB = triton::BroadcastOp::create(rewriter, loc, offTy, cols2d);
+  Value offsets = arith::AddIOp::create(rewriter, loc, rowOffB, colOffB);
+
+  // Splat the base pointer, then addptr with the offsets.
+  auto ptrTensorTy = RankedTensorType::get(
+      {rows, cols}, PointerType::get(likeTy.getElementType(), /*addrSpace=*/0),
+      enc);
+  Value basePtrs = triton::SplatOp::create(rewriter, loc, ptrTensorTy, basePtr);
+  return triton::AddPtrOp::create(rewriter, loc, ptrTensorTy, basePtrs,
+                                  offsets);
+}
+
 void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
                                  MLIRContext *context) {
   Location loc = funcOp.getLoc();
@@ -328,6 +392,11 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
       mapping.map(existingArg, body->addArgument(existingArg.getType(),
                                                  existingArg.getLoc()));
     }
+    // TODO: map induction vars
+    // K, M, N --> K, M
+    mapping.map(desc.generic.getBody().getArgument(0), body->getArgument(0));
+    mapping.map(desc.generic.getBody().getArgument(1), body->getArgument(1));
+
     auto aBufBlockArg = body->addArgument(aBuf.getType(), aBuf.getLoc());
     rewriter.setInsertionPointToStart(body);
 
@@ -336,8 +405,12 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
     }
 
     Value newA = rewriter.clone(*aOp, mapping)->getResult(0);
-    // store A to the temp buffer
-    triton::StoreOp::create(rewriter, loc, aBufBlockArg, newA,
+    // store A to the temp buffer: tt.store needs a tensor of pointers matching
+    // newA's shape/encoding, not the bare base pointer.
+    Value aPtrs = buildContiguousPtrTensor(
+        rewriter, loc, aBufBlockArg, body->getArgument(0), body->getArgument(1),
+        /*rowStride=*/desc.blockK, cast<RankedTensorType>(newA.getType()));
+    triton::StoreOp::create(rewriter, loc, aPtrs, newA,
                             triton::CacheModifier::NONE,
                             triton::EvictionPolicy::NORMAL);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
