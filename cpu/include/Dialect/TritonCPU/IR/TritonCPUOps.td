@@ -343,7 +343,9 @@ def TTC_LocalAllocOp : TTC_Op<"local_alloc", [DeclareOpInterfaceMethods<MemoryEf
 
   let builders = [
     OpBuilder<(ins "PointerType":$type, "uint32_t":$size),
-      [{ build($_builder, $_state, type, size, Value(), IntegerAttr()); }]>
+      [{ build($_builder, $_state, type, size, Value(), IntegerAttr()); }]>,
+    OpBuilder<(ins "PointerType":$type, "uint32_t":$size, "Value":$src),
+      [{ build($_builder, $_state, type, size, src, IntegerAttr()); }]>
   ];
 
   // TODO: verifier, folder, etc
