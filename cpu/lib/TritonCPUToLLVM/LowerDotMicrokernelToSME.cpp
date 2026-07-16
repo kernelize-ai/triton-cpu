@@ -340,6 +340,83 @@ static Value buildContiguousPtrTensor(OpBuilder &rewriter, Location loc,
   return ptr;
 }
 
+// Build a 2D pack generic ([K, col]) that re-loads `operand` and clones its
+// address-computation chain into the new generic's body. The convert_layout
+// feeding the dot is peeled so we pack the raw blocked load tile (the dot, and
+// its dot_op layout, is being replaced by the SME kernel; a blocked tile
+// transposes cleanly). `colBlock`/`colTile` are the block/tile sizes of the
+// second (M or N) dimension. `indDims` lists which induction dims of the
+// original 3D generic map onto the new [K, col] body offsets (e.g. {0,1} for
+// A=[K,M], {0,2} for B=[K,N]). Returns the cloned tile value and the new body
+// block; the rewriter is left inserting at the end of that body so the caller
+// can transpose / store / yield.
+static std::pair<Value, Block *>
+buildPackGeneric(OpBuilder &rewriter, Location loc, DotDescriptor &desc,
+                 Value operand, Value buf, int64_t colBlock, int32_t colTile,
+                 ArrayRef<int64_t> indDims) {
+  TritonLLVMOpBuilder b(loc, rewriter);
+
+  Operation *op = operand.getDefiningOp();
+  if (auto cvt = dyn_cast_or_null<triton::gpu::ConvertLayoutOp>(op))
+    if (Operation *src = cvt.getSrc().getDefiningOp())
+      op = src;
+  assert(op && "expected operand to be defined by an op, not a block argument");
+  auto ty = cast<RankedTensorType>(op->getResult(0).getType());
+  assert(isa<BlockedEncodingAttr>(ty.getEncoding()) &&
+         "only blocked encoding tensors are supported");
+
+  SetVector<Operation *> slice;
+  (void)mlir::getBackwardSlice(op, &slice);
+
+  SmallVector<Value> newIns(desc.generic.getIns());
+  newIns.push_back(buf);
+
+  auto newGeneric =
+      cpu::GenericOp::create(rewriter, loc, /*results=*/TypeRange{}, newIns,
+                             {b.i32_val(desc.blockK), b.i32_val(colBlock)},
+                             {static_cast<int32_t>(desc.blockK), colTile});
+  Block *body = rewriter.createBlock(&newGeneric.getBody());
+  for (unsigned i = 0; i < newGeneric.getTileShape().size(); i++)
+    body->addArgument(rewriter.getI32Type(),
+                      newGeneric.getLoc()); // tile offset per vector shape dim
+
+  IRMapping mapping;
+  for (auto existingArg : desc.generic.getBody().getArguments().drop_front(
+           desc.generic.getNumInductionVars() + desc.generic.getNumIterArgs()))
+    mapping.map(existingArg,
+                body->addArgument(existingArg.getType(), existingArg.getLoc()));
+  // Map the selected induction vars of the original generic onto the new
+  // [K, col] tile offsets.
+  for (auto [newIdx, origIdx] : llvm::enumerate(indDims))
+    mapping.map(desc.generic.getBody().getArgument(origIdx),
+                body->getArgument(newIdx));
+
+  body->addArgument(buf.getType(), buf.getLoc());
+  rewriter.setInsertionPointToStart(body);
+
+  for (auto *sliceOp : slice)
+    rewriter.clone(*sliceOp, mapping);
+  Value tile = rewriter.clone(*op, mapping)->getResult(0);
+  return {tile, body};
+}
+
+// Store a [K, col] `value` into a contiguous, col-major pack buffer via a
+// pointer tensor addressing buf[(K+k)*rowStride + (col+c)]. Reads the K/col
+// tile offsets and the buffer pointer from the pack generic's body args (as
+// laid out by buildPackGeneric: args[0]=K, args[1]=col, back()=buf).
+static void emitContiguousStore(OpBuilder &rewriter, Location loc, Block *body,
+                                Value value, int64_t rowStride) {
+  Value ptrs = buildContiguousPtrTensor(
+      rewriter, loc, /*basePtr=*/body->getArguments().back(),
+      /*rowOffset=*/body->getArgument(0), // K offset
+      /*colOffset=*/body->getArgument(1), // col (M or N) offset
+      /*rowStride=*/rowStride, /*colStride=*/1,
+      cast<RankedTensorType>(value.getType()));
+  triton::StoreOp::create(rewriter, loc, ptrs, value,
+                          triton::CacheModifier::NONE,
+                          triton::EvictionPolicy::NORMAL);
+}
+
 void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
                                  MLIRContext *context) {
   Location loc = funcOp.getLoc();
@@ -372,83 +449,31 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
 
   auto existingTileShapes = desc.generic.getTileShape(); // K, M, N
 
-  // pack A
+  // pack A: A arrives [M, K]; transpose to [K, M] so the pack is M-contiguous
+  // (matching loadPackedSlice, off = k*blockM + m).
   {
-    Value a = desc.dot.getA();
-    Operation *aOp = a.getDefiningOp();
-    // The dot (and hence its dot_op operand layout) is being replaced by the
-    // SME microkernel, so the dot-operand encoding is irrelevant here. Peel the
-    // convert_layout feeding the dot and pack the raw blocked load tile
-    // instead, which transposes cleanly (a dot_op layout may not).
-    if (auto cvt = dyn_cast_or_null<triton::gpu::ConvertLayoutOp>(aOp))
-      if (Operation *src = cvt.getSrc().getDefiningOp())
-        aOp = src;
-    llvm::errs() << "aOp: " << *aOp << "\n";
-    assert(aOp &&
-           "expected dot op a operand to be an operation, not block argument");
-    auto aType = cast<RankedTensorType>(aOp->getResult(0).getType());
-    assert(isa<BlockedEncodingAttr>(aType.getEncoding()) &&
-           "only blocked encoding tensors are supported");
-
-    SetVector<Operation *> slice;
-    (void)mlir::getBackwardSlice(aOp, &slice);
-
-    IRMapping mapping;
-
-    SmallVector<Value> newIns(desc.generic.getIns());
-    newIns.push_back(aBuf);
-
-    auto newGeneric = cpu::GenericOp::create(
-        rewriter, loc, /*results=*/TypeRange{}, newIns,
-        {b.i32_val(desc.blockK), b.i32_val(desc.blockM)},
-        {static_cast<int32_t>(desc.blockK), existingTileShapes[1]});
-    Block *body = rewriter.createBlock(&newGeneric.getBody());
-    for (unsigned i = 0; i < newGeneric.getTileShape().size(); i++)
-      body->addArgument(
-          rewriter.getI32Type(),
-          newGeneric.getLoc()); // tile offset per vector shape dim
-
-    for (auto existingArg : desc.generic.getBody().getArguments().drop_front(
-             desc.generic.getNumInductionVars() +
-             desc.generic.getNumIterArgs())) {
-      mapping.map(existingArg, body->addArgument(existingArg.getType(),
-                                                 existingArg.getLoc()));
-    }
-    // TODO: map induction vars
-    // K, M, N --> K, M
-    mapping.map(desc.generic.getBody().getArgument(0), body->getArgument(0));
-    mapping.map(desc.generic.getBody().getArgument(1), body->getArgument(1));
-
-    auto aBufBlockArg = body->addArgument(aBuf.getType(), aBuf.getLoc());
-    rewriter.setInsertionPointToStart(body);
-
-    for (auto *op : slice) {
-      rewriter.clone(*op, mapping);
-    }
-
-    Value newA = rewriter.clone(*aOp, mapping)->getResult(0); // [M, K] blocked
-
-    // The SME kernel reads A packed as [K, M] (M contiguous, off = k*blockM+m).
-    // Transpose the data to [K, M] so the store is contiguous (M is the fast,
-    // stride-1 axis) and vectorizes, rather than scattering.
-    Value newAT =
-        triton::TransOp::create(rewriter, loc, newA, ArrayRef<int32_t>{1, 0});
-
-    // Contiguous [K, M] pointer tensor matching newAT: rows=K (stride blockM),
-    // cols=M (stride 1). tt.store needs shape/encoding to match the value.
-    Value aPtrs =
-        buildContiguousPtrTensor(rewriter, loc, aBufBlockArg,
-                                 /*rowOffset=*/body->getArgument(0), // K offset
-                                 /*colOffset=*/body->getArgument(1), // M offset
-                                 /*rowStride=*/desc.blockM, /*colStride=*/1,
-                                 cast<RankedTensorType>(newAT.getType()));
-    triton::StoreOp::create(rewriter, loc, aPtrs, newAT,
-                            triton::CacheModifier::NONE,
-                            triton::EvictionPolicy::NORMAL);
+    auto [tile, body] =
+        buildPackGeneric(rewriter, loc, desc, desc.dot.getA(), aBuf,
+                         /*colBlock=*/desc.blockM,
+                         /*colTile=*/existingTileShapes[1], /*indDims=*/{0, 1});
+    tile =
+        triton::TransOp::create(rewriter, loc, tile, ArrayRef<int32_t>{1, 0});
+    emitContiguousStore(rewriter, loc, body, tile, /*rowStride=*/desc.blockM);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
+    rewriter.setInsertionPointAfter(body->getParentOp());
   }
 
-  // pack B
+  // pack B: B arrives [K, N] already in the orientation the kernel reads
+  // (off = k*blockN + n), so no transpose is needed.
+  {
+    auto [tile, body] =
+        buildPackGeneric(rewriter, loc, desc, desc.dot.getB(), bBuf,
+                         /*colBlock=*/desc.blockN,
+                         /*colTile=*/existingTileShapes[2], /*indDims=*/{0, 2});
+    emitContiguousStore(rewriter, loc, body, tile, /*rowStride=*/desc.blockN);
+    cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
+    rewriter.setInsertionPointAfter(body->getParentOp());
+  }
 
   // call streaming ukernel
 
