@@ -376,9 +376,19 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
   {
     Value a = desc.dot.getA();
     Operation *aOp = a.getDefiningOp();
+    // The dot (and hence its dot_op operand layout) is being replaced by the
+    // SME microkernel, so the dot-operand encoding is irrelevant here. Peel the
+    // convert_layout feeding the dot and pack the raw blocked load tile
+    // instead, which transposes cleanly (a dot_op layout may not).
+    if (auto cvt = dyn_cast_or_null<triton::gpu::ConvertLayoutOp>(aOp))
+      if (Operation *src = cvt.getSrc().getDefiningOp())
+        aOp = src;
     llvm::errs() << "aOp: " << *aOp << "\n";
     assert(aOp &&
            "expected dot op a operand to be an operation, not block argument");
+    auto aType = cast<RankedTensorType>(aOp->getResult(0).getType());
+    assert(isa<BlockedEncodingAttr>(aType.getEncoding()) &&
+           "only blocked encoding tensors are supported");
 
     SetVector<Operation *> slice;
     (void)mlir::getBackwardSlice(aOp, &slice);
@@ -416,14 +426,23 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
       rewriter.clone(*op, mapping);
     }
 
-    Value newA = rewriter.clone(*aOp, mapping)->getResult(0);
-    // store A to the temp buffer: tt.store needs a tensor of pointers matching
-    // newA's shape/encoding, not the bare base pointer.
-    Value aPtrs = buildContiguousPtrTensor(
-        rewriter, loc, aBufBlockArg, body->getArgument(0), body->getArgument(1),
-        /*rowStride=*/desc.blockK, /*colStride=*/1,
-        cast<RankedTensorType>(newA.getType()));
-    triton::StoreOp::create(rewriter, loc, aPtrs, newA,
+    Value newA = rewriter.clone(*aOp, mapping)->getResult(0); // [M, K] blocked
+
+    // The SME kernel reads A packed as [K, M] (M contiguous, off = k*blockM+m).
+    // Transpose the data to [K, M] so the store is contiguous (M is the fast,
+    // stride-1 axis) and vectorizes, rather than scattering.
+    Value newAT =
+        triton::TransOp::create(rewriter, loc, newA, ArrayRef<int32_t>{1, 0});
+
+    // Contiguous [K, M] pointer tensor matching newAT: rows=K (stride blockM),
+    // cols=M (stride 1). tt.store needs shape/encoding to match the value.
+    Value aPtrs =
+        buildContiguousPtrTensor(rewriter, loc, aBufBlockArg,
+                                 /*rowOffset=*/body->getArgument(0), // K offset
+                                 /*colOffset=*/body->getArgument(1), // M offset
+                                 /*rowStride=*/desc.blockM, /*colStride=*/1,
+                                 cast<RankedTensorType>(newAT.getType()));
+    triton::StoreOp::create(rewriter, loc, aPtrs, newAT,
                             triton::CacheModifier::NONE,
                             triton::EvictionPolicy::NORMAL);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
