@@ -142,7 +142,7 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   rewriter.setInsertionPointToStart(mod.getBody());
 
   SmallVector<Type> argumentTypes{/*a=*/ptr_ty(context), /*b=*/ptr_ty(context),
-                                  /*c=*/ptr_ty(context), /*kStep=*/i64_ty};
+                                  /*c=*/ptr_ty(context), /*slabDepth=*/i64_ty};
 
   auto smeFuncTy = rewriter.getFunctionType(argumentTypes, {});
   auto smeFunc =
@@ -156,14 +156,18 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   rewriter.setInsertionPointToStart(entryBlock);
 
   Location loc = desc.generic.getLoc();
-  // TritonLLVMOpBuilder b(loc, rewriter);
 
   // Kernel arguments
-  Value aPtr = entryBlock->getArgument(0); // !llvm.ptr, packed A [KC, blockM]
-  Value bPtr = entryBlock->getArgument(1); // !llvm.ptr, packed B [KC, blockN]
+  Value aPtr =
+      entryBlock->getArgument(0); // !llvm.ptr, packed A [blockK, blockM]
+  Value bPtr =
+      entryBlock->getArgument(1); // !llvm.ptr, packed B [blockK, blockN]
   Value cPtr =
-      entryBlock->getArgument(2); // !llvm.ptr, C           [blockM, blockN]
-  Value kBlocks = entryBlock->getArgument(3); // i64, number of K slabs (KC)
+      entryBlock->getArgument(2); // !llvm.ptr, C              [blockM, blockN]
+  // K-depth of ONE slab: the pack buffers are only blockK rows deep, so this is
+  // blockK, NOT the total number of slabs. The caller invokes the kernel once
+  // per slab (C accumulates in memory across calls) and passes blockK here.
+  Value slabDepth = entryBlock->getArgument(3); // i64, == blockK
 
   // One Accumulator ZA tile: vector<[4]x[4]xf32> (both dims scalable).
   auto tileTy = VectorType::get({4, 4}, f32_ty, /*scalableDims=*/{true, true});
@@ -192,7 +196,7 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   Value cBlockN = arith::ConstantIndexOp::create(rewriter, loc, desc.blockN);
   // KC slab count arrives as i64; the k loop runs in `index`.
   Value kUb = arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
-                                         kBlocks);
+                                         slabDepth);
 
   // ==== for m = 0 .. blockM step step ====================================
   scf::ForOp::create(
@@ -345,15 +349,22 @@ static Value buildContiguousPtrTensor(OpBuilder &rewriter, Location loc,
 // feeding the dot is peeled so we pack the raw blocked load tile (the dot, and
 // its dot_op layout, is being replaced by the SME kernel; a blocked tile
 // transposes cleanly). `colBlock`/`colTile` are the block/tile sizes of the
-// second (M or N) dimension. `indDims` lists which induction dims of the
-// original 3D generic map onto the new [K, col] body offsets (e.g. {0,1} for
-// A=[K,M], {0,2} for B=[K,N]). Returns the cloned tile value and the new body
-// block; the rewriter is left inserting at the end of that body so the caller
-// can transpose / store / yield.
+// second (M or N) dimension; `colInductionDim` is which induction dim of the
+// original 3D generic is that spatial dim (1 for A=[K,M], 2 for B=[K,N]).
+//
+// `kc` is the enclosing slab-loop offset. The original K-reduction induction
+// var is remapped to `kc` (NOT to the new generic's K tile offset), so the
+// cloned global load reads slab [kc, kc+blockK) and the K-boundary mask is
+// computed against it. The new generic's own K tile offset (body arg 0) is left
+// as the within-slab store position (always 0 — a single blockK-deep tile).
+//
+// Returns the cloned tile value and the new body block; the rewriter is left
+// inserting at the end of that body so the caller can transpose / store /
+// yield.
 static std::pair<Value, Block *>
 buildPackGeneric(OpBuilder &rewriter, Location loc, DotDescriptor &desc,
                  Value operand, Value buf, int64_t colBlock, int32_t colTile,
-                 ArrayRef<int64_t> indDims) {
+                 int64_t colInductionDim, Value kc) {
   TritonLLVMOpBuilder b(loc, rewriter);
 
   Operation *op = operand.getDefiningOp();
@@ -368,7 +379,9 @@ buildPackGeneric(OpBuilder &rewriter, Location loc, DotDescriptor &desc,
   SetVector<Operation *> slice;
   (void)mlir::getBackwardSlice(op, &slice);
 
+  // ins = original generic inputs + slab offset (kc) + pack buffer.
   SmallVector<Value> newIns(desc.generic.getIns());
+  newIns.push_back(kc);
   newIns.push_back(buf);
 
   auto newGeneric =
@@ -385,15 +398,18 @@ buildPackGeneric(OpBuilder &rewriter, Location loc, DotDescriptor &desc,
            desc.generic.getNumInductionVars() + desc.generic.getNumIterArgs()))
     mapping.map(existingArg,
                 body->addArgument(existingArg.getType(), existingArg.getLoc()));
-  // Map the selected induction vars of the original generic onto the new
-  // [K, col] tile offsets.
-  for (auto [newIdx, origIdx] : llvm::enumerate(indDims))
-    mapping.map(desc.generic.getBody().getArgument(origIdx),
-                body->getArgument(newIdx));
+  Value kcArg = body->addArgument(kc.getType(), kc.getLoc());
+  body->addArgument(buf.getType(), buf.getLoc()); // buffer, kept as back()
 
-  body->addArgument(buf.getType(), buf.getLoc());
+  // The original K-reduction offset becomes the slab offset kc (this is what
+  // selects the global K-slab + drives the K mask); the spatial (M/N) induction
+  // becomes the pack col tile offset. The new generic's K tile offset (body
+  // arg 0) is intentionally left unmapped — it is the within-slab store row.
+  mapping.map(desc.generic.getBody().getArgument(0), kcArg);
+  mapping.map(desc.generic.getBody().getArgument(colInductionDim),
+              body->getArgument(1));
+
   rewriter.setInsertionPointToStart(body);
-
   for (auto *sliceOp : slice)
     rewriter.clone(*sliceOp, mapping);
   Value tile = rewriter.clone(*op, mapping)->getResult(0);
@@ -418,6 +434,7 @@ static void emitContiguousStore(OpBuilder &rewriter, Location loc, Block *body,
 }
 
 void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
+                                 StringRef smeKernelName,
                                  MLIRContext *context) {
   Location loc = funcOp.getLoc();
 
@@ -452,10 +469,10 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
   // pack A: A arrives [M, K]; transpose to [K, M] so the pack is M-contiguous
   // (matching loadPackedSlice, off = k*blockM + m).
   {
-    auto [tile, body] =
-        buildPackGeneric(rewriter, loc, desc, desc.dot.getA(), aBuf,
-                         /*colBlock=*/desc.blockM,
-                         /*colTile=*/existingTileShapes[1], /*indDims=*/{0, 1});
+    auto [tile, body] = buildPackGeneric(
+        rewriter, loc, desc, desc.dot.getA(), aBuf, /*colBlock=*/desc.blockM,
+        /*colTile=*/existingTileShapes[1], /*colInductionDim=*/1,
+        /*kc=*/kLoop.getInductionVar());
     tile =
         triton::TransOp::create(rewriter, loc, tile, ArrayRef<int32_t>{1, 0});
     emitContiguousStore(rewriter, loc, body, tile, /*rowStride=*/desc.blockM);
@@ -466,10 +483,10 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
   // pack B: B arrives [K, N] already in the orientation the kernel reads
   // (off = k*blockN + n), so no transpose is needed.
   {
-    auto [tile, body] =
-        buildPackGeneric(rewriter, loc, desc, desc.dot.getB(), bBuf,
-                         /*colBlock=*/desc.blockN,
-                         /*colTile=*/existingTileShapes[2], /*indDims=*/{0, 2});
+    auto [tile, body] = buildPackGeneric(
+        rewriter, loc, desc, desc.dot.getB(), bBuf, /*colBlock=*/desc.blockN,
+        /*colTile=*/existingTileShapes[2], /*colInductionDim=*/2,
+        /*kc=*/kLoop.getInductionVar());
     emitContiguousStore(rewriter, loc, body, tile, /*rowStride=*/desc.blockN);
     cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
     rewriter.setInsertionPointAfter(body->getParentOp());
@@ -477,8 +494,8 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
 
   // call streaming ukernel
 
-  rewriter.setInsertionPointAfter(kLoop);
   // drain C
+  rewriter.setInsertionPointAfter(kLoop);
 }
 
 } // namespace
@@ -508,7 +525,8 @@ struct LowerDotMicrokernelToSMEPass
 
         // 3. In-body rewrite, at the generic's location: entry-block allocas →
         // zero C → slab loop { pack A, pack B, call } → drain.
-        rewriteExistingFunctionBody(*desc, funcOp, context);
+        rewriteExistingFunctionBody(*desc, funcOp, smeKernel.getName(),
+                                    context);
 
         // 4. Delete the generic.
 
