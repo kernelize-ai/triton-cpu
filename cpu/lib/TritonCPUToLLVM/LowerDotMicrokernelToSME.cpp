@@ -34,9 +34,6 @@ struct DotDescriptor {
   int64_t blockK;         // 32       <- tileShape[0]; slab depth + pack height
   Value kFull;            //          <- generic.blocks[0]; slab loop bound
 
-  // Value aTile, bTile, acc; // dot.getA()/getB()/getC() — one hop, no chain
-  // walk
-
   static std::optional<DotDescriptor> tryMatch(cpu::GenericOp genericOp) {
     triton::DotOp dotOp;
 
@@ -448,10 +445,14 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
       rewriter, loc, PointerType::get(f32_ty, 0), desc.blockK * desc.blockM);
   Value bBuf = cpu::LocalAllocOp::create(
       rewriter, loc, PointerType::get(f32_ty, 0), desc.blockK * desc.blockN);
-  Value cBuf = cpu::LocalAllocOp::create(
-      rewriter, loc, PointerType::get(f32_ty, 0), desc.blockM * desc.blockN);
 
-  // kFull is i32
+  auto cInitTy = cast<RankedTensorType>(desc.generic->getResult(0).getType());
+  Value cZero = arith::ConstantOp::create(
+      rewriter, loc, cast<TypedAttr>(rewriter.getZeroAttr(cInitTy)));
+  Value cBuf =
+      cpu::LocalAllocOp::create(rewriter, loc, PointerType::get(f32_ty, 0),
+                                desc.blockM * desc.blockN, cZero);
+
   auto kLoop = scf::ForOp::create(rewriter, loc, b.i32_val(0), desc.kFull,
                                   b.i32_val(desc.blockK), ValueRange{});
   rewriter.setInsertionPointToStart(kLoop.getBody());
@@ -492,10 +493,58 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
     rewriter.setInsertionPointAfter(body->getParentOp());
   }
 
-  // call streaming ukernel
+  // call streaming ukernel: the SME kernel takes !llvm.ptr for A/B/C, but the
+  // local allocs are triton pointers — bridge with unrealized casts (these fold
+  // away once tt.ptr lowers to llvm.ptr). slabDepth == blockK (see kernel arg).
+  Type llvmPtrTy = ptr_ty(context);
+  auto toLlvmPtr = [&](Value p) -> Value {
+    return UnrealizedConversionCastOp::create(
+               rewriter, loc, TypeRange{llvmPtrTy}, ValueRange{p})
+        .getResult(0);
+  };
+  triton::CallOp::create(rewriter, loc, smeKernelName, /*results=*/TypeRange{},
+                         /*operands=*/
+                         ValueRange{toLlvmPtr(aBuf), toLlvmPtr(bBuf),
+                                    toLlvmPtr(cBuf), b.i64_val(desc.blockK)});
 
-  // drain C
+  // drain C: read the accumulated C buffer back into the [blockM, blockN]
+  // tensor the epilogue consumes, tile by tile, and route the epilogue at it.
   rewriter.setInsertionPointAfter(kLoop);
+
+  auto resultTy = cast<RankedTensorType>(desc.generic->getResult(0).getType());
+  int32_t mTile = existingTileShapes[1];
+  int32_t nTile = existingTileShapes[2];
+  auto cTileTy = RankedTensorType::get(
+      {mTile, nTile}, resultTy.getElementType(), resultTy.getEncoding());
+
+  // Pure map (no reduction): iterate [blockM, blockN] in [mTile, nTile] tiles,
+  // loading each C tile and scattering it into the [blockM, blockN] result.
+  auto drain = cpu::GenericOp::create(
+      rewriter, loc, /*results=*/TypeRange{resultTy}, /*ins=*/ValueRange{cBuf},
+      /*blockShape=*/ValueRange{b.i32_val(desc.blockM), b.i32_val(desc.blockN)},
+      /*tileShape=*/ArrayRef<int32_t>{mTile, nTile});
+  {
+    Block *drainBody = rewriter.createBlock(&drain.getBody());
+    Value mOff = drainBody->addArgument(rewriter.getI32Type(), loc); // M offset
+    Value nOff = drainBody->addArgument(rewriter.getI32Type(), loc); // N offset
+    Value cArg = drainBody->addArgument(cBuf.getType(), loc);        // C buffer
+    rewriter.setInsertionPointToStart(drainBody);
+    // C is [blockM, blockN] row-major (row stride blockN); tile[r,c] =
+    // C[mOff+r, nOff+c].
+    Value cPtrs = buildContiguousPtrTensor(
+        rewriter, loc, cArg, /*rowOffset=*/mOff, /*colOffset=*/nOff,
+        /*rowStride=*/desc.blockN, /*colStride=*/1, cTileTy);
+    Value cTile = triton::LoadOp::create(rewriter, loc, cPtrs,
+                                         triton::CacheModifier::NONE,
+                                         triton::EvictionPolicy::NORMAL,
+                                         /*isVolatile=*/false)
+                      .getResult();
+    cpu::YieldOp::create(rewriter, loc, ValueRange{cTile});
+  }
+
+  // The original dot generic's result is now produced by the drain; the caller
+  // erases the (dead) original after the walk finishes.
+  desc.generic->getResult(0).replaceAllUsesWith(drain->getResult(0));
 }
 
 } // namespace
@@ -512,6 +561,7 @@ struct LowerDotMicrokernelToSMEPass
         return;
 
       // NOTE: this assumes only one streaming microkernel generic per module
+      cpu::GenericOp toErase = nullptr;
       funcOp.walk([&](cpu::GenericOp genericOp) {
         // 1. see if the current dot descriptor pattern matches
         // (if not, should we drop no-inline and run the inliner? probably. we
@@ -524,15 +574,19 @@ struct LowerDotMicrokernelToSMEPass
         auto smeKernel = createStreamingSMEKernel(*desc, mod);
 
         // 3. In-body rewrite, at the generic's location: entry-block allocas →
-        // zero C → slab loop { pack A, pack B, call } → drain.
+        // zero C → slab loop { pack A, pack B, call } → drain. The drain
+        // rewires the original generic's result, leaving it dead.
         rewriteExistingFunctionBody(*desc, funcOp, smeKernel.getName(),
                                     context);
 
-        // 4. Delete the generic.
-
-        // assert(false && "TODO");
+        toErase = genericOp;
         return WalkResult::interrupt();
       });
+
+      // 4. Erase the now-dead original generic, after the walk (not inside it,
+      // which would free the op currently being visited).
+      if (toErase)
+        toErase.erase();
     });
   }
 };
