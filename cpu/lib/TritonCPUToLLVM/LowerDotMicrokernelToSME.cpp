@@ -269,14 +269,20 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
 // (!tt.ptr<elemTy>). offset[r, c] = r * cols + c. Shape/encoding are taken from
 // `likeTy` so the result can feed a `tt.store` whose value has type `likeTy`.
 //
-// `rowStride` is the leading dimension of the underlying buffer (elements per
-// row), which may exceed `cols` when the tile is a window into a larger buffer.
+// `rowStride`/`colStride` are the buffer's per-dimension strides in elements
+// (row-major contiguous => colStride == 1, rowStride == leading dim, which may
+// exceed `cols` when the tile is a window into a larger buffer).
 // `rowOffset`/`colOffset` are absolute i32 positions of this tile's top-left
 // element within that buffer. offset[r, c] = (rowOffset + r) * rowStride +
-// (colOffset + c).
+// (colOffset + c) * colStride.
+//
+// Each dimension is folded in via its own tt.addptr (rather than summing the
+// offsets first) so the stride-1 dimension stays visible to the backend's
+// contiguity/divisibility analysis, which is what lets it vectorize the access.
 static Value buildContiguousPtrTensor(OpBuilder &rewriter, Location loc,
                                       Value basePtr, Value rowOffset,
                                       Value colOffset, int64_t rowStride,
+                                      int64_t colStride,
                                       RankedTensorType likeTy) {
   MLIRContext *context = rewriter.getContext();
   assert(likeTy.getRank() == 2 && "expected a 2D value tensor");
@@ -305,27 +311,33 @@ static Value buildContiguousPtrTensor(OpBuilder &rewriter, Location loc,
       rewriter, loc, RankedTensorType::get({1, cols}, i32Ty, enc), colRange,
       /*axis=*/0);
 
-  // rowOff = (rowOffset + rowIdx) * rowStride, using the buffer's leading
-  // dimension (not the tile width).
-  Value strideSplat = triton::SplatOp::create(
-      rewriter, loc, cast<RankedTensorType>(rows2d.getType()),
-      arith::ConstantOp::create(rewriter, loc,
-                                rewriter.getI32IntegerAttr(rowStride)));
-  Value rowOff = arith::MulIOp::create(rewriter, loc, rows2d, strideSplat);
+  // Scale each dimension's offset by its stride, splatting the stride into the
+  // expanded (rows x 1 / 1 x cols) shape so per-dimension divisibility
+  // survives.
+  auto scaleByStride = [&](Value expanded, int64_t stride) -> Value {
+    Value strideSplat = triton::SplatOp::create(
+        rewriter, loc, cast<RankedTensorType>(expanded.getType()),
+        arith::ConstantOp::create(rewriter, loc,
+                                  rewriter.getI32IntegerAttr(stride)));
+    return arith::MulIOp::create(rewriter, loc, expanded, strideSplat);
+  };
+  Value rowOff = scaleByStride(rows2d, rowStride);
+  Value colOff = scaleByStride(cols2d, colStride);
 
-  // Broadcast both to rows x cols and add -> full offset tensor.
+  // Broadcast each to rows x cols and fold in via its own addptr, keeping the
+  // stride-1 dimension distinct for the vectorizer.
   auto offTy = RankedTensorType::get({rows, cols}, i32Ty, enc);
-  Value rowOffB = triton::BroadcastOp::create(rewriter, loc, offTy, rowOff);
-  Value colOffB = triton::BroadcastOp::create(rewriter, loc, offTy, cols2d);
-  Value offsets = arith::AddIOp::create(rewriter, loc, rowOffB, colOffB);
-
-  // Splat the base pointer, then addptr with the offsets.
   auto ptrTensorTy = RankedTensorType::get(
       {rows, cols}, PointerType::get(likeTy.getElementType(), /*addrSpace=*/0),
       enc);
-  Value basePtrs = triton::SplatOp::create(rewriter, loc, ptrTensorTy, basePtr);
-  return triton::AddPtrOp::create(rewriter, loc, ptrTensorTy, basePtrs,
-                                  offsets);
+  Value ptr = triton::SplatOp::create(rewriter, loc, ptrTensorTy, basePtr);
+  ptr = triton::AddPtrOp::create(
+      rewriter, loc, ptrTensorTy, ptr,
+      triton::BroadcastOp::create(rewriter, loc, offTy, rowOff));
+  ptr = triton::AddPtrOp::create(
+      rewriter, loc, ptrTensorTy, ptr,
+      triton::BroadcastOp::create(rewriter, loc, offTy, colOff));
+  return ptr;
 }
 
 void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
@@ -409,7 +421,8 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
     // newA's shape/encoding, not the bare base pointer.
     Value aPtrs = buildContiguousPtrTensor(
         rewriter, loc, aBufBlockArg, body->getArgument(0), body->getArgument(1),
-        /*rowStride=*/desc.blockK, cast<RankedTensorType>(newA.getType()));
+        /*rowStride=*/desc.blockK, /*colStride=*/1,
+        cast<RankedTensorType>(newA.getType()));
     triton::StoreOp::create(rewriter, loc, aPtrs, newA,
                             triton::CacheModifier::NONE,
                             triton::EvictionPolicy::NORMAL);
