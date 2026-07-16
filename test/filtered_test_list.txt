@@ -20,7 +20,6 @@ test_arange
 test_vectorization_hints
 test_num_warps_pow2
 test_pointer_arguments
-test_trans_reshape
 test_nested_if_else_return
 test_constexpr_if_return
 test_gather
