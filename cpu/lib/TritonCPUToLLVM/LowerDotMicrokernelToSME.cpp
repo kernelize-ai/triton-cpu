@@ -274,14 +274,12 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
   rewriter.setInsertionPointAfter(desc.generic);
   TritonLLVMOpBuilder b(loc, rewriter);
 
-  // TODO: we need a CPU LocalAlloc op here, because we need triton types to play nicely with the other triton ops. 
-  // default alignment for now
-  Value aBuf = LLVM::AllocaOp::create(rewriter, loc, ptr_ty(context), f32_ty,
-                                      b.i64_val(desc.blockK * desc.blockM));
-  Value bBuf = LLVM::AllocaOp::create(rewriter, loc, ptr_ty(context), f32_ty,
-                                      b.i64_val(desc.blockK * desc.blockN));
-  Value cBuf = LLVM::AllocaOp::create(rewriter, loc, ptr_ty(context), f32_ty,
-                                      b.i64_val(desc.blockM * desc.blockN));
+  Value aBuf = cpu::LocalAllocOp::create(
+      rewriter, loc, PointerType::get(f32_ty, 0), desc.blockK * desc.blockM);
+  Value bBuf = cpu::LocalAllocOp::create(
+      rewriter, loc, PointerType::get(f32_ty, 0), desc.blockK * desc.blockN);
+  Value cBuf = cpu::LocalAllocOp::create(
+      rewriter, loc, PointerType::get(f32_ty, 0), desc.blockM * desc.blockN);
 
   // kFull is i32
   auto kLoop = scf::ForOp::create(rewriter, loc, b.i32_val(0), desc.kFull,
@@ -316,7 +314,7 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
 
     auto newGeneric = cpu::GenericOp::create(
         rewriter, loc, /*results=*/TypeRange{}, newIns,
-        {b.i64_val(desc.blockK), b.i64_val(desc.blockM)},
+        {b.i32_val(desc.blockK), b.i32_val(desc.blockM)},
         {static_cast<int32_t>(desc.blockK), existingTileShapes[1]});
     Block *body = rewriter.createBlock(&newGeneric.getBody());
     for (unsigned i = 0; i < newGeneric.getTileShape().size(); i++)
@@ -324,7 +322,9 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
           rewriter.getI32Type(),
           newGeneric.getLoc()); // tile offset per vector shape dim
 
-    for (auto existingArg : desc.generic.getBody().getArguments()) {
+    for (auto existingArg : desc.generic.getBody().getArguments().drop_front(
+             desc.generic.getNumInductionVars() +
+             desc.generic.getNumIterArgs())) {
       mapping.map(existingArg, body->addArgument(existingArg.getType(),
                                                  existingArg.getLoc()));
     }
@@ -340,6 +340,7 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
     triton::StoreOp::create(rewriter, loc, aBufBlockArg, newA,
                             triton::CacheModifier::NONE,
                             triton::EvictionPolicy::NORMAL);
+    cpu::YieldOp::create(rewriter, loc, /*values=*/ValueRange{});
   }
 
   // pack B

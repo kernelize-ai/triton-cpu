@@ -198,6 +198,18 @@ LogicalResult MakeDynamicRangeOp::verify() {
   return success();
 }
 
+void LocalAllocOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  OpResult alloc = getOperation()->getOpResult(0);
+  // TODO: is this really shared memory?
+  effects.emplace_back(MemoryEffects::Allocate::get(), alloc,
+                       GlobalMemory::get());
+  if (getSrc())
+    effects.emplace_back(MemoryEffects::Write::get(), alloc,
+                         GlobalMemory::get());
+}
+
 } // namespace cpu
 } // namespace triton
 
