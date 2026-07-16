@@ -11,6 +11,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 
 #include "llvm/Support/Debug.h"
@@ -86,8 +87,11 @@ static Value loadPackedSlice(OpBuilder &rewriter, Location loc, Type sveTy,
                              int64_t stride) {
   TritonLLVMOpBuilder b(loc, rewriter);
 
-  Value row = b.mul(k, b.i64_val(stride)).getResult();
-  Value off = b.add(row, col);
+  Value row = b.mul(arith::IndexCastOp::create(rewriter, loc, i64_ty, k),
+                    b.i64_val(stride))
+                  .getResult();
+  Value off =
+      b.add(row, arith::IndexCastOp::create(rewriter, loc, i64_ty, col));
   Value gep = b.gep(basePtr.getType(), f32_ty, basePtr, ValueRange{off});
   return b.load(sveTy, gep);
 }
@@ -152,7 +156,7 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   rewriter.setInsertionPointToStart(entryBlock);
 
   Location loc = desc.generic.getLoc();
-  TritonLLVMOpBuilder b(loc, rewriter);
+  // TritonLLVMOpBuilder b(loc, rewriter);
 
   // Kernel arguments
   Value aPtr = entryBlock->getArgument(0); // !llvm.ptr, packed A [KC, blockM]
@@ -169,10 +173,12 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   // --- Tiling geometry ----------------------------------------------------
   // tw = 4 * vscale  == lanes in one vector<[4]xf32> == side of one ZA tile.
   // step = 2 * tw    == 2x2 ZA tile arrangement per (m, n) iteration.
-  Value vscale = vector::VectorScaleOp::create(
-      rewriter, loc); // index - TODO need index cast?
-  Value tw = b.mul(vscale, b.i64_val(4));
-  Value step = b.add(tw, tw);
+  // All loop induction (m, n, k) and tile offsets are `index`; we drop to i64
+  // only for llvm pointer math inside loadPackedSlice.
+  Value vscale = vector::VectorScaleOp::create(rewriter, loc); // index
+  Value tw = arith::MulIOp::create(
+      rewriter, loc, vscale, arith::ConstantIndexOp::create(rewriter, loc, 4));
+  Value step = arith::AddIOp::create(rewriter, loc, tw, tw);
 
   // arm_sme.tile_load / tile_store require a rank-2 memref base, not an
   // !llvm.ptr. Wrap C as a contiguous row-major memref<?x?xf32> (blockM x
@@ -180,18 +186,24 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   Value cMemref =
       wrapPtrAsMemref(rewriter, loc, cPtr, desc.blockM, desc.blockN);
 
+  Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value cBlockM = arith::ConstantIndexOp::create(rewriter, loc, desc.blockM);
+  Value cBlockN = arith::ConstantIndexOp::create(rewriter, loc, desc.blockN);
+  // KC slab count arrives as i64; the k loop runs in `index`.
+  Value kUb = arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                         kBlocks);
+
   // ==== for m = 0 .. blockM step step ====================================
   scf::ForOp::create(
-      rewriter, loc, b.i64_val(0), b.i64_val(desc.blockM), step, ValueRange{},
+      rewriter, loc, c0, cBlockM, step, ValueRange{},
       [&](OpBuilder &mRewriter, Location loc, Value m, ValueRange) {
         // ==== for n = 0 .. blockN step step ==============================
         scf::ForOp::create(
-            mRewriter, loc, b.i64_val(0), b.i64_val(desc.blockN), step,
-            ValueRange{},
+            mRewriter, loc, c0, cBlockN, step, ValueRange{},
             [&](OpBuilder &nRewriter, Location loc, Value n, ValueRange) {
-              TritonLLVMOpBuilder nB(loc, nRewriter);
-              Value mTw = nB.add(m, tw);
-              Value nTw = nB.add(n, tw);
+              Value mTw = arith::AddIOp::create(nRewriter, loc, m, tw);
+              Value nTw = arith::AddIOp::create(nRewriter, loc, n, tw);
 
               // --- Load the four C sub-tiles into ZA -------------------
               // 2x2 arrangement: (m,n) (m,n+tw) / (m+tw,n) (m+tw,n+tw).
@@ -206,8 +218,7 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
 
               // --- Accumulate over K slabs -----------------------------
               auto kLoop = scf::ForOp::create(
-                  nRewriter, loc, b.i64_val(0), kBlocks, b.i64_val(1),
-                  ValueRange{t0, t1, t2, t3},
+                  nRewriter, loc, c0, kUb, c1, ValueRange{t0, t1, t2, t3},
                   [&](OpBuilder &kRewriter, Location loc, Value k,
                       ValueRange acc) {
                     Value a0 = loadPackedSlice(kRewriter, loc, sveTy, aPtr, k,
@@ -253,6 +264,92 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   return smeFunc;
 }
 
+void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
+                                 MLIRContext *context) {
+  Location loc = funcOp.getLoc();
+
+  OpBuilder rewriter(context);
+  // insert new ops after the existing generic so we can re-use its inputs. the
+  // existing generic is deleted after this rewrite completes.
+  rewriter.setInsertionPointAfter(desc.generic);
+  TritonLLVMOpBuilder b(loc, rewriter);
+
+  // TODO: we need a CPU LocalAlloc op here, because we need triton types to play nicely with the other triton ops. 
+  // default alignment for now
+  Value aBuf = LLVM::AllocaOp::create(rewriter, loc, ptr_ty(context), f32_ty,
+                                      b.i64_val(desc.blockK * desc.blockM));
+  Value bBuf = LLVM::AllocaOp::create(rewriter, loc, ptr_ty(context), f32_ty,
+                                      b.i64_val(desc.blockK * desc.blockN));
+  Value cBuf = LLVM::AllocaOp::create(rewriter, loc, ptr_ty(context), f32_ty,
+                                      b.i64_val(desc.blockM * desc.blockN));
+
+  // kFull is i32
+  auto kLoop = scf::ForOp::create(rewriter, loc, b.i32_val(0), desc.kFull,
+                                  b.i32_val(desc.blockK), ValueRange{});
+  rewriter.setInsertionPointToStart(kLoop.getBody());
+
+  // TODO: a weird place for this - maybe this should be part of the matcher for
+  // the descriptor?
+  auto nonTerminatorOps = desc.generic.getBody().front().without_terminator();
+  assert(
+      !nonTerminatorOps.empty() &&
+      &*std::prev(nonTerminatorOps.end()) == desc.dot.getOperation() &&
+      "expected dot op to be the last op in the microkernel function generic");
+
+  auto existingTileShapes = desc.generic.getTileShape(); // K, M, N
+
+  // pack A
+  {
+    Value a = desc.dot.getA();
+    Operation *aOp = a.getDefiningOp();
+    llvm::errs() << "aOp: " << *aOp << "\n";
+    assert(aOp &&
+           "expected dot op a operand to be an operation, not block argument");
+
+    SetVector<Operation *> slice;
+    (void)mlir::getBackwardSlice(aOp, &slice);
+
+    IRMapping mapping;
+
+    SmallVector<Value> newIns(desc.generic.getIns());
+    newIns.push_back(aBuf);
+
+    auto newGeneric = cpu::GenericOp::create(
+        rewriter, loc, /*results=*/TypeRange{}, newIns,
+        {b.i64_val(desc.blockK), b.i64_val(desc.blockM)},
+        {static_cast<int32_t>(desc.blockK), existingTileShapes[1]});
+    Block *body = rewriter.createBlock(&newGeneric.getBody());
+    for (unsigned i = 0; i < newGeneric.getTileShape().size(); i++)
+      body->addArgument(
+          rewriter.getI32Type(),
+          newGeneric.getLoc()); // tile offset per vector shape dim
+
+    for (auto existingArg : desc.generic.getBody().getArguments()) {
+      mapping.map(existingArg, body->addArgument(existingArg.getType(),
+                                                 existingArg.getLoc()));
+    }
+    auto aBufBlockArg = body->addArgument(aBuf.getType(), aBuf.getLoc());
+    rewriter.setInsertionPointToStart(body);
+
+    for (auto *op : slice) {
+      rewriter.clone(*op, mapping);
+    }
+
+    Value newA = rewriter.clone(*aOp, mapping)->getResult(0);
+    // store A to the temp buffer
+    triton::StoreOp::create(rewriter, loc, aBufBlockArg, newA,
+                            triton::CacheModifier::NONE,
+                            triton::EvictionPolicy::NORMAL);
+  }
+
+  // pack B
+
+  // call streaming ukernel
+
+  rewriter.setInsertionPointAfter(kLoop);
+  // drain C
+}
+
 } // namespace
 struct LowerDotMicrokernelToSMEPass
     : public impl::LowerDotMicrokernelToSMEBase<LowerDotMicrokernelToSMEPass> {
@@ -266,25 +363,26 @@ struct LowerDotMicrokernelToSMEPass
       if (!funcOp.getName().ends_with("matmul_kernel_dot_microkernel"))
         return;
 
+      // NOTE: this assumes only one streaming microkernel generic per module
       funcOp.walk([&](cpu::GenericOp genericOp) {
         // 1. see if the current dot descriptor pattern matches
         // (if not, should we drop no-inline and run the inliner? probably. we
         // will likely run the inliner anyway)
         auto desc = DotDescriptor::tryMatch(genericOp);
         if (!desc)
-          return;
+          return WalkResult::advance();
 
         // 2. Get-or-create the leaf at module scope
         auto smeKernel = createStreamingSMEKernel(*desc, mod);
-        llvm::errs() << "created sme kernel: " << smeKernel << "\n";
 
         // 3. In-body rewrite, at the generic's location: entry-block allocas →
         // zero C → slab loop { pack A, pack B, call } → drain.
+        rewriteExistingFunctionBody(*desc, funcOp, context);
 
         // 4. Delete the generic.
 
-        llvm::errs() << "lower microkernel " << funcOp.getName() << "\n";
-        assert(false && "TODO");
+        // assert(false && "TODO");
+        return WalkResult::interrupt();
       });
     });
   }
