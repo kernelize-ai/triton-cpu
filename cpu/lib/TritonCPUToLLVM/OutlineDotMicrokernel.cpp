@@ -53,6 +53,8 @@ struct OutlineDotMicrokernelPass
 
       auto parentFunc = genericOp->getParentOfType<triton::FuncOp>();
       assert(parentFunc && "expected generic op to have parent function");
+      if (parentFunc.getVisibility() != SymbolTable::Visibility::Public)
+        return;
 
       SmallVector<Type> argumentTypes;
       DenseMap<unsigned, Attribute> divisibilityMap;
