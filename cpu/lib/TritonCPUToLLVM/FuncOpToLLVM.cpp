@@ -136,6 +136,14 @@ struct FuncOpSPMDParamConversion
       //  rewriter.getIntegerAttr(type::u1Ty(ctx), 1));
       newFuncOp.setLinkage(LLVM::Linkage::External);
     } else {
+      // preserve ARM SME attributes
+      for (StringRef name :
+           {"arm_streaming", "arm_locally_streaming",
+            "arm_streaming_compatible", "arm_new_za", "arm_in_za", "arm_out_za",
+            "arm_inout_za", "arm_preserves_za"}) {
+        if (funcOp->hasAttr(name))
+          newFuncOp->setAttr(name, rewriter.getUnitAttr());
+      }
       // The noinline attribute will be used by the LLVM codegen to prevent
       // inlining.
       // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/LLVMIR/IR/LLVMInlining.cpp#L267

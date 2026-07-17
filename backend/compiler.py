@@ -216,6 +216,7 @@ class CPUBackend(BaseBackend):
         pm.enable_debug()
 
         # BEGIN SME RELATED PASSES
+        # TODO: conditionally enable
         cpu.passes.ttcpuir.add_outline_dot_microkernel(pm)
         cpu.passes.ttcpuir.add_lower_dot_microkernel_to_sme(pm)
         passes.common.add_inliner(pm)
@@ -273,7 +274,10 @@ class CPUBackend(BaseBackend):
         metadata["name"] = names[0]
 
         flags = []
-        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, options.features, flags,
+        features = options.features
+        if len(features) == 0 and options.arch == 'apple-m4':
+            features = "+sme"
+        return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, features, flags,
                                      options.enable_fp_fusion, False, False)
 
     @staticmethod
