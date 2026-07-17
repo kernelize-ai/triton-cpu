@@ -20,6 +20,8 @@ def TritonCPUAccelerateMatmul : Pass<"tritoncpu-accelerate-matmul", "mlir::Modul
            /*default=*/"true",
            "Canonicalize K-loop pointer iter args to direct per-iteration "
            "addptr(init, iv * step) computations, enabling K-loop fusion">,
+    Option<"smeVectorOverride", "sme-vector-override", "bool", /*default=*/"false", "Override"
+           "computed vector size for ARM SME microkernels">
   ];
 
   let dependentDialects = ["mlir::arith::ArithDialect",

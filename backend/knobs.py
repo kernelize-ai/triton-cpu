@@ -3,6 +3,7 @@ from triton.knobs import base_knobs, env_bool, env_int, env_str
 
 class cpu_knobs(base_knobs):
     tile_and_fuse: env_bool = env_bool("TRITON_CPU_ENABLE_TILE_AND_FUSE", False)
+    enable_sme: env_bool = env_bool("TRITON_CPU_ENABLE_SME", False)
     warp_size: env_int = env_int("TRITON_CPU_WARP_SIZE", 1)
     feature_override: env_str = env_str("TRITON_CPU_TARGET_FEATURES", "")
     use_sleef: env_bool = env_bool("USE_SLEEF", False)
