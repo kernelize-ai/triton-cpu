@@ -26,13 +26,13 @@ namespace cpu {
 namespace {
 
 struct DotDescriptor {
-  cpu::GenericOp generic; // anchor: read geometry, delete in phase 3
+  cpu::GenericOp generic;
   triton::DotOp dot;
 
-  // Type elemTy;            // f32
-  int64_t blockM, blockN; // 64, 64   <- generic.blocks[1..2]
-  int64_t blockK;         // 32       <- tileShape[0]; slab depth + pack height
-  Value kFull;            //          <- generic.blocks[0]; slab loop bound
+  int64_t blockM;
+  int64_t blockN;
+  int64_t blockK;
+  Value kFull;
 
   static std::optional<DotDescriptor> tryMatch(cpu::GenericOp genericOp) {
     triton::DotOp dotOp;
@@ -93,7 +93,6 @@ static Value loadPackedSlice(OpBuilder &rewriter, Location loc, Type sveTy,
   return b.load(sveTy, gep);
 }
 
-// TODO: claude generated, check this
 // Wrap a bare !llvm.ptr as a contiguous, row-major rank-2 memref<?x?xf32> so
 // arm_sme.tile_load / tile_store (which require a memref base) can address it.
 // Builds a MemRef descriptor struct from the pointer and casts it to the memref
@@ -155,16 +154,13 @@ static triton::FuncOp createStreamingSMEKernel(DotDescriptor &desc,
   Location loc = desc.generic.getLoc();
 
   // Kernel arguments
-  Value aPtr =
-      entryBlock->getArgument(0); // !llvm.ptr, packed A [blockK, blockM]
-  Value bPtr =
-      entryBlock->getArgument(1); // !llvm.ptr, packed B [blockK, blockN]
-  Value cPtr =
-      entryBlock->getArgument(2); // !llvm.ptr, C              [blockM, blockN]
+  Value aPtr = entryBlock->getArgument(0); // packed A [blockK, blockM]
+  Value bPtr = entryBlock->getArgument(1); // packed B [blockK, blockN]
+  Value cPtr = entryBlock->getArgument(2); // C        [blockM, blockN]
   // K-depth of ONE slab: the pack buffers are only blockK rows deep, so this is
   // blockK, NOT the total number of slabs. The caller invokes the kernel once
   // per slab (C accumulates in memory across calls) and passes blockK here.
-  Value slabDepth = entryBlock->getArgument(3); // i64, == blockK
+  Value slabDepth = entryBlock->getArgument(3); // blockK
 
   // One Accumulator ZA tile: vector<[4]x[4]xf32> (both dims scalable).
   auto tileTy = VectorType::get({4, 4}, f32_ty, /*scalableDims=*/{true, true});
