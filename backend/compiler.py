@@ -225,11 +225,12 @@ class CPUBackend(BaseBackend):
 
         ## TRITON BLOCK
         passes.convert.add_scf_to_cf(pm)
-        passes.convert.add_index_to_llvmir(pm)
+        passes.convert.add_index_to_llvmir(pm)  # TODO: needed?
         ## END TRITON BLOCK
 
         cpu.passes.armsme.add_convert_arm_sme_to_llvm(pm)
         cpu.passes.armsme.add_convert_vector_to_llvm(pm)
+
         cpu.passes.armsme.add_lower_sme_microkernel_to_llvm(pm)
         # END SME RELATED PASSES
 
@@ -243,6 +244,8 @@ class CPUBackend(BaseBackend):
 
         passes.convert.add_cf_to_llvmir(pm)
         passes.convert.add_arith_to_llvmir(pm)
+        # Cleanup leftover unrealized_conversion_casts before converted to LLVM.
+        passes.convert.add_reconcile_unrealized_casts(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)

@@ -10,6 +10,7 @@ add_triton_library(TritonCPUToLLVM
     LowerSMEMicrokernelToLLVM.cpp
     MakeDynamicRangeOpToLLVM.cpp
     MaskedOpsToLLVM.cpp
+    MemoryOpToLLVM.cpp
     OutlineDotMicrokernel.cpp
     SharedMemoryGlobalConversion.cpp
     TritonCPUToLLVM.cpp

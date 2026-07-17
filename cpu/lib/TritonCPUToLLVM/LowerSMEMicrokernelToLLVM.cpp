@@ -3,6 +3,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ArmSME/IR/ArmSME.h"
@@ -31,12 +32,13 @@ struct LowerSMEMicrokernelToLLVMPass
 
     RewritePatternSet patterns(context);
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
+    mlir::cf::populateControlFlowToLLVMConversionPatterns(typeConverter,
+                                                          patterns);
     FrozenRewritePatternSet frozen(std::move(patterns));
 
     ConversionTarget target(*context);
-    target.addIllegalDialect<arith::ArithDialect>();
-    target.addLegalDialect<LLVM::LLVMDialect, cf::ControlFlowDialect,
-                           arm_sme::ArmSMEDialect>();
+    target.addIllegalDialect<arith::ArithDialect, cf::ControlFlowDialect>();
+    target.addLegalDialect<LLVM::LLVMDialect, arm_sme::ArmSMEDialect>();
     target.addLegalOp<UnrealizedConversionCastOp, triton::FuncOp,
                       triton::ReturnOp>();
 
