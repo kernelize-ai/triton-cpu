@@ -1,0 +1,21 @@
+diff --git a/python/src/ir.cc b/python/src/ir.cc
+index 9b4085bfc9..4f2a8673ac 100644
+--- a/python/src/ir.cc
++++ b/python/src/ir.cc
+@@ -32,6 +32,8 @@
+ #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+ #include "mlir/Transforms/LocationSnapshot.h"
+ 
++#include "mlir/Target/LLVMIR/Dialect/ArmSME/ArmSMEToLLVMIRTranslation.h"
++
+ #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+ #include "triton/Dialect/Gluon/IR/Dialect.h"
+ #include "triton/Dialect/Triton/IR/Dialect.h"
+@@ -354,6 +356,7 @@ void init_triton_ir(py::module_ &m) {
+     mlir::LLVM::registerInlinerInterface(registry);
+     registerBuiltinDialectTranslation(registry);
+     registerLLVMDialectTranslation(registry);
++    mlir::registerArmSMEDialectTranslation(registry); 
+     mlir::LLVM::registerInlinerInterface(registry);
+     context.appendDialectRegistry(registry);
+     context.loadAllAvailableDialects();
