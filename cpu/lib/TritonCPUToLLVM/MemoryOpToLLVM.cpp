@@ -37,8 +37,12 @@ struct LocalAllocOpConversion
                                b.i32_val(op.getSize()), /*alignment=*/64);
 
     auto isZeroSplat = [](SplatElementsAttr splat) -> bool {
-      return splat.getSplatValue<APFloat>().isZero() ||
-             splat.getSplatValue<APInt>().isZero();
+      Type elemTy = splat.getElementType();
+      if (isa<FloatType>(elemTy))
+        return splat.getSplatValue<APFloat>().isZero();
+      if (isa<IntegerType>(elemTy) || isa<IndexType>(elemTy))
+        return splat.getSplatValue<APInt>().isZero();
+      return false;
     };
 
     if (auto src = op.getSrc()) {
