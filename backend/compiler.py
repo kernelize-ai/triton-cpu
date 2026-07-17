@@ -47,6 +47,7 @@ class CPUOptions:
     supported_fp8_dtypes: Tuple[str] = ()
     matrix_instr_nonkdim: int = 16
     tile_and_fuse: bool = cpu_knobs.cpu.tile_and_fuse
+    enable_sme: bool = cpu_knobs.cpu.enable_sme
     warp_size: int = cpu_knobs.cpu.warp_size
     min_dot_size: int = 1
     fpsan_homomorphic_casts: bool = False
@@ -166,7 +167,8 @@ class CPUBackend(BaseBackend):
         passes.ttir.add_convert_to_ttgpuir(pm, "cpu", options.num_warps, options.warp_size, num_ctas)
         cpu.passes.ttgpuir.add_coalesce(pm, max_vector_width=cpu.get_max_vector_width_bits(options.features))
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        cpu.passes.ttgpuir.add_accelerate_matmul(pm, canonicalize_k_loop=options.tile_and_fuse)
+        cpu.passes.ttgpuir.add_accelerate_matmul(pm, canonicalize_k_loop=options.tile_and_fuse,
+                                                 sme_vector_override=options.enable_sme)
         passes.ttgpuir.add_remove_layout_conversions(pm)
 
         passes.ttgpuir.add_optimize_thread_locality(pm)
@@ -216,24 +218,20 @@ class CPUBackend(BaseBackend):
         pm.enable_debug()
 
         # BEGIN SME RELATED PASSES
-        # TODO: conditionally enable
-        cpu.passes.ttcpuir.add_outline_dot_microkernel(pm)
-        cpu.passes.ttcpuir.add_lower_dot_microkernel_to_sme(pm)
-        passes.common.add_inliner(pm)
-        passes.common.add_canonicalizer(pm)
+        if options.enable_sme:
+            cpu.passes.ttcpuir.add_outline_dot_microkernel(pm)
+            cpu.passes.ttcpuir.add_lower_dot_microkernel_to_sme(pm)
+            passes.common.add_inliner(pm)
+            passes.common.add_canonicalizer(pm)
+            cpu.passes.armsme.add_convert_arm_sme_to_scf(pm)
 
-        cpu.passes.armsme.add_convert_arm_sme_to_scf(pm)
-
-        ## TRITON BLOCK
         passes.convert.add_scf_to_cf(pm)
         passes.convert.add_index_to_llvmir(pm)  # TODO: needed?
-        ## END TRITON BLOCK
 
-        cpu.passes.armsme.add_convert_arm_sme_to_llvm(pm)
-        cpu.passes.armsme.add_convert_vector_to_llvm(pm)
-
-        cpu.passes.armsme.add_lower_sme_microkernel_to_llvm(pm)
-        # END SME RELATED PASSES
+        if options.enable_sme:
+            cpu.passes.armsme.add_convert_arm_sme_to_llvm(pm)
+            cpu.passes.armsme.add_convert_vector_to_llvm(pm)
+            cpu.passes.armsme.add_lower_sme_microkernel_to_llvm(pm)
 
         cpu.passes.ttcpuir.add_allocate_shared_memory(pm)
 

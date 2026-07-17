@@ -24,8 +24,10 @@ namespace {
 
 class OptimizeBlockedLayout : public mlir::OpRewritePattern<DotOp> {
 public:
-  OptimizeBlockedLayout(mlir::MLIRContext *context, int benefit)
-      : OpRewritePattern<DotOp>(context, benefit) {}
+  OptimizeBlockedLayout(mlir::MLIRContext *context, bool smeVectorOverride,
+                        int benefit)
+      : OpRewritePattern<DotOp>(context, benefit),
+        smeVectorOverride(smeVectorOverride) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::DotOp dotOp,
@@ -41,11 +43,12 @@ public:
     // Trace the dot op operands to the parent loads and record the maximum
     // vector size that we can use for the blocked layout.
     auto getVectorSizeForOperand =
-        [](Value operand) -> std::optional<unsigned> {
-#if 1
-      // for investigating ARM SME, just force 16
-      return 16;
-#else
+        [&](Value operand) -> std::optional<unsigned> {
+      if (smeVectorOverride) {
+        // for investigating ARM SME, just force 16
+        return 16;
+      }
+
       if (!operand.getDefiningOp())
         return std::nullopt;
       if (auto cvt = dyn_cast<gpu::ConvertLayoutOp>(operand.getDefiningOp()))
@@ -65,7 +68,6 @@ public:
         return sizePerThread.back();
       }
       return std::nullopt;
-#endif
     };
 
     std::optional<unsigned> vectorSizeA = getVectorSizeForOperand(dotOp.getA());
@@ -114,6 +116,8 @@ public:
 
     return success();
   }
+
+  bool smeVectorOverride;
 };
 
 // Walk backward from dotOp.getA() through optional convert_layout + load +
@@ -303,7 +307,8 @@ public:
     ModuleOp m = getOperation();
     mlir::RewritePatternSet patterns(context);
     constexpr int benefitDefault = 1;
-    patterns.add<OptimizeBlockedLayout>(context, benefitDefault);
+    patterns.add<OptimizeBlockedLayout>(context, smeVectorOverride,
+                                        benefitDefault);
     if (canonicalizeKLoop) {
       patterns.add<CanonicalizeKLoop>(context, benefitDefault + 1);
     }
