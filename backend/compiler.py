@@ -217,7 +217,6 @@ class CPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
-        # BEGIN SME RELATED PASSES
         if options.enable_sme:
             cpu.passes.ttcpuir.add_outline_dot_microkernel(pm)
             cpu.passes.ttcpuir.add_lower_dot_microkernel_to_sme(pm)
@@ -243,8 +242,6 @@ class CPUBackend(BaseBackend):
 
         passes.convert.add_cf_to_llvmir(pm)
         passes.convert.add_arith_to_llvmir(pm)
-        # Cleanup leftover unrealized_conversion_casts before converted to LLVM.
-        passes.convert.add_reconcile_unrealized_casts(pm)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
