@@ -326,7 +326,7 @@ def TTC_LocalAllocOp : TTC_Op<"local_alloc", [DeclareOpInterfaceMethods<MemoryEf
   let summary = "allocate tensor on the stack";
 
   let description = [{
-    Allocates a tensor on the stack. Serves as a Triton-native standin for LLVM::AllocaOp.
+    Allocates a tensor on the stack. Serves as a Triton-native stand-in for LLVM::AllocaOp with support for initialization via src value.
   }];
 
   let arguments = (
@@ -347,8 +347,6 @@ def TTC_LocalAllocOp : TTC_Op<"local_alloc", [DeclareOpInterfaceMethods<MemoryEf
     OpBuilder<(ins "PointerType":$type, "uint32_t":$size, "Value":$src),
       [{ build($_builder, $_state, type, size, src, IntegerAttr()); }]>
   ];
-
-  // TODO: verifier, folder, etc
 }
 
 #endif

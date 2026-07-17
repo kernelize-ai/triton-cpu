@@ -66,7 +66,9 @@ def LowerDotMicrokernelToSME : Pass<"lower-dot-microkernel-to-sme", "mlir::Modul
     let summary = "Lower a dot op microkernel to Arm SME dialect representation";
 
     let description = [{
-        TODO
+        Converts the outlined dot microkernel to Arm SME instructions. The Arm SME microkernel is
+        then lowered to LLVM via upstream lowering passes. By the time the rest of the Triton to
+        LLVM lowering pipeline runs, the Arm SME kernel is fully converted to LLVM IR.
     }];
 
     let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
