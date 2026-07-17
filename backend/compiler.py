@@ -215,12 +215,25 @@ class CPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
+        # BEGIN SME RELATED PASSES
         cpu.passes.ttcpuir.add_outline_dot_microkernel(pm)
         cpu.passes.ttcpuir.add_lower_dot_microkernel_to_sme(pm)
+        passes.common.add_inliner(pm)
+        passes.common.add_canonicalizer(pm)
 
+        cpu.passes.armsme.add_convert_arm_sme_to_scf(pm)
+
+        ## TRITON BLOCK
         passes.convert.add_scf_to_cf(pm)
-        cpu.passes.ttcpuir.add_allocate_shared_memory(pm)
         passes.convert.add_index_to_llvmir(pm)
+        ## END TRITON BLOCK
+
+        cpu.passes.armsme.add_convert_arm_sme_to_llvm(pm)
+        cpu.passes.armsme.add_convert_vector_to_llvm(pm)
+        cpu.passes.armsme.add_lower_sme_microkernel_to_llvm(pm)
+        # END SME RELATED PASSES
+
+        cpu.passes.ttcpuir.add_allocate_shared_memory(pm)
 
         cpu.passes.ttcpuir.add_to_llvmir(pm)
         cpu.passes.ttcpuir.add_masked_ops_to_llvm(pm)

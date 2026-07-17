@@ -77,4 +77,14 @@ def LowerDotMicrokernelToSME : Pass<"lower-dot-microkernel-to-sme", "mlir::Modul
                             ];
 }
 
+def LowerSMEMicrokernelToLLVM : Pass<"lower-sme-microkernel-to-llvm", "mlir::ModuleOp"> {
+    let summary = "Lower remaining non-LLVM and non-ARMSME Dialect ops to LLVM";
+
+    let description = [{
+        ARM SME microkernels use ops from a variety of dialects. Lower these ops independently from the main Triton kernel to LLVM op lowering to avoid conflicts with Triton analysis passes or override Triton-specific lowering behavior.
+    }];
+
+    let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
 #endif

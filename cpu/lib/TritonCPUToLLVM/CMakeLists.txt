@@ -7,6 +7,7 @@ add_triton_library(TritonCPUToLLVM
     GPUOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
     LowerDotMicrokernelToSME.cpp
+    LowerSMEMicrokernelToLLVM.cpp
     MakeDynamicRangeOpToLLVM.cpp
     MaskedOpsToLLVM.cpp
     OutlineDotMicrokernel.cpp
@@ -17,4 +18,7 @@ add_triton_library(TritonCPUToLLVM
 
     DEPENDS
     TritonCPUConversionPassIncGen
+
+    LINK_LIBS PUBLIC
+    MLIRArmSMEDialect
 )

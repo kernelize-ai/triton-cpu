@@ -27,10 +27,17 @@ else()
   message(FATAL_ERROR "LLVM codegen/ASM parser libs: This HW architecture (${CMAKE_SYSTEM_PROCESSOR}) is not configured in cmake lib dependencies.")
 endif()
 
+set(ARM_SME_LIBS "")
+list(APPEND ARM_SME_LIBS
+  MLIRArmSMEToSCF
+  MLIRArmSMEToLLVM
+  MLIRVectorToLLVMPass
+)
+
 add_subdirectory(cpu)
 if(TRITON_BUILD_PYTHON_MODULE)
   add_triton_plugin(TritonCPU ${CMAKE_CURRENT_SOURCE_DIR}/triton_cpu.cc LINK_LIBS TritonCPUToLLVM)
-  target_link_libraries(TritonCPU PRIVATE ${CPU_LLVM_LIBS} Python3::Module nanobind-static)
+  target_link_libraries(TritonCPU PRIVATE ${CPU_LLVM_LIBS} ${ARM_SME_LIBS} Python3::Module nanobind-static)
 endif()
 if(TRITON_BUILD_UT)
   add_subdirectory(unittest)

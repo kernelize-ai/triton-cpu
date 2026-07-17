@@ -56,13 +56,12 @@ struct FuncOpSPMDParamConversion
     auto funcTy = funcOp.getFunctionType();
     auto amendedInputTy = llvm::to_vector<4>(funcTy.getInputs());
     bool isKernel = triton::isKernel(funcOp);
-    if (!isKernel)
-      return funcOp; // TODO: pass shared memory to child functions
-
-    amendedInputTy.push_back(voidPtrTy);   // launch sz
-    amendedInputTy.push_back(voidPtrTy);   // launch id
-    amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
-    amendedInputTy.push_back(voidPtrTy);   // cpu barrier
+    if (isKernel) {
+      amendedInputTy.push_back(voidPtrTy);   // launch sz
+      amendedInputTy.push_back(voidPtrTy);   // launch id
+      amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
+      amendedInputTy.push_back(voidPtrTy);   // cpu barrier
+    }
 
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
@@ -98,15 +97,16 @@ struct FuncOpSPMDParamConversion
         triton::FuncOp::create(rewriter, funcOp.getLoc(), funcOp.getName(),
                                amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
+    if (isKernel) {
+      auto nameLoc = [&](const char *name) {
+        return NameLoc::get(rewriter.getStringAttr(name));
+      };
 
-    auto nameLoc = [&](const char *name) {
-      return NameLoc::get(rewriter.getStringAttr(name));
-    };
-
-    region.addArgument(voidPtrTy, nameLoc("launch_sz"));
-    region.addArgument(voidPtrTy, nameLoc("launch_id"));
-    region.addArgument(sharedPtrTy, nameLoc("shared_mem_ptr"));
-    region.addArgument(voidPtrTy, nameLoc("cpu_barrier"));
+      region.addArgument(voidPtrTy, nameLoc("launch_sz"));
+      region.addArgument(voidPtrTy, nameLoc("launch_id"));
+      region.addArgument(sharedPtrTy, nameLoc("shared_mem_ptr"));
+      region.addArgument(voidPtrTy, nameLoc("cpu_barrier"));
+    }
 
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());
