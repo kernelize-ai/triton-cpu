@@ -25,6 +25,11 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 
+#include "mlir/Conversion/ArithToArmSME/ArithToArmSME.h"
+#include "mlir/Conversion/ArmSMEToLLVM/ArmSMEToLLVM.h"
+#include "mlir/Conversion/ArmSMEToSCF/ArmSMEToSCF.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
+
 #include <iostream>
 
 namespace py = nanobind;
@@ -99,6 +104,23 @@ void init_triton_cpu_passes_ttgpuir(py::module_ &m) {
   });
 }
 
+void init_triton_cpu_arm_sme_passes(py::module_ &m) {
+  m.def("add_convert_arm_sme_to_scf", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::createConvertArmSMEToSCFPass());
+  });
+  m.def("add_convert_arm_sme_to_llvm", [](mlir::PassManager &pm) {
+    mlir::OpPassManager &funcPm = pm.nest<mlir::triton::FuncOp>();
+    funcPm.addPass(mlir::createConvertArmSMEToLLVMPass());
+    // pm.addPass(mlir::createConvertArmSMEToLLVMPass());
+  });
+  m.def("add_convert_vector_to_llvm", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::createConvertVectorToLLVMPass());
+  });
+  m.def("add_lower_sme_microkernel_to_llvm", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createLowerSMEMicrokernelToLLVMPass());
+  });
+}
+
 void init_triton_cpu(py::module_ &m) {
   auto passes = m.def_submodule("passes");
   // Triton to TritonGPU passes specific to the Triton CPU plugin
@@ -107,6 +129,9 @@ void init_triton_cpu(py::module_ &m) {
   // TritonGPU to LLVM passes specific to the Triton CPU plugin
   auto ttcpuir_m = passes.def_submodule("ttcpuir");
   init_triton_cpu_passes(ttcpuir_m);
+  // ARM SME uKernel related passes
+  auto armsme_m = passes.def_submodule("armsme");
+  init_triton_cpu_arm_sme_passes(armsme_m);
 
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
