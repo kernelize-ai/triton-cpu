@@ -114,7 +114,6 @@ void init_triton_cpu_arm_sme_passes(py::module_ &m) {
   m.def("add_convert_arm_sme_to_llvm", [](mlir::PassManager &pm) {
     mlir::OpPassManager &funcPm = pm.nest<mlir::triton::FuncOp>();
     funcPm.addPass(mlir::createConvertArmSMEToLLVMPass());
-    // pm.addPass(mlir::createConvertArmSMEToLLVMPass());
   });
   m.def("add_convert_vector_to_llvm", [](mlir::PassManager &pm) {
     pm.addPass(mlir::createConvertVectorToLLVMPass());
