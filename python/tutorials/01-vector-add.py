@@ -82,13 +82,13 @@ def add(x: torch.Tensor, y: torch.Tensor):
 # We can now use the above function to compute the element-wise sum of two `torch.tensor` objects and test its correctness:
 torch.manual_seed(0)
 size = 66560
-x = torch.rand(size, device=DEVICE).to(torch.bfloat16)
-y = torch.rand(size, device=DEVICE).to(torch.bfloat16)
+x = torch.rand(size, device=DEVICE).to(torch.float32)
+y = torch.rand(size, device=DEVICE).to(torch.float32)
 
 output_torch = x + y
 output_triton = add(x, y)
-print(output_torch)
-print(output_triton)
+print(f'torch: {output_torch}')
+print(f'triton: {output_triton}')
 max_diff = torch.max(torch.abs(output_torch.float() - output_triton.float()))
 print(f'The maximum difference between torch and triton is {max_diff}')
 
