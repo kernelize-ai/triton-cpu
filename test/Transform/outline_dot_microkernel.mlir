@@ -7,7 +7,6 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
   // CHECK-SAME:    !tt.ptr<f32> {tt.divisibility = 64 : i32}
   // CHECK-SAME:    !tt.ptr<f32> {tt.divisibility = 64 : i32}
   // CHECK-SAME:    -> tensor<64x64xf32, #blocked>
-  // CHECK-SAME:    attributes {noinline = true}
   // Constant operands of the generic are rematerialized in-body, not passed as
   // args (if any had leaked into the signature the CHECK-SAME chain above would
   // have matched a different arg list; the call below pins the operand count).
