@@ -81,7 +81,6 @@ struct OutlineDotMicrokernelPass
           moduleBuilder, genericOp.getLoc(),
           getMicrokernelFuncName(mod, genericOp), uKernelFuncTy);
       uKernelFunc.setVisibility(SymbolTable::Visibility::Private);
-      uKernelFunc->setAttr("noinline", moduleBuilder.getBoolAttr(true));
 
       for (auto [index, attr] : divisibilityMap) {
         uKernelFunc.setArgAttr(index, "tt.divisibility", attr);
