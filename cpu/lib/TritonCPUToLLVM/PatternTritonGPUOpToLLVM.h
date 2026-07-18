@@ -9,6 +9,11 @@ namespace mlir {
 namespace triton {
 namespace cpu {
 
+void populateControlFlowOpToLLVMPattern(LLVMTypeConverter &typeConverter,
+                                        RewritePatternSet &patterns,
+                                        const TargetInfo &targetInfo,
+                                        PatternBenefit benefit);
+
 void populateDotOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns,
                                  const TargetInfo &targetInfo,
