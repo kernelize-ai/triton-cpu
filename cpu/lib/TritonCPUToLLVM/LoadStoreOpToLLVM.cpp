@@ -357,8 +357,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
 
-      cpu::llStore(rewriter, loc, b.bitcast(ptrElems[vecStart], ptr_ty(ctx, 1)),
-                   storeVal, pred);
+      cpu::llStore(rewriter, loc, ptrElems[vecStart], storeVal, pred);
     }
     rewriter.eraseOp(op);
     return success();
