@@ -25,7 +25,7 @@ jobs:
           repository: triton-lang/triton
           path: triton
           ref: ${{ env.triton_commit_hash }}
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: 'pip'
