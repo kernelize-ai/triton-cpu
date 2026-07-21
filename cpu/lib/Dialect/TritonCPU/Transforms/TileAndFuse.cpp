@@ -777,6 +777,8 @@ struct FuseElementwiseIntoGeneric : GenericOperandFusionPattern {
       return true;
     if (isa<triton::SplatOp>(op))
       return true;
+    if (isa<triton::PtrToIntOp, triton::IntToPtrOp, triton::BitcastOp>(op))
+      return true;
     // note: load isn't really "elementwise", but the tensor of ptrs can be
     // indexed elementwise and the output truncated based on the input size, so
     // we treat it as elementwise
