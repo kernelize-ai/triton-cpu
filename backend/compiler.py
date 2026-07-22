@@ -49,6 +49,7 @@ class CPUOptions:
     tile_and_fuse: bool = cpu_knobs.cpu.tile_and_fuse
     warp_size: int = cpu_knobs.cpu.warp_size
     min_dot_size: int = 1
+    fpsan_homomorphic_casts: bool = False
 
     def __post_init__(self):
         if (self.num_warps != 1):
