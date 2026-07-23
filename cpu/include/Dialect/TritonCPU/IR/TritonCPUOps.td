@@ -322,4 +322,31 @@ def TTC_MakeDynamicRangeOp : TTC_Op<"make_dynamic_range", [Pure]> {
     }];
 }
 
+def TTC_LocalAllocOp : TTC_Op<"local_alloc", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "allocate tensor on the stack";
+
+  let description = [{
+    Allocates a tensor on the stack. Serves as a Triton-native stand-in for LLVM::AllocaOp with support for initialization via src value.
+  }];
+
+  let arguments = (
+    ins
+    I32Attr:$size,
+    Optional<TT_Tensor>:$src,
+    OptionalAttr<I32Attr>:$alignment
+  );
+  let results = (outs TT_Ptr:$result);
+
+  let assemblyFormat = [{
+    ($src^)? attr-dict `:` functional-type(operands, results)
+  }];
+
+  let builders = [
+    OpBuilder<(ins "PointerType":$type, "uint32_t":$size),
+      [{ build($_builder, $_state, type, size, Value(), IntegerAttr()); }]>,
+    OpBuilder<(ins "PointerType":$type, "uint32_t":$size, "Value":$src),
+      [{ build($_builder, $_state, type, size, src, IntegerAttr()); }]>
+  ];
+}
+
 #endif

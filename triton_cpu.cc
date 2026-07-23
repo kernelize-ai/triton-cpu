@@ -25,6 +25,11 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 
+#include "mlir/Conversion/ArithToArmSME/ArithToArmSME.h"
+#include "mlir/Conversion/ArmSMEToLLVM/ArmSMEToLLVM.h"
+#include "mlir/Conversion/ArmSMEToSCF/ArmSMEToSCF.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
+
 #include <iostream>
 
 namespace py = nanobind;
@@ -57,6 +62,12 @@ void init_triton_cpu_passes(py::module_ &m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createConvertTritonCPUToLLVMPass());
   });
+  m.def("add_outline_dot_microkernel", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createOutlineDotMicrokernelPass());
+  });
+  m.def("add_lower_dot_microkernel_to_sme", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createLowerDotMicrokernelToSMEPass());
+  });
   m.def("add_allocate_shared_memory", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createAllocateSharedMemoryPass());
   });
@@ -71,12 +82,15 @@ void init_triton_cpu_passes(py::module_ &m) {
 void init_triton_cpu_passes_ttgpuir(py::module_ &m) {
   m.def(
       "add_accelerate_matmul",
-      [](mlir::PassManager &pm, bool canonicalizeKLoop) {
+      [](mlir::PassManager &pm, bool canonicalizeKLoop,
+         bool smeVectorOverride) {
         mlir::triton::cpu::TritonCPUAccelerateMatmulOptions opts;
+        opts.smeVectorOverride = smeVectorOverride;
         opts.canonicalizeKLoop = canonicalizeKLoop;
         pm.addPass(mlir::triton::cpu::createTritonCPUAccelerateMatmul(opts));
       },
-      py::arg("pm"), py::arg("canonicalize_k_loop") = false);
+      py::arg("pm"), py::arg("canonicalize_k_loop") = false,
+      py::arg("sme_vector_override") = false);
   m.def(
       "add_coalesce",
       [](mlir::PassManager &pm, int maxVectorWidth) {
@@ -93,6 +107,22 @@ void init_triton_cpu_passes_ttgpuir(py::module_ &m) {
   });
 }
 
+void init_triton_cpu_arm_sme_passes(py::module_ &m) {
+  m.def("add_convert_arm_sme_to_scf", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::createConvertArmSMEToSCFPass());
+  });
+  m.def("add_convert_arm_sme_to_llvm", [](mlir::PassManager &pm) {
+    mlir::OpPassManager &funcPm = pm.nest<mlir::triton::FuncOp>();
+    funcPm.addPass(mlir::createConvertArmSMEToLLVMPass());
+  });
+  m.def("add_convert_vector_to_llvm", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::createConvertVectorToLLVMPass());
+  });
+  m.def("add_lower_sme_microkernel_to_llvm", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createLowerSMEMicrokernelToLLVMPass());
+  });
+}
+
 void init_triton_cpu(py::module_ &m) {
   auto passes = m.def_submodule("passes");
   // Triton to TritonGPU passes specific to the Triton CPU plugin
@@ -101,6 +131,9 @@ void init_triton_cpu(py::module_ &m) {
   // TritonGPU to LLVM passes specific to the Triton CPU plugin
   auto ttcpuir_m = passes.def_submodule("ttcpuir");
   init_triton_cpu_passes(ttcpuir_m);
+  // ARM SME uKernel related passes
+  auto armsme_m = passes.def_submodule("armsme");
+  init_triton_cpu_arm_sme_passes(armsme_m);
 
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
