@@ -260,7 +260,11 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
     Variadic<I32>:$blockShape,
     DenseI32ArrayAttr:$tileShape,
-    DenseI32ArrayAttr:$reductionDims
+    DenseI32ArrayAttr:$reductionDims,
+    // Optional, parallel to reductionDims: marks a reduction dim as a *scan*
+    // (prefix) carry that must be iterated in reverse. Empty means all-forward.
+    // The K-loop reduction dim carries `false`.
+    DefaultValuedAttr<DenseBoolArrayAttr, "{}">:$reverseDims
   );
 
   let results = (outs Variadic<AnyType>:$results);
@@ -272,7 +276,7 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
 
   let builders = [
     OpBuilder<(ins "TypeRange":$results, "ValueRange":$ins, "ValueRange":$blockShape, "ArrayRef<int32_t>":$tileShape), [{
-      build($_builder, $_state, results, ValueRange(), ins, blockShape, tileShape, SmallVector<int32_t>{});
+      build($_builder, $_state, results, ValueRange(), ins, blockShape, tileShape, SmallVector<int32_t>{}, ArrayRef<bool>{});
     }]>
   ];
 
@@ -283,7 +287,10 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
   let extraClassDeclaration = [{
     Value getTileOffset(unsigned dim) { return getBody().front().getArgument(dim); }
     unsigned getNumInductionVars() { return getBlockShape().size(); }
-    unsigned getNumIterArgs() { return getReductionDims().size(); }
+    // One iter arg per init val. Usually equals reductionDims.size() (reduce,
+    // dot: one carry per reduction dim), but a multi-input scan carries N
+    // states along a single (scan) reduction dim, so the two can differ.
+    unsigned getNumIterArgs() { return getInitVals().size(); }
     unsigned getNumRegionIterArgs() {
       return getBody().front().getNumArguments() - getNumInductionVars();
     }
@@ -293,6 +300,20 @@ def TTC_GenericOp : TTC_Op<"generic", [AttrSizedOperandSegments, RecursiveMemory
     // Index of the first ins block argument: ivs + iter_args precede ins.
     unsigned getInsArgOffset() {
       return getNumInductionVars() + getNumIterArgs();
+    }
+
+    // Whether block dimension `d` is a reduction dim iterated in reverse (a
+    // reverse scan carry). False when d is not a reduction dim, or reverseDims
+    // is empty/false for it.
+    bool isReverseDim(unsigned d) {
+      auto rev = getReverseDims();
+      if (rev.empty())
+        return false;
+      auto redDims = getReductionDims();
+      for (auto [i, rd] : llvm::enumerate(redDims))
+        if ((unsigned)rd == d)
+          return rev[i];
+      return false;
     }
 
     std::string getHeader();
