@@ -5,6 +5,7 @@
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Transforms/RegionUtils.h" // getUsedValuesDefinedAbove
 #include "llvm/ADT/APFloat.h"
 #include "llvm/Support/Debug.h"
 
@@ -132,7 +133,16 @@ void seedGenericBlockArgAxisKind(cpu::GenericOp genericOp,
 
   AxisKind identity = AxisKind::getIdentity(tileShape.size());
 
+  // The primary op drives the seeding. It is usually the first body op, but a
+  // scan generic sinks combine-region constants ahead of the scan, so find the
+  // dot/reduce/scan explicitly rather than assuming it is body->front().
   Operation *root = &body->front();
+  for (Operation &op : body->without_terminator()) {
+    if (isa<triton::DotOp, triton::ReduceOp, triton::ScanOp>(&op)) {
+      root = &op;
+      break;
+    }
+  }
   TypeSwitch<Operation *>(root)
       .Case<triton::DotOp>([&](triton::DotOp dot) {
         transfer(dot.getA(),
@@ -143,6 +153,10 @@ void seedGenericBlockArgAxisKind(cpu::GenericOp genericOp,
       })
       .Case<triton::ReduceOp>([&](triton::ReduceOp reduce) {
         for (Value src : reduce.getSrcs())
+          transfer(src, identity);
+      })
+      .Case<triton::ScanOp>([&](triton::ScanOp scan) {
+        for (Value src : scan.getSrcs())
           transfer(src, identity);
       })
       .Default([&](Operation *) {
@@ -514,7 +528,8 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     auto generic = cpu::GenericOp::create(
         rewriter, loc, resultTypes, initVals, insValues, blockShapeValues,
         tileShape,
-        /*reductionDims=*/{static_cast<int32_t>(reduceOp.getAxis())});
+        /*reductionDims=*/{static_cast<int32_t>(reduceOp.getAxis())},
+        /*reverseDims=*/ArrayRef<bool>{});
 
     IRMapping bodyMapping;
     initGenericBody(
@@ -562,6 +577,300 @@ struct WrapReduceOp : public mlir::OpRewritePattern<triton::ReduceOp> {
     // Replace reduceOp with the scalar reduction result (generic result 0).
     rewriter.replaceOp(reduceOp, generic.getResult(0));
 
+    return success();
+  }
+};
+
+// TODO: use more widely
+static Value reshapeConstant(PatternRewriter &rewriter, Location loc,
+                             arith::ConstantOp cst,
+                             llvm::function_ref<Type(Type)> retype) {
+  Type target = retype(cst.getType());
+  if (auto tensorTy = dyn_cast<RankedTensorType>(target)) {
+    auto dense =
+        DenseElementsAttr::get(tensorTy, cast<TypedAttr>(cst.getValue()));
+    return arith::ConstantOp::create(rewriter, loc, tensorTy, dense);
+  }
+  return arith::ConstantOp::create(rewriter, loc,
+                                   cast<TypedAttr>(cst.getValue()));
+}
+
+// Inline-clone the body of a scan/reduce combine region at the current
+// insertion point, applying it to the value tuples (lhs.., rhs..) mapped onto
+// its 2N block args. Every region value is a scalar defining a per-lane
+// function; `retype` lifts each scalar result type to the target shape
+// (identity for a scalar target, or a tile-/carry-shaped tensor). Constants —
+// captured from above (`captures`) or defined in-region — are re-created at the
+// target shape. Returns the N mapped terminator operands.
+static SmallVector<Value>
+applyCombineRegion(PatternRewriter &rewriter, Location loc,
+                   Region &combineRegion, ValueRange lhs, ValueRange rhs,
+                   ArrayRef<Value> captures,
+                   llvm::function_ref<Type(Type)> retype) {
+  Block &block = combineRegion.front();
+  unsigned n = lhs.size();
+  assert(block.getNumArguments() == 2 * n && "combine region arity mismatch");
+
+  IRMapping m;
+  for (Value cap : captures)
+    m.map(cap, reshapeConstant(rewriter, loc,
+                               cast<arith::ConstantOp>(cap.getDefiningOp()),
+                               retype));
+  for (unsigned i = 0; i < n; ++i) {
+    m.map(block.getArgument(i), lhs[i]);
+    m.map(block.getArgument(n + i), rhs[i]);
+  }
+
+  for (Operation &op : block.without_terminator()) {
+    if (auto cst = dyn_cast<arith::ConstantOp>(op)) {
+      m.map(cst.getResult(), reshapeConstant(rewriter, loc, cst, retype));
+      continue;
+    }
+    Operation *cloned = rewriter.clone(op, m);
+    for (auto [r, origRes] : llvm::zip(cloned->getResults(), op.getResults()))
+      r.setType(retype(origRes.getType()));
+  }
+
+  SmallVector<Value> out;
+  for (Value v : block.getTerminator()->getOperands())
+    out.push_back(m.lookup(v));
+  return out;
+}
+
+// Broadcast an axis-dropped carry back to a tile shape along `axis`.
+static Value broadcastCarryToTile(PatternRewriter &rewriter, Location loc,
+                                  Value carry, RankedTensorType tileTensorTy,
+                                  unsigned axis, unsigned rank) {
+  if (rank == 1)
+    return triton::SplatOp::create(rewriter, loc, tileTensorTy, carry);
+  // expand the dropped axis back (size 1), then broadcast across the tile.
+  Value expanded =
+      triton::ExpandDimsOp::create(rewriter, loc, carry, axis).getResult();
+  return triton::BroadcastOp::create(rewriter, loc, tileTensorTy, expanded)
+      .getResult();
+}
+
+// Wrap a tt.scan in a ttc.generic. The scan axis becomes a (single) reduction
+// dim carrying N "carry" iter args — the running prefix state across tiles, one
+// per scan operand — and is marked in reverseDims for reverse scans so the
+// lowering iterates it backward.
+//
+// The tile is forced fully scalar (one element on every axis), so the whole
+// scan is realized by the cross-tile carry fold: each tile contributes one
+// element, combined with the running carry. This means there is no intra-tile
+// combine order, so reverse and non-commutative combines are exact.
+//
+// General over N inputs and any elementwise combine region. Combine regions
+// that capture non-constant SSA from above are not supported (the generic is
+// IsolatedFromAbove); constant captures are sunk.
+struct WrapScanOp : public mlir::OpRewritePattern<triton::ScanOp> {
+  using OpRewritePattern<triton::ScanOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(triton::ScanOp scanOp,
+                                PatternRewriter &rewriter) const override {
+    Location loc = scanOp.getLoc();
+    MLIRContext *ctx = getContext();
+
+    // do not re-wrap
+    if (scanOp->getParentOfType<cpu::GenericOp>())
+      return failure();
+
+    ValueRange srcs = scanOp.getSrcs();
+    unsigned n = srcs.size();
+    if (n == 0)
+      return failure();
+
+    auto tensorTy = dyn_cast<RankedTensorType>(srcs[0].getType());
+    if (!tensorTy)
+      return failure();
+    auto encoding = dyn_cast<gpu::BlockedEncodingAttr>(tensorTy.getEncoding());
+    if (!encoding)
+      return failure();
+
+    unsigned axis = scanOp.getAxis();
+    bool reverse = scanOp.getReverse();
+    unsigned rank = tensorTy.getRank();
+
+    // The generic is IsolatedFromAbove; the combine region may only capture
+    // constants (which we sink). Bail on any non-constant capture.
+    SetVector<Value> captureSet;
+    getUsedValuesDefinedAbove(scanOp.getCombineOp(), captureSet);
+    SmallVector<Value> captures(captureSet.begin(), captureSet.end());
+    for (Value c : captures)
+      if (!c.getDefiningOp<arith::ConstantOp>())
+        return failure();
+
+    auto [blockShape, _] = getBlockAndTileShapes(tensorTy, encoding);
+
+    // Force a fully scalar tile (one element on every axis). Beyond making the
+    // intra-tile scan trivial (so we can drop tt.scan), this keeps the carry
+    // fold single-element: a multi-element elementwise combine in the generic
+    // body mis-lowers for non-add combines (collapses to a lane-0 splat), which
+    // would otherwise resurface on the *parallel* axis (e.g. axis-0 scans).
+    // Vectorization is a follow-up (see seed-and-rescan design).
+    SmallVector<int32_t> tileShape(blockShape.size(), 1);
+
+    // Tile shape / block shape with the scan axis removed (the carry's shapes).
+    SmallVector<int32_t> slicedTileShape;
+    SmallVector<int64_t> carryShape64;
+    for (auto [i, t] : llvm::enumerate(tileShape))
+      if (i != axis)
+        slicedTileShape.push_back(t);
+    for (auto [i, s] : llvm::enumerate(tensorTy.getShape()))
+      if (i != axis)
+        carryShape64.push_back(s);
+
+    // Slice encoding for higher-rank carries (axis dropped).
+    auto sliceEnc = rank == 1
+                        ? Attribute()
+                        : gpu::SliceEncodingAttr::get(ctx, axis, encoding);
+
+    // Block-level carry type per src: element type with the scan axis dropped.
+    // Rank-1 collapses to a scalar; higher rank keeps a slice-encoded tensor.
+    auto carryTypeFor = [&](Type elemTy) -> Type {
+      if (rank == 1)
+        return elemTy;
+      return RankedTensorType::get(carryShape64, elemTy, sliceEnc);
+    };
+
+    // retype helpers: lift a scalar (element) type to the tile / carry shape.
+    SmallVector<int64_t> tileShape64(tileShape.begin(), tileShape.end());
+    SmallVector<int64_t> slicedTileShape64(slicedTileShape.begin(),
+                                           slicedTileShape.end());
+    auto retypeTile = [&](Type t) -> Type {
+      return RankedTensorType::get(tileShape64, t, encoding);
+    };
+    auto retypeCarry = [&](Type t) -> Type {
+      if (rank == 1)
+        return t;
+      return RankedTensorType::get(slicedTileShape64, t, sliceEnc);
+    };
+
+    // Results: [final carry x N (dead), full-block scan output x N].
+    SmallVector<Type> carryTypes, tiledCarryTypes, resultTypes;
+    SmallVector<Value> initVals;
+    for (Value src : srcs) {
+      Type elemTy = cast<RankedTensorType>(src.getType()).getElementType();
+      Type carryTy = carryTypeFor(elemTy);
+      carryTypes.push_back(carryTy);
+      tiledCarryTypes.push_back(updateTensorType(carryTy, slicedTileShape));
+      resultTypes.push_back(carryTy);
+    }
+    for (Value src : srcs)
+      resultTypes.push_back(src.getType());
+
+    // Seed iter args with defined-but-unused zeros; the first-tile predication
+    // discards them, so the combine needs no representable neutral element.
+    for (Type carryTy : carryTypes) {
+      auto zattr = cast<TypedAttr>(rewriter.getZeroAttr(carryTy));
+      initVals.push_back(
+          arith::ConstantOp::create(rewriter, loc, carryTy, zattr).getResult());
+    }
+
+    SmallVector<TiledInput> ins;
+    SmallVector<Value> insValues;
+    for (Value src : srcs) {
+      ins.push_back(TiledInput{src, tileShape});
+      insValues.push_back(src);
+    }
+    SmallVector<Value> blockShapeValues =
+        buildBlockShapeValues(loc, blockShape, rewriter);
+
+    auto generic =
+        cpu::GenericOp::create(rewriter, loc, resultTypes, initVals, insValues,
+                               blockShapeValues, tileShape,
+                               /*reductionDims=*/{static_cast<int32_t>(axis)},
+                               /*reverseDims=*/ArrayRef<bool>{reverse});
+
+    IRMapping bodyMapping;
+    initGenericBody(rewriter, generic, ins, tiledCarryTypes, tileShape,
+                    bodyMapping);
+
+    // Sink constant captures into the (isolated) body, once, as scalars. Used
+    // by the reduce combine region clone.
+    IRMapping scalarCaptureMap;
+    for (Value c : captures) {
+      Operation *cloned = rewriter.clone(*c.getDefiningOp());
+      scalarCaptureMap.map(c, cloned->getResult(0));
+    }
+
+    // 1. Local tiles. The scan-axis tile is a single element, so the intra-tile
+    // scan is the identity: the tile inputs are the "local scan" directly. We
+    // deliberately do NOT emit a tt.scan here.
+    SmallVector<Value> tileSrcs;
+    for (Value src : srcs)
+      tileSrcs.push_back(bodyMapping.lookup(src));
+    SmallVector<Value> localTiles(tileSrcs);
+
+    // 2. Per-tile totals: reduce the single-element scan axis (a squeeze),
+    // reusing the combine region. With one element per tile this is exact for
+    // any combine and either direction.
+    auto reduce = triton::ReduceOp::create(rewriter, loc, tileSrcs, (int)axis);
+    {
+      IRMapping redMap = scalarCaptureMap;
+      rewriter.cloneRegionBefore(scanOp.getCombineOp(), reduce.getCombineOp(),
+                                 reduce.getCombineOp().end(), redMap);
+      OpBuilder::InsertionGuard g(rewriter);
+      Block &cb = reduce.getCombineOp().front();
+      auto scanRet = cast<triton::ScanReturnOp>(cb.getTerminator());
+      rewriter.setInsertionPoint(scanRet);
+      triton::ReduceReturnOp::create(rewriter, scanRet.getLoc(),
+                                     scanRet.getResult());
+      rewriter.eraseOp(scanRet);
+    }
+    SmallVector<Value> tileTotals(reduce.getResults());
+    rewriter.setInsertionPointAfter(reduce);
+
+    // 3. First-processed-tile predicate along the scan axis.
+    Value tileOff = generic.getTileOffset(axis);
+    int32_t firstOff = reverse ? (blockShape[axis] - tileShape[axis]) : 0;
+    Value firstOffV = arith::ConstantOp::create(
+        rewriter, loc, rewriter.getI32IntegerAttr(firstOff));
+    Value isFirst = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, tileOff, firstOffV);
+
+    SmallVector<Value> carries;
+    for (unsigned i = 0; i < n; ++i)
+      carries.push_back(generic.getIterArg(i));
+
+    // Broadcast carries across the scan axis to the tile shape.
+    SmallVector<Value> carryTiles;
+    for (unsigned i = 0; i < n; ++i)
+      carryTiles.push_back(broadcastCarryToTile(
+          rewriter, loc, carries[i],
+          cast<RankedTensorType>(localTiles[i].getType()), axis, rank));
+
+    // 4. Fold the running carry into this tile's element(s). The scan is a
+    // left fold, so the carry (the accumulated prefix) is always the LHS of the
+    // combine — for both directions. Reverse only changes the tile iteration
+    // order (handled by reverseDims), not the operand order; and because each
+    // tile is a single element along the scan axis there is no intra-tile order
+    // to get wrong.
+    SmallVector<Value> foldedTiles = applyCombineRegion(
+        rewriter, loc, scanOp.getCombineOp(),
+        /*lhs=*/carryTiles, /*rhs=*/localTiles, captures, retypeTile);
+
+    // 5. Advance the carry the same way (carry LHS).
+    SmallVector<Value> foldedCarry = applyCombineRegion(
+        rewriter, loc, scanOp.getCombineOp(),
+        /*lhs=*/carries, /*rhs=*/tileTotals, captures, retypeCarry);
+
+    // Select: first tile uses local/total directly; others use the folds.
+    SmallVector<Value> yields;
+    yields.reserve(2 * n);
+    for (unsigned i = 0; i < n; ++i) // new carries first
+      yields.push_back(arith::SelectOp::create(rewriter, loc, isFirst,
+                                               tileTotals[i], foldedCarry[i])
+                           .getResult());
+    for (unsigned i = 0; i < n; ++i) // then adjusted output tiles
+      yields.push_back(arith::SelectOp::create(rewriter, loc, isFirst,
+                                               localTiles[i], foldedTiles[i])
+                           .getResult());
+
+    cpu::YieldOp::create(rewriter, loc, yields);
+
+    // Results 0..N-1 are the (dead) final carries; N..2N-1 are the outputs.
+    rewriter.replaceOp(scanOp, generic.getResults().drop_front(n));
     return success();
   }
 };
@@ -1745,6 +2054,7 @@ struct TritonCPUTileAndFusePass
     // Step 1: Create the generic ops
     patterns.add<WrapStores>(context, benefitDefault + 1);
     patterns.add<WrapReduceOp>(context, benefitDefault + 1);
+    patterns.add<WrapScanOp>(context, benefitDefault + 1);
     patterns.add<WrapDotOp>(context, benefitDefault + 1);
     patterns.add<WrapConvertLayoutOp>(context, benefitDefault);
 

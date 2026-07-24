@@ -91,15 +91,27 @@ LogicalResult GenericOp::verify() {
   if (llvm::adjacent_find(sortedDims) != sortedDims.end())
     return emitOpError("reductionDims must not contain duplicate entries");
 
-  // init_vals count must match reductionDims count.
-  if (initVals.size() != reductionDims.size())
-    return emitOpError("init_vals has ")
-           << initVals.size() << " value(s) but reductionDims has "
-           << reductionDims.size() << " entry(ies)";
+  // reverseDims, if present, must be parallel to reductionDims.
+  auto reverseDims = getReverseDims();
+  if (!reverseDims.empty() && reverseDims.size() != reductionDims.size())
+    return emitOpError("reverseDims has ")
+           << reverseDims.size()
+           << " entry(ies) but must be empty or match reductionDims ("
+           << reductionDims.size() << ")";
+
+  // Iter args (one per init val) are carried along the reduction dims. A
+  // reduce/dot has one per reduction dim; a multi-input scan carries several
+  // along a single scan axis. So we only require that carrying implies at
+  // least one reduction dim, not a 1:1 count.
+  if (!initVals.empty() && reductionDims.empty())
+    return emitOpError("has ")
+           << initVals.size()
+           << " init val(s)/iter arg(s) but no reductionDims to carry them "
+              "along";
 
   // Body block must have numIVs + numIterArgs + numIns arguments.
   unsigned numIns = getIns().size();
-  unsigned numIterArgs = reductionDims.size();
+  unsigned numIterArgs = initVals.size();
   unsigned expectedArgs = numInductionVars + numIterArgs + numIns;
   if (bodyBlock.getNumArguments() != expectedArgs)
     return emitOpError("body block has ")

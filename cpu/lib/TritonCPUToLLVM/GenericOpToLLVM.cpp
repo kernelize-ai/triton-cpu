@@ -162,6 +162,28 @@ public:
     return llvm::is_contained(reductionDims, d);
   }
 
+  bool isReverseDim(unsigned d) const {
+    return d < reverseDims.size() && reverseDims[d];
+  }
+
+  // dynamic path
+  Value physicalTileOffset(ConversionPatternRewriter &rewriter, unsigned dim,
+                           Value logicalIdx, Value numChunks,
+                           int32_t tileSize) const {
+    TritonLLVMOpBuilder b(rewriter.getUnknownLoc(), rewriter);
+    Value idx = isReverseDim(dim)
+                    ? b.sub(b.sub(numChunks, b.i32_val(1)), logicalIdx)
+                    : logicalIdx;
+    return b.mul(idx, b.i32_val(tileSize));
+  }
+
+  // static path
+  int32_t physicalTileOffset(unsigned dim, int32_t logicalIdx,
+                             int32_t numChunks, int32_t tileSize) const {
+    int32_t idx = isReverseDim(dim) ? (numChunks - 1 - logicalIdx) : logicalIdx;
+    return idx * tileSize;
+  }
+
   template <typename T>
   static Value extractTileFromFullTensor(
       ConversionPatternRewriter &rewriter, Location loc,
@@ -200,6 +222,7 @@ private:
 
   SmallVector<Value> tileOffsets;
   SmallVector<int32_t> reductionDims;
+  SmallVector<bool> reverseDims;
 };
 
 LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
@@ -266,6 +289,14 @@ LoopHelper::LoopHelper(ArrayRef<ArgInfo> args, cpu::GenericOp generic,
         elemTy, tensorElems, generic);
     materializedResults.push_back(globalPtr);
   }
+
+  // Cache per-dim reverse flags, dim-indexed like isReductionDim. This expands
+  // the op's compact reverseDims (parallel to reductionDims) into a rank-sized
+  // vector for O(1) lookup in physicalTileOffset.
+  unsigned rank = generic.getBlockShape().size();
+  this->reverseDims = SmallVector<bool>(rank, false);
+  for (unsigned d = 0; d < rank; d++)
+    this->reverseDims[d] = generic.isReverseDim(d);
 }
 
 void LoopHelper::preMaterializeStructIns(ConversionPatternRewriter &rewriter,
@@ -876,11 +907,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
       for (int d = rank - 1; d >= 0; --d) {
         int32_t nc = blockShape[d] / tileShape[d];
         int32_t chunkIdx = remaining % nc;
-        elemOffset[d] = chunkIdx * tileShape[d];
+        int32_t offset =
+            helper.physicalTileOffset(d, chunkIdx, nc, tileShape[d]);
+        elemOffset[d] = offset;
         LDBG("perDimOffsets[" << d << "] = " << chunkIdx << " * "
                               << tileShape[d] << " = "
                               << (chunkIdx * tileShape[d]));
-        helper.setTileOffset(d, b.i32_val(chunkIdx * tileShape[d]));
+        helper.setTileOffset(d, b.i32_val(offset));
         remaining /= nc;
       }
 
@@ -1058,11 +1091,13 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                     b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
     }
 
+    // TODO: remove dimTileOffset from lambda
     auto finalCarried = emitSingleLoop(
         rewriter, loc, numChunks, tileShape[dim], helper.getIterArgVals(),
         [&](Value loopI, Value dimTileOffset, ArrayRef<Value> currentCarried,
             Block *afterBlock) -> SmallVector<Value> {
-          helper.addTileOffset(dimTileOffset);
+          helper.addTileOffset(helper.physicalTileOffset(
+              rewriter, dim, loopI, numChunks, tileShape[dim]));
 
           SmallVector<Value> innerIterArgVals(currentCarried.begin(),
                                               currentCarried.end());
