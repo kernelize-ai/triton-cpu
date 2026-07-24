@@ -54,4 +54,39 @@ def SharedMemoryGlobalConversionCPU : Pass<"shared-memory-global-conversion-cpu"
     }];
 }
 
+def OutlineDotMicrokernel : Pass<"outline-dot-microkernel", "mlir::ModuleOp"> {
+    let summary = "Outline a matmul-shaped region into a callable microkernel";
+
+    let description = [{
+        Outlines a matmul-shaped region within a TritonCPU::GenericOp into a callable microkernel. Lifts the GenericOp into a no-inline MLIR FuncOp for lowering to LLVM alongside existing Triton/TritonCPU -> LLVM passes.
+    }];
+}
+
+def LowerDotMicrokernelToSME : Pass<"lower-dot-microkernel-to-sme", "mlir::ModuleOp"> {
+    let summary = "Lower a dot op microkernel to Arm SME dialect representation";
+
+    let description = [{
+        Converts the outlined dot microkernel to Arm SME instructions. The Arm SME microkernel is
+        then lowered to LLVM via upstream lowering passes. By the time the rest of the Triton to
+        LLVM lowering pipeline runs, the Arm SME kernel is fully converted to LLVM IR.
+    }];
+
+    let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                             "mlir::triton::TritonDialect",
+                             "mlir::memref::MemRefDialect",
+                             "mlir::arm_sme::ArmSMEDialect",
+                             "mlir::arith::ArithDialect"
+                            ];
+}
+
+def LowerSMEMicrokernelToLLVM : Pass<"lower-sme-microkernel-to-llvm", "mlir::ModuleOp"> {
+    let summary = "Lower remaining non-LLVM and non-ARMSME Dialect ops to LLVM";
+
+    let description = [{
+        ARM SME microkernels use ops from a variety of dialects. Lower these ops independently from the main Triton kernel to LLVM op lowering to avoid conflicts with Triton analysis passes or override Triton-specific lowering behavior.
+    }];
+
+    let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
 #endif

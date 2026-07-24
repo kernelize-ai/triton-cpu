@@ -56,13 +56,12 @@ struct FuncOpSPMDParamConversion
     auto funcTy = funcOp.getFunctionType();
     auto amendedInputTy = llvm::to_vector<4>(funcTy.getInputs());
     bool isKernel = triton::isKernel(funcOp);
-    if (!isKernel)
-      return funcOp; // TODO: pass shared memory to child functions
-
-    amendedInputTy.push_back(voidPtrTy);   // launch sz
-    amendedInputTy.push_back(voidPtrTy);   // launch id
-    amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
-    amendedInputTy.push_back(voidPtrTy);   // cpu barrier
+    if (isKernel) {
+      amendedInputTy.push_back(voidPtrTy);   // launch sz
+      amendedInputTy.push_back(voidPtrTy);   // launch id
+      amendedInputTy.push_back(sharedPtrTy); // shared memory ptr
+      amendedInputTy.push_back(voidPtrTy);   // cpu barrier
+    }
 
     auto amendedFuncTy =
         FunctionType::get(ctx, amendedInputTy, funcTy.getResults());
@@ -98,15 +97,16 @@ struct FuncOpSPMDParamConversion
         triton::FuncOp::create(rewriter, funcOp.getLoc(), funcOp.getName(),
                                amendedFuncTy, amendedAttrs);
     auto &region = funcOp.getBody();
+    if (isKernel) {
+      auto nameLoc = [&](const char *name) {
+        return NameLoc::get(rewriter.getStringAttr(name));
+      };
 
-    auto nameLoc = [&](const char *name) {
-      return NameLoc::get(rewriter.getStringAttr(name));
-    };
-
-    region.addArgument(voidPtrTy, nameLoc("launch_sz"));
-    region.addArgument(voidPtrTy, nameLoc("launch_id"));
-    region.addArgument(sharedPtrTy, nameLoc("shared_mem_ptr"));
-    region.addArgument(voidPtrTy, nameLoc("cpu_barrier"));
+      region.addArgument(voidPtrTy, nameLoc("launch_sz"));
+      region.addArgument(voidPtrTy, nameLoc("launch_id"));
+      region.addArgument(sharedPtrTy, nameLoc("shared_mem_ptr"));
+      region.addArgument(voidPtrTy, nameLoc("cpu_barrier"));
+    }
 
     rewriter.inlineRegionBefore(region, amendedFuncOp.getBody(),
                                 amendedFuncOp.end());
@@ -136,6 +136,14 @@ struct FuncOpSPMDParamConversion
       //  rewriter.getIntegerAttr(type::u1Ty(ctx), 1));
       newFuncOp.setLinkage(LLVM::Linkage::External);
     } else {
+      // preserve ARM SME attributes
+      for (StringRef name :
+           {"arm_streaming", "arm_locally_streaming",
+            "arm_streaming_compatible", "arm_new_za", "arm_in_za", "arm_out_za",
+            "arm_inout_za", "arm_preserves_za"}) {
+        if (funcOp->hasAttr(name))
+          newFuncOp->setAttr(name, rewriter.getUnitAttr());
+      }
       // The noinline attribute will be used by the LLVM codegen to prevent
       // inlining.
       // https://github.com/llvm/llvm-project/blob/main/mlir/lib/Dialect/LLVMIR/IR/LLVMInlining.cpp#L267

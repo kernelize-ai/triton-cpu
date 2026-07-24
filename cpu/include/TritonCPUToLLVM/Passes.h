@@ -25,6 +25,9 @@ std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonCPUToLLVMPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAllocateSharedMemoryPass();
 std::unique_ptr<OperationPass<ModuleOp>>
 createSharedMemoryGlobalConversionPass();
+std::unique_ptr<OperationPass<ModuleOp>> createOutlineDotMicrokernelPass();
+std::unique_ptr<OperationPass<ModuleOp>> createLowerDotMicrokernelToSMEPass();
+std::unique_ptr<OperationPass<ModuleOp>> createLowerSMEMicrokernelToLLVMPass();
 
 #define GEN_PASS_REGISTRATION
 #include "cpu/include/TritonCPUToLLVM/Passes.h.inc"
