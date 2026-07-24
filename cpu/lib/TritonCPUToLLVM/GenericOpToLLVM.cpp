@@ -936,13 +936,12 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
   // loop-carried state alongside the loop counter. bodyFn receives the current
   // carried values and returns the updated carried values for the back edge.
   // Returns the final carried values available after the loop.
-  SmallVector<Value>
-  emitSingleLoop(ConversionPatternRewriter &rewriter, Location loc,
-                 Value numChunks, int32_t tileSize, ArrayRef<Value> initCarried,
-                 llvm::function_ref<SmallVector<Value>(
-                     Value /*loopI*/, Value /*dimTileOffset*/,
-                     ArrayRef<Value> /*carried*/, Block * /*afterBlock*/)>
-                     bodyFn) const {
+  SmallVector<Value> emitSingleLoop(
+      ConversionPatternRewriter &rewriter, Location loc, Value numChunks,
+      int32_t tileSize, ArrayRef<Value> initCarried,
+      llvm::function_ref<SmallVector<Value>(
+          Value /*loopI*/, ArrayRef<Value> /*carried*/, Block * /*afterBlock*/)>
+          bodyFn) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
     Block *currentBlock = rewriter.getInsertionBlock();
@@ -982,10 +981,8 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
 
     // loop body: emit tile, increment counter, branch back with new carried
     rewriter.setInsertionPointToEnd(loopBody);
-    Value tileOffset = b.mul(loopI, b.i32_val(tileSize));
 
-    SmallVector<Value> newCarried =
-        bodyFn(loopI, tileOffset, currentCarried, afterBlock);
+    SmallVector<Value> newCarried = bodyFn(loopI, currentCarried, afterBlock);
 
     Value nextI = LLVM::AddOp::create(rewriter, loc, loopI, b.i32_val(1));
     SmallVector<Value> nextArgs = {nextI};
@@ -1091,10 +1088,9 @@ struct GenericOpConversion : public ConvertOpToLLVMPattern<cpu::GenericOp> {
                     b.sdiv(blockShape[d], b.i32_val(tileShape[d])));
     }
 
-    // TODO: remove dimTileOffset from lambda
     auto finalCarried = emitSingleLoop(
         rewriter, loc, numChunks, tileShape[dim], helper.getIterArgVals(),
-        [&](Value loopI, Value dimTileOffset, ArrayRef<Value> currentCarried,
+        [&](Value loopI, ArrayRef<Value> currentCarried,
             Block *afterBlock) -> SmallVector<Value> {
           helper.addTileOffset(helper.physicalTileOffset(
               rewriter, dim, loopI, numChunks, tileShape[dim]));
