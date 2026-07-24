@@ -655,11 +655,14 @@ static Value broadcastCarryToTile(PatternRewriter &rewriter, Location loc,
 // per scan operand — and is marked in reverseDims for reverse scans so the
 // lowering iterates it backward.
 //
+// The tile is forced fully scalar (one element on every axis), so the whole
+// scan is realized by the cross-tile carry fold: each tile contributes one
+// element, combined with the running carry. This means there is no intra-tile
+// combine order, so reverse and non-commutative combines are exact.
+//
 // General over N inputs and any elementwise combine region. Combine regions
 // that capture non-constant SSA from above are not supported (the generic is
-// IsolatedFromAbove); constant captures are sunk. Note: a reverse scan with a
-// non-commutative combine is not fully handled — the tile total comes from a
-// forward reduce.
+// IsolatedFromAbove); constant captures are sunk.
 struct WrapScanOp : public mlir::OpRewritePattern<triton::ScanOp> {
   using OpRewritePattern<triton::ScanOp>::OpRewritePattern;
 
@@ -697,7 +700,15 @@ struct WrapScanOp : public mlir::OpRewritePattern<triton::ScanOp> {
       if (!c.getDefiningOp<arith::ConstantOp>())
         return failure();
 
-    auto [blockShape, tileShape] = getBlockAndTileShapes(tensorTy, encoding);
+    auto [blockShape, _] = getBlockAndTileShapes(tensorTy, encoding);
+
+    // Force a fully scalar tile (one element on every axis). Beyond making the
+    // intra-tile scan trivial (so we can drop tt.scan), this keeps the carry
+    // fold single-element: a multi-element elementwise combine in the generic
+    // body mis-lowers for non-add combines (collapses to a lane-0 splat), which
+    // would otherwise resurface on the *parallel* axis (e.g. axis-0 scans).
+    // Vectorization is a follow-up (see seed-and-rescan design).
+    SmallVector<int32_t> tileShape(blockShape.size(), 1);
 
     // Tile shape / block shape with the scan axis removed (the carry's shapes).
     SmallVector<int32_t> slicedTileShape;
@@ -776,28 +787,24 @@ struct WrapScanOp : public mlir::OpRewritePattern<triton::ScanOp> {
                     bodyMapping);
 
     // Sink constant captures into the (isolated) body, once, as scalars. Used
-    // by the cloned scan and reduce combine regions.
+    // by the reduce combine region clone.
     IRMapping scalarCaptureMap;
     for (Value c : captures) {
       Operation *cloned = rewriter.clone(*c.getDefiningOp());
       scalarCaptureMap.map(c, cloned->getResult(0));
-      bodyMapping.map(c, cloned->getResult(0));
     }
 
-    // 1. Local scan on the tiles. The cloned scan keeps its axis/reverse attrs,
-    // so intra-tile direction is handled for free.
-    Operation *newScan = rewriter.clone(*scanOp, bodyMapping);
-    for (auto [res, src] : llvm::zip(newScan->getResults(), srcs))
-      res.setType(updateTensorType(src.getType(), tileShape));
-    SmallVector<Value> localTiles(newScan->getResults());
-    rewriter.setInsertionPointAfter(newScan);
-
-    // 2. Per-tile totals via a reduce reusing the combine region. Correct for
-    // commutative combiners and for forward scans; a non-commutative reverse
-    // scan would instead need the boundary element of the local scan.
+    // 1. Local tiles. The scan-axis tile is a single element, so the intra-tile
+    // scan is the identity: the tile inputs are the "local scan" directly. We
+    // deliberately do NOT emit a tt.scan here.
     SmallVector<Value> tileSrcs;
     for (Value src : srcs)
       tileSrcs.push_back(bodyMapping.lookup(src));
+    SmallVector<Value> localTiles(tileSrcs);
+
+    // 2. Per-tile totals: reduce the single-element scan axis (a squeeze),
+    // reusing the combine region. With one element per tile this is exact for
+    // any combine and either direction.
     auto reduce = triton::ReduceOp::create(rewriter, loc, tileSrcs, (int)axis);
     {
       IRMapping redMap = scalarCaptureMap;
@@ -833,18 +840,20 @@ struct WrapScanOp : public mlir::OpRewritePattern<triton::ScanOp> {
           rewriter, loc, carries[i],
           cast<RankedTensorType>(localTiles[i].getType()), axis, rank));
 
-    // 4. Fold the carry into every scanned element. For a reverse scan the
-    // carry holds "everything after", so it is the RHS of the combine.
+    // 4. Fold the running carry into this tile's element(s). The scan is a
+    // left fold, so the carry (the accumulated prefix) is always the LHS of the
+    // combine — for both directions. Reverse only changes the tile iteration
+    // order (handled by reverseDims), not the operand order; and because each
+    // tile is a single element along the scan axis there is no intra-tile order
+    // to get wrong.
     SmallVector<Value> foldedTiles = applyCombineRegion(
         rewriter, loc, scanOp.getCombineOp(),
-        /*lhs=*/reverse ? localTiles : carryTiles,
-        /*rhs=*/reverse ? carryTiles : localTiles, captures, retypeTile);
+        /*lhs=*/carryTiles, /*rhs=*/localTiles, captures, retypeTile);
 
-    // 5. Advance the carry by the tile total (same operand-side convention).
+    // 5. Advance the carry the same way (carry LHS).
     SmallVector<Value> foldedCarry = applyCombineRegion(
         rewriter, loc, scanOp.getCombineOp(),
-        /*lhs=*/reverse ? tileTotals : carries,
-        /*rhs=*/reverse ? carries : tileTotals, captures, retypeCarry);
+        /*lhs=*/carries, /*rhs=*/tileTotals, captures, retypeCarry);
 
     // Select: first tile uses local/total directly; others use the folds.
     SmallVector<Value> yields;
