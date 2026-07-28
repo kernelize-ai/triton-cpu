@@ -233,6 +233,11 @@ class CPUBackend(BaseBackend):
             passes.common.add_cse(pm)
             passes.common.add_canonicalizer(pm)
 
+            sys_desc_path = os.getenv("TT_SYSTEM_DESC_PATH", "")
+            cpu.passes.tenstorrent.add_ttcore_register_device_pass(pm, sys_desc_path)
+
+            cpu.passes.tenstorrent.add_ttc_generic_to_d2m(pm)
+
         cpu.passes.tenstorrent.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         cpu.passes.tenstorrent.add_convert_compute_ops(pm)

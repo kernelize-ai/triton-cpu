@@ -102,6 +102,9 @@ void init_triton_npu_passes_tenstorrent(py::module &&m) {
   m.def("add_to_d2m_dialect", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::npu::createConvertTritonNPUToD2M());
   });
+  m.def("add_ttc_generic_to_d2m", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::npu::createConvertTTCGenericToD2M());
+  });
 
   m.def("add_drop_function",
         [](mlir::PassManager &pm, const std::string &funcName) {

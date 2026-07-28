@@ -22,6 +22,15 @@ def ConvertTritonNPUToD2M : Pass<"convert-triton-npu-to-d2m", "mlir::ModuleOp"> 
                             ];
 }
 
+def ConvertTTCGenericToD2M : Pass<"convert-ttc-generic-to-d2m", "mlir::ModuleOp"> {
+    let summary = "Convert TritonCPU Generic Ops to D2M";
+    let description = [{
+        // TODO
+    }];
+
+    let dependentDialects = ["mlir::d2m::D2MDialect"];
+}
+
 def TensorizeScalars : Pass<"tensorize-scalars", "mlir::ModuleOp"> {
     let summary = "Convert scalar arguments to a function into 0D tensors";
     let description = [{
