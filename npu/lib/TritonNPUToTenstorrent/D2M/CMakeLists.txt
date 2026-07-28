@@ -7,6 +7,7 @@ add_triton_library(TritonNPUToD2M
     SPMDOpToD2M.cpp
     TensorizeScalars.cpp
     TritonNPUToD2M.cpp
+    TTCGenericPlan.cpp
     TTCGenericToD2M.cpp
 
     DEPENDS

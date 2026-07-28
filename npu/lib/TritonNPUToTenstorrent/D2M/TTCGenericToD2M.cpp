@@ -7,6 +7,8 @@
 #include "ttmlir/Dialect/D2M/IR/D2M.h"
 #include "ttmlir/Dialect/D2M/IR/D2MOps.h"
 
+#include "TTCGenericPlan.h"
+
 namespace mlir {
 
 using namespace tt;
@@ -35,6 +37,12 @@ struct ConvertTTCGenericToD2MPass
       // TODO: if there are already generic plans from a previous function, bail
       // - we can't cross function boundaries yet
       func.walk([&](cpu::GenericOp generic) {
+        auto planResult = buildPlan(generic);
+        if (failed(planResult)) {
+          signalPassFailure();
+          return;
+        }
+
         llvm::errs() << "generic = " << generic.getHeader() << "\n";
       });
     });
