@@ -46,6 +46,7 @@ class CPUOptions:
 
 class CPUBackend(BaseBackend):
     instrumentation = None  # TODO: intra-kernel instrumentation not yet supported
+    supports_native_tensor_specialization = False
 
     @staticmethod
     def supports_target(target: GPUTarget):
@@ -93,13 +94,25 @@ class CPUBackend(BaseBackend):
         cpu.load_dialects(ctx, self.device)
 
     @staticmethod
+    def get_tensor_specialization(arg, **kwargs):
+        ret = BaseBackend.get_tensor_specialization(arg, **kwargs)
+        shape = getattr(arg, "shape", None)
+        # TODO: apply this for tile and fuse only?
+        if shape:
+            ret += "|" + "x".join(str(int(d)) for d in shape)
+        return ret
+
+    @staticmethod
     def parse_attr(desc):
+        desc, _, shape = desc.partition("|")
         ret = []
         if "D" in desc:
             ret += [["tt.divisibility", 8]]
-        # pop D from desc
-        desc = desc.replace("D", "")
-        ret += BaseBackend.parse_attr(desc)
+        ret += BaseBackend.parse_attr(desc.replace("D", ""))
+        if shape:
+            dims = [int(d) for d in shape.split("x")]
+            ret += [["tt.tensor_rank", len(dims)]]
+            ret += [[f"tt.tensor_shape_{i}", d] for i, d in enumerate(dims)]
         return ret
 
     @staticmethod
