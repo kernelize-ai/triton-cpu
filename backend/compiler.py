@@ -36,6 +36,7 @@ class CPUOptions:
     min_dot_size: int = 1
     enable_dot_op_multicast: bool = False
     ttmlir_target: str = os.environ.get("TRITON_TTMLIR_TARGET", "ttkernel")
+    tile_and_fuse: bool = os.environ.get("TRITON_CPU_ENABLE_TILE_AND_FUSE", "0") == "1"
 
     def hash(self):
         hash_dict = dict(self.__dict__)
@@ -211,6 +212,13 @@ class CPUBackend(BaseBackend):
     def make_d2m(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
+
+        if options.tile_and_fuse:
+            cpu.passes.ttgpuir.add_tile_and_fuse(pm)
+            passes.common.add_canonicalizer(pm)
+            passes.common.add_sccp(pm)
+            passes.common.add_cse(pm)
+            passes.common.add_canonicalizer(pm)
 
         cpu.passes.tenstorrent.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
