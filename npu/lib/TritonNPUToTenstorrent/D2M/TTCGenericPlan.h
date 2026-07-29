@@ -3,11 +3,17 @@
 
 #include "cpu/include/Dialect/TritonCPU/IR/Dialect.h"
 
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallVector.h"
+
 namespace mlir {
 namespace triton {
 namespace npu {
 
-class GenericPlan {};
+class GenericPlan {
+public:
+};
 
 mlir::FailureOr<GenericPlan> buildPlan(cpu::GenericOp);
 
