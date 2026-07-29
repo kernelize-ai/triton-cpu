@@ -1,16 +1,16 @@
 diff --git a/python/test/unit/language/test_core.py b/python/test/unit/language/test_core.py
-index fdc268937..513985378 100644
+index 0c58e5f8e7..d9183639c2 100644
 --- a/python/test/unit/language/test_core.py
 +++ b/python/test/unit/language/test_core.py
-@@ -37,6 +37,7 @@ from triton._internal_testing import (
-     is_hip_rdna3,
+@@ -38,6 +38,7 @@ from triton._internal_testing import (
+     is_hip_rdna4m,
      is_hip_rdna4,
      is_hip_gfx1250,
 +    is_cpu,
      is_xpu,
      torch_float8_dtypes,
      torch_dtypes,
-@@ -128,6 +129,11 @@ def check_type_supported(dtype, device):
+@@ -129,6 +130,11 @@ def check_type_supported(dtype, device):
              pytest.skip("bfloat16 is only supported on NVGPU with cc >= 80")
          if cc[0] < 9 and dtype in {tl.float8e4nv, "float8e4nv", "float8_e4m3fn"}:
              pytest.skip("float8e4nv is only supported on NVGPU with cc >= 90")
@@ -22,7 +22,7 @@ index fdc268937..513985378 100644
      if is_interpreter():
          if dtype in [tl.bfloat16, "bfloat16", torch.bfloat16]:
              pytest.skip("bfloat16 is not supported in the interpreter")
-@@ -2230,6 +2236,8 @@ def test_load_store_same_ptr(device):
+@@ -2300,6 +2306,8 @@ def test_load_store_same_ptr(device):
          x = torch.ones((65536, ), device=device, dtype=torch.float32)
          if is_hip():
              kernel[(65536, )](x, num_warps=16)  # threads per Warp for ROCM is 64
@@ -31,7 +31,7 @@ index fdc268937..513985378 100644
          else:
              kernel[(65536, )](x, num_warps=32)
          assert torch.all(x == 2)
-@@ -3461,8 +3469,10 @@ def convert_fp8_to_fp32(x, device, dtype_str):
+@@ -3531,8 +3539,10 @@ def convert_fp8_to_fp32(x, device, dtype_str):
  def get_test_dot_base_cases():
      return [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1, None)
              for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 16)]
@@ -44,7 +44,7 @@ index fdc268937..513985378 100644
              for in_dtype, out_dtype in [('float16', 'float16'), ('float16',
                                                                   'float32'), ('float32',
                                                                                'float32'), ('float64', 'float64')]
-@@ -3482,6 +3492,8 @@ def get_test_dot_softmax():
+@@ -3552,6 +3562,8 @@ def get_test_dot_softmax():
  
  # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
  def get_test_dot_mixed_sizes_cases():
@@ -53,7 +53,7 @@ index fdc268937..513985378 100644
      available_kpack = [1, 2 if (is_hip() and not is_hip_cdna4()) else 1]
      available_precision = ["tf32" if is_cuda() else "ieee"]
      return [
-@@ -3508,6 +3520,8 @@ def get_test_dot_transposed_op_base_cases():
+@@ -3578,6 +3590,8 @@ def get_test_dot_transposed_op_base_cases():
  # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
  # Introduced in #2750
  def get_test_dot_h100_shortcut_cases():
@@ -62,7 +62,7 @@ index fdc268937..513985378 100644
      return [(64, 64, 64, 4, False, False, 'chain-dot', 'ieee', 'bfloat16', 'float32', 1, None)]
  
  
-@@ -3523,6 +3537,8 @@ def get_test_dot_mfma_edge_cases():
+@@ -3593,6 +3607,8 @@ def get_test_dot_mfma_edge_cases():
  # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
  # introduced in #3370
  def get_test_dot_fp8_output_cases():
@@ -71,7 +71,7 @@ index fdc268937..513985378 100644
      return [(128, 128, 64, 4, False, False, 'chain-dot', 'ieee', float8_type, 'float32', 1, None)
              for float8_type in ["float8e5", "float8e4nv"]]
  
-@@ -3596,6 +3612,10 @@ def get_test_dot_small_k_wmma_cases():
+@@ -3666,6 +3682,10 @@ def get_test_dot_small_k_wmma_cases():
  
  
  def get_test_small_dots_cases():
@@ -82,7 +82,7 @@ index fdc268937..513985378 100644
      if not is_cuda():
          return []
      return [(2, 4, 32, 1, False, False, 'None', 'ieee', 'float16', 'float32', 1, None),
-@@ -3633,6 +3653,11 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
+@@ -3703,6 +3723,11 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
          if input_precision == "bf16x3" or input_precision == "bf16x6":
              pytest.skip(f"input_precision {input_precision} is not supported in the interpreter")
      else:
