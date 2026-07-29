@@ -16,16 +16,12 @@ struct GenericPlan {
   GenericPlan() = default;
 
   struct Operand {
+    Operation *boundaryOp; // the tt.load / tt.store consumer
     BlockArgument funcArg;
-
     SmallVector<int64_t> logicalShape;
     SmallVector<int64_t> tensorTiles;
-
     AffineMap indexingMap;
-
     Type elementType;
-
-    bool isOutput = false;
   };
 
   // --- operands, ins-then-outs; order must match indexing_maps ---
@@ -38,9 +34,7 @@ struct GenericPlan {
   SmallVector<Attribute> iteratorTypes;
 
   // --- body ---
-  SmallVector<Operation *> dataOps;            // topological order
-  DenseMap<Operation *, unsigned> loadOperand; // tt.load -> operand idx
-  Operation *storeOp = nullptr;                // only one store per generic
+  SmallVector<Operation *> dataOps; // topological order
 
   // --- masks ---
   // ignored for now

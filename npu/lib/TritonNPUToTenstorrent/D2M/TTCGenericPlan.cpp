@@ -127,6 +127,137 @@ static mlir::FailureOr<Planes> classify(cpu::GenericOp generic) {
   return Planes{orderedDataOps, control, boundary};
 }
 
+/// Read the logical (scalar-element) shape of kernel argument `argIndex` from
+/// the tt.tensor_rank / tt.tensor_shape_N attributes attached by the backend's
+/// tensor specialization.
+///
+/// A rank-1 shape {N} is promoted to {N/32, 32}. That is not a reinterpretation
+/// of the data: a row-major {N/32, 32} tensor tiled into 32x32 tiles places
+/// elements [1024*i, 1024*i + 1024) into tile i, which is exactly how the host
+/// packs a 1-D tensor. Leaving it rank-1 would hit MetalLayoutAttr's "rank-1 is
+/// a single logical row in a 2D tile plane" rule and describe the same buffer
+/// as N/32 tiles of 32 useful elements each.
+static FailureOr<SmallVector<int64_t>>
+readLogicalShape(triton::FuncOp funcOp, unsigned argIndex,
+                 Operation *diagnosticAnchorOp) {
+  auto rankAttr =
+      funcOp.getArgAttrOfType<IntegerAttr>(argIndex, "tt.tensor_rank");
+  if (!rankAttr)
+    return diagnosticAnchorOp->emitError()
+           << "kernel argument #" << argIndex
+           << " has no tt.tensor_rank attribute; tensor shape specialization "
+              "did not run for it (do_not_specialize?)";
+
+  SmallVector<int64_t> shape;
+  for (int64_t dim = 0, rank = rankAttr.getInt(); dim < rank; ++dim) {
+    auto dimAttr = funcOp.getArgAttrOfType<IntegerAttr>(
+        argIndex, ("tt.tensor_shape_" + Twine(dim)).str());
+    if (!dimAttr)
+      return diagnosticAnchorOp->emitError()
+             << "kernel argument #" << argIndex
+             << " declares tt.tensor_rank = " << rank
+             << " but is missing tt.tensor_shape_" << dim;
+    shape.push_back(dimAttr.getInt());
+  }
+
+  auto tile = ttcore::TileType::getDefaultShape();
+  if (shape.size() == 1) {
+    const int64_t tileVolume = tile[0] * tile[1];
+    if (shape[0] % tileVolume != 0)
+      return diagnosticAnchorOp->emitError()
+             << "rank-1 kernel argument #" << argIndex << " has " << shape[0]
+             << " elements, which is not a whole number of " << tileVolume
+             << "-element tiles";
+    shape = {shape[0] / tile[0], tile[0]};
+  }
+  return shape;
+}
+
+/// Turn the classified planes into the plan's operand list.
+///
+/// Operand order is loads-then-store, which is the ins-then-outs order that
+/// d2m.generic and its indexing_maps require.
+static LogicalResult populateOperands(cpu::GenericOp generic, GenericPlan &plan,
+                                      const Planes &planes) {
+  auto funcOp = generic->getParentOfType<triton::FuncOp>();
+  if (!funcOp)
+    return generic.emitError("ttc.generic is not inside a triton function");
+
+  SmallVector<triton::LoadOp> loads;
+  SmallVector<triton::StoreOp> stores;
+  for (Operation *op : planes.boundary) {
+    if (auto load = dyn_cast<triton::LoadOp>(op))
+      loads.push_back(load);
+    else
+      stores.push_back(cast<triton::StoreOp>(op));
+  }
+
+  if (loads.empty())
+    return generic.emitError("expected at least one tt.load in the body");
+  if (stores.size() != 1)
+    return generic.emitError()
+           << "expected exactly one tt.store in the body, got " << stores.size()
+           << "; multi-output generics are not yet supported";
+
+  auto tile = ttcore::TileType::getDefaultShape();
+
+  auto addOperand = [&](Operation *boundaryOp, Value ptr,
+                        RankedTensorType valueTy) -> LogicalResult {
+    GenericPlan::Operand operand;
+    operand.boundaryOp = boundaryOp;
+    operand.elementType = valueTy.getElementType();
+
+    // TODO: trace `ptr` back to the kernel argument. Two legs:
+    //   1. inside the body, walk addptr/splat/broadcast back to a body
+    //      BlockArgument -- TagInputOutputs.cpp:23 already has this half;
+    //   2. map that block arg to an `ins` operand via
+    //      argIndex - generic.getInsArgOffset(), then walk that operand out to
+    //      the enclosing triton::FuncOp BlockArgument.
+    operand.funcArg = BlockArgument();
+    if (!operand.funcArg)
+      return boundaryOp->emitOpError(
+          "TODO: pointer-to-kernel-argument tracing is not implemented");
+
+    FailureOr<SmallVector<int64_t>> logicalShape =
+        readLogicalShape(funcOp, operand.funcArg.getArgNumber(), boundaryOp);
+    if (failed(logicalShape))
+      return failure();
+    operand.logicalShape = std::move(*logicalShape);
+
+    // Only the trailing two dimensions are tiled; any leading dims are batch.
+    const size_t rank = operand.logicalShape.size();
+    for (auto [dim, extent] : llvm::enumerate(operand.logicalShape)) {
+      int64_t divisor = dim + 2 >= rank ? tile[dim - (rank - 2)] : 1;
+      if (extent % divisor != 0)
+        return boundaryOp->emitOpError()
+               << "kernel argument #" << operand.funcArg.getArgNumber()
+               << " dimension " << dim << " (" << extent
+               << ") is not a multiple of the tile extent " << divisor;
+      operand.tensorTiles.push_back(extent / divisor);
+    }
+
+    plan.operands.push_back(std::move(operand));
+    return success();
+  };
+
+  // TODO: two loads of the same kernel argument currently become two distinct
+  // operands. Legal, but it hands d2m two `ins` that alias; dedup once we
+  // can prove the two accesses have the same indexing map.
+  for (triton::LoadOp load : loads)
+    if (failed(addOperand(load, load.getPtr(),
+                          cast<RankedTensorType>(load.getType()))))
+      return failure();
+  plan.numInputs = plan.operands.size();
+
+  triton::StoreOp store = stores.front();
+  if (failed(addOperand(store, store.getPtr(),
+                        cast<RankedTensorType>(store.getValue().getType()))))
+    return failure();
+
+  plan.dataOps.assign(planes.data.begin(), planes.data.end());
+  return success();
+}
+
 // Largest `d` such that `d` divides `n` and `d <= limit`. Always >= 1.
 static int64_t largestDivisorAtMost(int64_t n, int64_t limit) {
   for (int64_t d = std::min(n, limit); d > 1; --d)
@@ -156,7 +287,6 @@ LogicalResult GenericPlan::setIterationSpace(ArrayRef<int64_t> workerGrid,
           "operands do not all cover the same tile shape; broadcasting is not "
           "yet supported");
 
-  ModuleOp mod = diagnosticAnchorOp->getParentOfType<ModuleOp>();
   if (workerGrid.size() != tiles.size())
     return diagnosticAnchorOp->emitError()
            << "worker grid rank (" << workerGrid.size()
@@ -240,12 +370,17 @@ mlir::FailureOr<GenericPlan> GenericPlan::build(cpu::GenericOp generic) {
 
   Planes planes = *planeResult;
 
-  // TODO: populate the plan
+  // Operands first: setIterationSpace reads their tensorTiles.
+  if (failed(populateOperands(generic, plan, planes)))
+    return failure();
+
   ArrayRef<int64_t> workerGrid = tt::TritonTenstorrentDialect::getGridAttr(
                                      generic->getParentOfType<ModuleOp>())
                                      .getShape();
   if (failed(plan.setIterationSpace(workerGrid, generic)))
     return failure();
+
+  // TODO: indexingMap per operand, plus the persistent-loop mapping.
 
   return plan;
 }
