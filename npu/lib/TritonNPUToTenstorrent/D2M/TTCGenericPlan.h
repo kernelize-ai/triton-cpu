@@ -11,11 +11,52 @@ namespace mlir {
 namespace triton {
 namespace npu {
 
-class GenericPlan {
-public:
-};
+struct GenericPlan {
 
-mlir::FailureOr<GenericPlan> buildPlan(cpu::GenericOp);
+  GenericPlan() = default;
+
+  struct Operand {
+    BlockArgument funcArg;
+
+    SmallVector<int64_t> logicalShape;
+    SmallVector<int64_t> tensorTiles;
+
+    AffineMap indexingMap;
+
+    Type elementType;
+
+    bool isOutput = false;
+  };
+
+  // --- operands, ins-then-outs; order must match indexing_maps ---
+  SmallVector<Operand, 4> operands;
+  unsigned numInputs = 0;
+
+  // --- iteration space ---
+  SmallVector<int64_t> gridShape;
+  SmallVector<int64_t> blockFactors;
+  SmallVector<Attribute> iteratorTypes;
+
+  // --- body ---
+  SmallVector<Operation *> dataOps;            // topological order
+  DenseMap<Operation *, unsigned> loadOperand; // tt.load -> operand idx
+  Operation *storeOp = nullptr;                // only one store per generic
+
+  // --- masks ---
+  // ignored for now
+
+  ArrayRef<Operand> getInputs() const {
+    return ArrayRef<Operand>(operands).take_front(numInputs);
+  }
+  ArrayRef<Operand> getOutputs() const {
+    return ArrayRef<Operand>(operands).drop_front(numInputs);
+  }
+
+  LogicalResult setIterationSpace(ArrayRef<int64_t> workerGrid,
+                                  Operation *diagnosticAnchorOp);
+
+  static mlir::FailureOr<GenericPlan> build(cpu::GenericOp);
+};
 
 } // namespace npu
 } // namespace triton

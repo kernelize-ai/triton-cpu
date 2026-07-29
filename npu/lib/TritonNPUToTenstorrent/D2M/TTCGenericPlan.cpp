@@ -4,16 +4,24 @@
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
+#include "npu/include/Dialect/TritonTenstorrent/IR/Attributes.h"
+#include "npu/include/Dialect/TritonTenstorrent/IR/Dialect.h"
+
+#include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
+
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <algorithm>
 #include <deque>
+
 namespace mlir {
 namespace triton {
 namespace npu {
 
-namespace {
+namespace ttcore = ::mlir::tt::ttcore;
 
+namespace {
 struct Planes {
   SmallVector<Operation *> data; // topologically ordered
   SetVector<Operation *> control;
@@ -119,9 +127,73 @@ static mlir::FailureOr<Planes> classify(cpu::GenericOp generic) {
   return Planes{orderedDataOps, control, boundary};
 }
 
+// Largest `d` such that `d` divides `n` and `d <= limit`. Always >= 1.
+static int64_t largestDivisorAtMost(int64_t n, int64_t limit) {
+  for (int64_t d = std::min(n, limit); d > 1; --d)
+    if (n % d == 0)
+      return d;
+  return 1;
+}
+
 } // namespace
 
-mlir::FailureOr<GenericPlan> buildPlan(cpu::GenericOp generic) {
+LogicalResult GenericPlan::setIterationSpace(ArrayRef<int64_t> workerGrid,
+                                             Operation *diagnosticAnchorOp) {
+  MLIRContext *context = diagnosticAnchorOp->getContext();
+
+  if (operands.empty())
+    return diagnosticAnchorOp->emitError(
+        "cannot derive an iteration space: plan has no operands");
+
+  ArrayRef<int64_t> tiles = operands.front().tensorTiles;
+  if (tiles.size() < 2)
+    return diagnosticAnchorOp->emitError()
+           << "expected an operand tile shape of rank >= 2, got rank "
+           << tiles.size();
+  for (const GenericPlan::Operand &operand : operands)
+    if (!llvm::equal(operand.tensorTiles, tiles))
+      return diagnosticAnchorOp->emitError(
+          "operands do not all cover the same tile shape; broadcasting is not "
+          "yet supported");
+
+  ModuleOp mod = diagnosticAnchorOp->getParentOfType<ModuleOp>();
+  if (workerGrid.size() != tiles.size())
+    return diagnosticAnchorOp->emitError()
+           << "worker grid rank (" << workerGrid.size()
+           << ") does not match operand tile rank (" << tiles.size() << ")";
+
+  gridShape.clear();
+  blockFactors.clear();
+  iteratorTypes.clear();
+
+  // Bounding each grid dim by the corresponding worker grid dim also bounds
+  // the grid volume by the core count, so no separate volume check is needed.
+  for (auto [dim, extent] : llvm::enumerate(tiles)) {
+    int64_t grid = largestDivisorAtMost(extent, workerGrid[dim]);
+    gridShape.push_back(grid);
+    blockFactors.push_back(extent / grid);
+    // TODO: support reductions
+    iteratorTypes.push_back(
+        ttcore::IteratorTypeAttr::get(context, ttcore::IteratorType::Parallel));
+  }
+
+  // Never let a silent under-allocation look like full occupancy.
+  int64_t used = 1, available = 1;
+  for (int64_t g : gridShape)
+    used *= g;
+  for (int64_t g : workerGrid)
+    available *= g;
+  if (used < available)
+    diagnosticAnchorOp->emitRemark()
+        << "iteration space of " << tiles[0] << "x" << tiles[1]
+        << " tiles maps onto " << used << " of " << available
+        << " cores; no larger divisor of the tile extents "
+           "fits the worker grid";
+
+  return success();
+}
+
+mlir::FailureOr<GenericPlan> GenericPlan::build(cpu::GenericOp generic) {
   // check generic op metadata criteria
 
   // TODO: support generics with reductions
@@ -164,6 +236,15 @@ mlir::FailureOr<GenericPlan> buildPlan(cpu::GenericOp generic) {
 
   auto planeResult = classify(generic);
   if (failed(planeResult))
+    return failure();
+
+  Planes planes = *planeResult;
+
+  // TODO: populate the plan
+  ArrayRef<int64_t> workerGrid = tt::TritonTenstorrentDialect::getGridAttr(
+                                     generic->getParentOfType<ModuleOp>())
+                                     .getShape();
+  if (failed(plan.setIterationSpace(workerGrid, generic)))
     return failure();
 
   return plan;
