@@ -77,7 +77,7 @@ struct ConvertTritonCPUToLLVM
     ModuleAllocation allocation(
         mod,
         mlir::triton::cpu::getCPUAllocationAnalysisScratchSize(targetInfo));
-    ModuleMembarAnalysis membarPass(&allocation);
+    ModuleMembarAnalysis membarPass(allocation);
     membarPass.run();
 
     mlir::LowerToLLVMOptions option(context);
