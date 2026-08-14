@@ -139,7 +139,7 @@ void init_triton_cpu(py::module_ &m) {
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
     registry.insert<mlir::triton::cpu::TritonCPUDialect>();
-    mlir::registerArmSMEDialectTranslation(registry); 
+    mlir::registerArmSMEDialectTranslation(registry);
 
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
