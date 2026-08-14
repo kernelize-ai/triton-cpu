@@ -29,6 +29,7 @@
 #include "mlir/Conversion/ArmSMEToLLVM/ArmSMEToLLVM.h"
 #include "mlir/Conversion/ArmSMEToSCF/ArmSMEToSCF.h"
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
+#include "mlir/Target/LLVMIR/Dialect/ArmSME/ArmSMEToLLVMIRTranslation.h"
 
 #include <iostream>
 
@@ -138,6 +139,7 @@ void init_triton_cpu(py::module_ &m) {
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
     registry.insert<mlir::triton::cpu::TritonCPUDialect>();
+    mlir::registerArmSMEDialectTranslation(registry);
 
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
