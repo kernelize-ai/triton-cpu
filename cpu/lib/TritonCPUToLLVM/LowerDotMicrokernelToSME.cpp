@@ -325,8 +325,8 @@ static Value buildContiguousPtrTensor(OpBuilder &rewriter, Location loc,
   // stride-1 dimension distinct for the vectorizer.
   auto offTy = RankedTensorType::get({rows, cols}, i32Ty, enc);
   auto ptrTensorTy = RankedTensorType::get(
-      {rows, cols}, PointerType::get(likeTy.getElementType(), /*addrSpace=*/0),
-      enc);
+      {rows, cols},
+      PointerType::get(likeTy.getElementType(), PtrAddrSpace::Descriptor), enc);
   Value ptr = triton::SplatOp::create(rewriter, loc, ptrTensorTy, basePtr);
   ptr = triton::AddPtrOp::create(
       rewriter, loc, ptrTensorTy, ptr,
@@ -438,16 +438,18 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
   TritonLLVMOpBuilder b(loc, rewriter);
 
   Value aBuf = cpu::LocalAllocOp::create(
-      rewriter, loc, PointerType::get(f32_ty, 0), desc.blockK * desc.blockM);
+      rewriter, loc, PointerType::get(f32_ty, PtrAddrSpace::Descriptor),
+      desc.blockK * desc.blockM);
   Value bBuf = cpu::LocalAllocOp::create(
-      rewriter, loc, PointerType::get(f32_ty, 0), desc.blockK * desc.blockN);
+      rewriter, loc, PointerType::get(f32_ty, PtrAddrSpace::Descriptor),
+      desc.blockK * desc.blockN);
 
   auto cInitTy = cast<RankedTensorType>(desc.generic->getResult(0).getType());
   Value cZero = arith::ConstantOp::create(
       rewriter, loc, cast<TypedAttr>(rewriter.getZeroAttr(cInitTy)));
-  Value cBuf =
-      cpu::LocalAllocOp::create(rewriter, loc, PointerType::get(f32_ty, 0),
-                                desc.blockM * desc.blockN, cZero);
+  Value cBuf = cpu::LocalAllocOp::create(
+      rewriter, loc, PointerType::get(f32_ty, PtrAddrSpace::Descriptor),
+      desc.blockM * desc.blockN, cZero);
 
   auto kLoop = scf::ForOp::create(rewriter, loc, b.i32_val(0), desc.kFull,
                                   b.i32_val(desc.blockK), ValueRange{});
