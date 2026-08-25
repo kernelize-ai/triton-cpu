@@ -252,7 +252,7 @@ class CPUBackend(BaseBackend):
         context = llvm.context()
         llvm_mod = llvm.to_module(mod, context)
         cpu.attach_target_triple(llvm_mod, cpu.get_default_target_triple())
-        llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, options.features)
+        llvm.attach_datalayout(llvm_mod, cpu.get_default_target_triple(), options.arch, options.features, "")
 
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3, options.arch, options.features, [], options.enable_fp_fusion)
         metadata["shared"] = src.get_int_attr("ttg.shared")
@@ -273,7 +273,7 @@ class CPUBackend(BaseBackend):
         if len(features) == 0 and options.arch == 'apple-m4':
             features = "+sme"
         return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, features, flags,
-                                     options.enable_fp_fusion, False, False)
+                                     options.enable_fp_fusion, False, False, "")
 
     @staticmethod
     def make_library(src, metadata, options):
