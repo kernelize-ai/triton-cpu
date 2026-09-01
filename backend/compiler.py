@@ -273,7 +273,7 @@ class CPUBackend(BaseBackend):
         if len(features) == 0 and options.arch == 'apple-m4':
             features = "+sme"
         return llvm.translate_to_asm(src, cpu.get_default_target_triple(), options.arch, features, flags,
-                                     options.enable_fp_fusion, False, False, "")
+                                     options.enable_fp_fusion, False, False)
 
     @staticmethod
     def make_library(src, metadata, options):
