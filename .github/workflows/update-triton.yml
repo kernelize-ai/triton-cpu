@@ -69,6 +69,7 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           add-paths: |
             triton.txt
             .clang-format
