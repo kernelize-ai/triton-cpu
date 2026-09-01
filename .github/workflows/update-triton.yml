@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # Every day at 08:00 UTC
+    - cron: '0 19 * * 0'  # Every Sunday at 19:00 UTC
   workflow_dispatch:     # Allow manual trigger
 
 jobs:
@@ -69,6 +69,7 @@ jobs:
         if: steps.compare.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           add-paths: |
             triton.txt
             .clang-format
