@@ -78,6 +78,12 @@ public:
     }
 
     SmallVector<unsigned> newSizePerThread = {*vectorSizeA, *vectorSizeB};
+    // The operand vector widths come from the K-contiguous loads and may exceed
+    // the dot's own M/N dims (e.g. a 2x4 result fed by K=32 loads). Clamp so
+    // sizePerThread never exceeds the result shape; downstream (tile-and-fuse,
+    // the FMA dot lowering) reads sizePerThread directly and assumes it fits.
+    for (auto [i, dim] : llvm::enumerate(tensorTy.getShape()))
+      newSizePerThread[i] = std::min<unsigned>(newSizePerThread[i], dim);
     auto oldSizePerThread = blockedEncoding.getSizePerThread();
     if (llvm::equal(oldSizePerThread, newSizePerThread))
       return failure();
