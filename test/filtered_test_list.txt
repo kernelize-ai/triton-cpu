@@ -6,6 +6,7 @@ test_atomic_cas
 test_tensor_atomic_cas
 test_tensor_atomic_use_result
 test_atomic_min_max_neg_zero
+test_atomic_load_store
 test_sum_dtype
 test_no_rematerialization_op
 test_abs_fp8
