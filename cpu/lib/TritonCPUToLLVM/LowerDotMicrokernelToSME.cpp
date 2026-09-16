@@ -421,9 +421,7 @@ static void emitContiguousStore(OpBuilder &rewriter, Location loc, Block *body,
       /*colOffset=*/body->getArgument(1), // col (M or N) offset
       /*rowStride=*/rowStride, /*colStride=*/1,
       cast<RankedTensorType>(value.getType()));
-  triton::StoreOp::create(rewriter, loc, ptrs, value,
-                          triton::CacheModifier::NONE,
-                          triton::EvictionPolicy::NORMAL);
+  triton::StoreOp::create(rewriter, loc, ptrs, value);
 }
 
 void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
@@ -532,11 +530,9 @@ void rewriteExistingFunctionBody(DotDescriptor &desc, triton::FuncOp funcOp,
     Value cPtrs = buildContiguousPtrTensor(
         rewriter, loc, cArg, /*rowOffset=*/mOff, /*colOffset=*/nOff,
         /*rowStride=*/desc.blockN, /*colStride=*/1, cTileTy);
-    Value cTile = triton::LoadOp::create(rewriter, loc, cPtrs,
-                                         triton::CacheModifier::NONE,
-                                         triton::EvictionPolicy::NORMAL,
-                                         /*isVolatile=*/false)
-                      .getResult();
+    Value cTile =
+        triton::LoadOp::create(rewriter, loc, cPtrs, /*isVolatile=*/false)
+            .getResult();
     cpu::YieldOp::create(rewriter, loc, ValueRange{cTile});
   }
 
