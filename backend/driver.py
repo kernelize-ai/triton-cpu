@@ -9,8 +9,9 @@ import importlib.resources
 from pathlib import Path
 
 import triton.backends.cpu.knobs as cpu_knobs
+from triton._utils import find_paths_if
 from triton.runtime.build import compile_module_from_src
-from triton.backends.driver import DriverBase
+from triton.backends.driver import DriverBase, _is_descriptor, _parse_descriptor, wrap_handle_tensordesc_impl
 from triton.backends.compiler import GPUTarget
 
 # for locating libTritonCPURuntime
@@ -158,6 +159,26 @@ def ty_to_cpp(ty):
         "f32": "float",
         "fp64": "double",
     }[ty]
+
+
+def expand_signature(signature):
+    # A tensor descriptor is passed as its base pointer, followed by the shape
+    # and strides the frontend adds for it.
+    def expand(ty):
+        if isinstance(ty, tuple):
+            return [tuple(t for inner in ty for t in expand(inner))]
+        if _is_descriptor(ty):
+            dtype, ndim = _parse_descriptor(ty)
+            return ["*" + dtype] + ["i32"] * ndim + ["i64"] * ndim
+        return [ty]
+
+    return [t for ty in signature for t in expand(ty)]
+
+
+def make_tensordesc_arg(arg, metadata, base_args):
+    assert arg.padding == "zero" and not arg.round_f32_to_tf32, \
+        "CPU tensor descriptors support only zero padding without TF32 rounding"
+    return [arg.base, *arg.shape, *arg.strides]
 
 
 def make_launcher(constants, signature, shared_mem_size, warp_size):
@@ -438,11 +459,18 @@ class CPULauncher(object):
         arg_idx = lambda x: (src.fn.arg_names.index(x), ) if isinstance(x, str) else x
         constants = {arg_idx(idx): value for idx, value in constants.items()}
         signature = {idx: value for idx, value in src.signature.items()}
-        src = make_launcher(constants, signature, metadata.shared, metadata.warp_size)
+        expanded_signature = dict(enumerate(expand_signature(signature.values())))
+        src = make_launcher(constants, expanded_signature, metadata.shared, metadata.warp_size)
         mod = compile_module_from_src(src, name="__triton_launcher", library_dirs=library_dirs(),
                                       include_dirs=include_dirs(), libraries=libraries, ccflags=system_ccflags(),
                                       language="c++")
         self.launch = mod.launch
+        if find_paths_if(tuple(signature.values()), lambda _, ty: _is_descriptor(ty)):
+            # The tensordesc wrapper takes the kernel arguments, which follow the
+            # 9 launch arguments, as one trailing tuple.
+            launch = wrap_handle_tensordesc_impl(lambda *args: mod.launch(*args[:-1], *args[-1]), signature, [],
+                                                 make_tensordesc_arg)
+            self.launch = lambda *args: launch(*args[:9], args[9:])
 
     def __call__(self, gridX, gridY, gridZ, stream, function, *args):
         self.launch(gridX, gridY, gridZ, stream, function, *args)

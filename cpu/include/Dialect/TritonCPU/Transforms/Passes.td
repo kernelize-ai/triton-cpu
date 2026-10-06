@@ -70,6 +70,18 @@ def MakePersistentKernelPass : Pass<"make-persistent-kernel", "mlir::ModuleOp"> 
     ];
 }
 
+def TritonCPURewriteTensorDescArgs : Pass<"tritoncpu-rewrite-tensor-desc-args", "mlir::ModuleOp"> {
+  let summary = "Rebuild kernel tensor descriptor arguments from their shape and stride arguments";
+
+  let description = [{
+    The frontend follows each tensor descriptor kernel argument with its shape
+    and strides. This pass passes the descriptor as its base pointer instead and
+    rebuilds it with `tt.make_tensor_descriptor` from those arguments, so that
+    lowering the descriptor does not add a second set of shape and stride
+    arguments to the kernel.
+  }];
+}
+
 def TritonCPUTileAndFuse : Pass<"tritoncpu-tile-and-fuse", "mlir::ModuleOp"> {
   let summary = "Wrap elementwise op chains in ttc.generic for tiled lowering";
 
