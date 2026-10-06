@@ -13,7 +13,7 @@ index a294b22e3..517a82938 100644
  #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
  #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
  #include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
-@@ -155,6 +159,18 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
+@@ -155,6 +159,19 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
      plugin.registerDialects(registry);
    }
  
@@ -24,6 +24,7 @@ index a294b22e3..517a82938 100644
 +  mlir::triton::cpu::registerConvertMaskedOpsToLLVM();
 +  mlir::triton::cpu::registerMakePersistentKernelPass();
 +  mlir::triton::cpu::registerTritonCPUAccelerateMatmulPass();
++  mlir::triton::cpu::registerTritonCPURewriteTensorDescArgs();
 +  mlir::triton::cpu::registerTritonCPUTileAndFuse();
 +  mlir::triton::cpu::registerTritonCPUCoalesce();
 +  mlir::triton::cpu::registerOutlineDotMicrokernel();
