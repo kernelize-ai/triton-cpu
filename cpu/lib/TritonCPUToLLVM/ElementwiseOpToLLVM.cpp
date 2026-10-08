@@ -155,6 +155,8 @@ void mlir::triton::cpu::populateElementwiseOpToLLVMPatterns(
   POPULATE_OP(arith::TruncFOp, LLVM::FPTruncOp);
 
   POPULATE_OP(triton::PreciseDivFOp, LLVM::FDivOp);
+  // CPUs have no faster approximate division; an exact one is within bounds.
+  POPULATE_OP(triton::ApproxDivFOp, LLVM::FDivOp);
   POPULATE_OP(triton::PreciseSqrtOp, LLVM::SqrtOp);
 
 #undef POPULATE_OP
