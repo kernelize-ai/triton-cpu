@@ -211,7 +211,8 @@ Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
 
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
-                            unsigned reduceLaneIdMask) const {
+                            unsigned reduceLaneIdMask,
+                            unsigned /*broadcastLaneIdMask*/) const {
   auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
   unsigned int warpSize =
       mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.threads-per-warp"))
