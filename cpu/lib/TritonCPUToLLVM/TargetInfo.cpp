@@ -127,8 +127,13 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
   return load;
 }
 
-Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
-                             int i) const {
+// Exchange `val` between the lanes of a warp through the warp's shared memory
+// buffer: every lane stores its value, then loads the value of the lane that
+// `getTargetLane` computes from its own thread id.
+static Value shuffleThroughShared(
+    const TargetInfo &targetInfo, RewriterBase &rewriter, Location loc,
+    Value val,
+    function_ref<Value(TritonLLVMOpBuilder &, Value)> getTargetLane) {
   auto mod = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
 
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -137,8 +142,7 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   if (auto sharedAttr = mod->getAttr("ttg.shared")) {
     shared = cast<IntegerAttr>(sharedAttr).getInt();
   }
-  assert(shared > 0 &&
-         "shared memory allocation is required for shuffle XOR operation");
+  assert(shared > 0 && "shared memory allocation is required for shuffles");
 
   // Warps have their own shared memory buffer for synchronization after shared
   // memory allocations for the kernel. The warp shared memory buffer alocates
@@ -146,7 +150,7 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   // scalar reductions. The barrier shared memory buffer consists of two 64-byte
   // allocations after the warp synchronization shared memory buffer.
   auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
-                                          getSharedAddressSpace());
+                                          targetInfo.getSharedAddressSpace());
   auto funcOp = val.getParentRegion()->getParentOfType<FunctionOpInterface>();
   // warp synchronization buffer is after per-op shared memory allocations
   Value smemBase = b.gep(ptrTy, i8_ty, LLVM::getStackPointer(rewriter, funcOp),
@@ -158,18 +162,18 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   unsigned iWarpSize = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
   unsigned int numWarps =
       mlir::cast<mlir::IntegerAttr>(mod->getAttr("ttg.num-warps")).getInt();
-  assert(numWarps == 1 && "only 1 warp supported for xor reductions on CPU");
+  assert(numWarps == 1 && "only 1 warp supported for shuffles on CPU");
 
   unsigned int elemSizeBits = val.getType().getIntOrFloatBitWidth();
 
   // store our value to smem
   Value slot = b.gep(ptrTy, int_ty(elemSizeBits), smemBase, threadId);
-  storeDShared(rewriter, loc, slot, Value(), val, b.true_val());
+  targetInfo.storeDShared(rewriter, loc, slot, Value(), val, b.true_val());
 
   b.barrier(triton::gpu::AddrSpace::None);
 
   // compute target lane id
-  Value targetThreadId = b.xor_(threadId, b.i32_val(i));
+  Value targetThreadId = getTargetLane(b, threadId);
   Value targetPtr =
       b.gep(ptrTy, int_ty(elemSizeBits), smemBase, targetThreadId);
   // load from target lane
@@ -180,6 +184,14 @@ Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
   return loaded;
 }
 
+Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
+                             int i) const {
+  return shuffleThroughShared(*this, rewriter, loc, val,
+                              [&](TritonLLVMOpBuilder &b, Value threadId) {
+                                return b.xor_(threadId, b.i32_val(i));
+                              });
+}
+
 Value TargetInfo::shuffleUp(RewriterBase &rewriter, Location loc, Value val,
                             int i) const {
   llvm::report_fatal_error("shuffleUp not supported on CPU");
@@ -188,14 +200,15 @@ Value TargetInfo::shuffleUp(RewriterBase &rewriter, Location loc, Value val,
 
 Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
-  llvm::report_fatal_error("shuffleIdx not supported on CPU");
-  return Value();
+  return shuffleThroughShared(
+      *this, rewriter, loc, val,
+      [&](TritonLLVMOpBuilder &b, Value) { return b.i32_val(i); });
 }
 
 Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                              Value i) const {
-  llvm::report_fatal_error("shuffleIdx not supported on CPU");
-  return Value();
+  return shuffleThroughShared(*this, rewriter, loc, val,
+                              [&](TritonLLVMOpBuilder &, Value) { return i; });
 }
 
 Value TargetInfo::permute(RewriterBase &rewriter, Location loc, Value a,
