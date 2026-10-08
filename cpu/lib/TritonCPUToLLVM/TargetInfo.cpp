@@ -60,6 +60,19 @@ StringRef TargetInfo::getAtomicSyncScope(MemSyncScope scope) const {
   return "";
 }
 
+Value TargetInfo::loadRelaxed(RewriterBase &rewriter, Location loc, Value ptr,
+                              Type valueTy, Value pred,
+                              MemSyncScope scope) const {
+  llvm::report_fatal_error("relaxed atomic load not yet supported on CPU");
+  return Value();
+}
+
+void TargetInfo::storeRelaxed(RewriterBase &rewriter, Location loc, Value ptr,
+                              Value value, Value pred,
+                              MemSyncScope scope) const {
+  llvm::report_fatal_error("relaxed atomic store not yet supported on CPU");
+}
+
 void TargetInfo::barrier(Location loc, RewriterBase &rewriter,
                          triton::gpu::AddrSpace targets) const {
   auto b = TritonLLVMOpBuilder(loc, rewriter);

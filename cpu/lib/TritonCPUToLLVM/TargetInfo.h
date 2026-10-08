@@ -64,6 +64,12 @@ public:
                   triton::ReduceOp op,
                   unsigned reduceLaneIdMask) const override;
 
+  Value loadRelaxed(RewriterBase &rewriter, Location loc, Value ptr,
+                    Type valueTy, Value pred,
+                    MemSyncScope scope) const override;
+  void storeRelaxed(RewriterBase &rewriter, Location loc, Value ptr,
+                    Value value, Value pred, MemSyncScope scope) const override;
+
   void printf(RewriterBase &rewriter, Value formatStrStart,
               int formatStrByteCount, ValueRange args,
               ArrayRef<bool> isSigned = {}) const override;
