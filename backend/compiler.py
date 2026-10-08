@@ -39,7 +39,7 @@ class CPUOptions:
     debug: bool = False
     arch: str = None
     features: str = ""
-    enable_fp_fusion: bool = True
+    enable_fp_fusion: bool = False
     backend_name: str = "cpu"
     sanitize_overflow: bool = True
     instrumentation_mode: str = ""
@@ -83,12 +83,11 @@ class CPUBackend(BaseBackend):
         target_features = feature_override if feature_override else get_cpu_features()
 
         args = {"arch": get_cpu_name(), "features": target_features}
-        if "enable_fp_fusion" not in options:
-            args["enable_fp_fusion"] = knobs.language.default_fp_fusion
         args.update(
             {k: options[k]
              for k in CPUOptions.__dataclass_fields__.keys()
              if k in options if options[k] is not None})
+        args["enable_fp_fusion"] = knobs.language.fp_fusion_enabled(args.get("enable_fp_fusion"))
 
         return CPUOptions(**args)
 
