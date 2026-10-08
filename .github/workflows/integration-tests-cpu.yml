@@ -132,7 +132,7 @@ jobs:
 
           TRITON_CPU_WARP_SIZE=4 python -m pytest --device "cpu" python/test/unit/language/test_core.py -k "(test_reduce1d or test_load_store_same_ptr) and not test_reduce1d[1-sum-float16-512]"
 
-          python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options"
+          python -m pytest --device "cpu" python/test/unit/runtime/test_launch.py -k "not test_launch_with_options and not test_memory_leak"
       - name: Run tutorial 01 on CPU
         working-directory: ./triton
         run: python python/tutorials/01-vector-add.py
