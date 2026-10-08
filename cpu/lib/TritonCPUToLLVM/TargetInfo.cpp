@@ -268,11 +268,6 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   return true;
 }
 
-std::string TargetInfo::getMulhiFuncName(Type resultElementTy) const {
-  llvm::report_fatal_error("getMulhiFuncName not supported on CPU");
-  return "";
-}
-
 void TargetInfo::printf(RewriterBase &rewriter, Value formatStrStart,
                         int formatStrByteCount, ValueRange args,
                         ArrayRef<bool> isSigned) const {
